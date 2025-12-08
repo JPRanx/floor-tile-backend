@@ -1,0 +1,67 @@
+"""
+Custom exceptions module.
+
+See STANDARDS_ERRORS.md for usage patterns.
+"""
+
+from exceptions.errors import (
+    # Base exceptions
+    AppError,
+    NotFoundError,
+    ValidationError,
+    ConflictError,
+    DuplicateError,
+    ExternalServiceError,
+    DatabaseError,
+
+    # Product-specific
+    ProductNotFoundError,
+    ProductSKUExistsError,
+    InvalidCategoryError,
+    InvalidRotationError,
+
+    # Excel parser
+    ExcelParseError,
+    InvalidSKUError,
+
+    # Inventory
+    InventoryNotFoundError,
+    InventoryUploadError,
+
+    # Sales
+    SalesNotFoundError,
+
+    # Settings
+    SettingNotFoundError,
+)
+
+__all__ = [
+    # Base
+    "AppError",
+    "NotFoundError",
+    "ValidationError",
+    "ConflictError",
+    "DuplicateError",
+    "ExternalServiceError",
+    "DatabaseError",
+
+    # Product
+    "ProductNotFoundError",
+    "ProductSKUExistsError",
+    "InvalidCategoryError",
+    "InvalidRotationError",
+
+    # Excel parser
+    "ExcelParseError",
+    "InvalidSKUError",
+
+    # Inventory
+    "InventoryNotFoundError",
+    "InventoryUploadError",
+
+    # Sales
+    "SalesNotFoundError",
+
+    # Settings
+    "SettingNotFoundError",
+]

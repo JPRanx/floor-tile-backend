@@ -1,0 +1,111 @@
+"""
+Sales record schemas.
+
+Tracks weekly sales per product from owner Excel uploads.
+"""
+
+from datetime import date, datetime
+from typing import Optional
+from decimal import Decimal
+from pydantic import Field, field_validator
+
+from models.base import BaseSchema, TimestampMixin
+
+
+class SalesRecordCreate(BaseSchema):
+    """Schema for creating a sales record."""
+
+    product_id: str = Field(..., description="Product UUID")
+    week_start: date = Field(..., description="Start of the week (Monday)")
+    quantity_m2: Decimal = Field(..., ge=0, description="Sales quantity in m²")
+
+    @field_validator("quantity_m2", mode="before")
+    @classmethod
+    def round_quantity(cls, v):
+        """Round to 2 decimal places."""
+        if v is not None:
+            return round(Decimal(str(v)), 2)
+        return v
+
+    @field_validator("week_start", mode="before")
+    @classmethod
+    def parse_date(cls, v):
+        """Parse date from string or datetime."""
+        if isinstance(v, str):
+            return date.fromisoformat(v)
+        if isinstance(v, datetime):
+            return v.date()
+        return v
+
+
+class SalesRecordUpdate(BaseSchema):
+    """Schema for updating a sales record."""
+
+    week_start: Optional[date] = None
+    quantity_m2: Optional[Decimal] = Field(None, ge=0)
+
+    @field_validator("quantity_m2", mode="before")
+    @classmethod
+    def round_quantity(cls, v):
+        """Round to 2 decimal places."""
+        if v is not None:
+            return round(Decimal(str(v)), 2)
+        return v
+
+
+class SalesRecordResponse(TimestampMixin, BaseSchema):
+    """Schema for sales record response."""
+
+    id: str
+    product_id: str
+    week_start: date
+    quantity_m2: Decimal
+
+    @field_validator("quantity_m2", mode="before")
+    @classmethod
+    def ensure_decimal(cls, v):
+        """Ensure quantity is Decimal."""
+        if v is not None:
+            return Decimal(str(v))
+        return v
+
+
+class SalesRecordWithProduct(SalesRecordResponse):
+    """Sales record with product details."""
+
+    sku: str
+    category: str
+    rotation: Optional[str] = None
+
+
+class SalesListResponse(BaseSchema):
+    """Paginated sales list response."""
+
+    data: list[SalesRecordResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class SalesHistoryResponse(BaseSchema):
+    """Sales history for a single product."""
+
+    product_id: str
+    sku: str
+    records: list[SalesRecordResponse]
+    total_m2: Decimal
+    weeks_count: int
+
+
+class SalesUploadResponse(BaseSchema):
+    """Response from sales upload."""
+
+    created: int
+    records: list[SalesRecordResponse]
+
+
+class BulkSalesCreate(BaseSchema):
+    """Schema for bulk sales creation."""
+
+    records: list[SalesRecordCreate]
