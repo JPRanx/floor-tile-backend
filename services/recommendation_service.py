@@ -69,27 +69,31 @@ class RecommendationService:
 
         If total exceeds capacity, scale down proportionally.
 
+        Optimized: Uses batch query for sales instead of N queries.
+
         Returns:
             Tuple of (allocations list, scale_factor)
         """
         logger.info("calculating_warehouse_allocations")
 
-        # Get all active products
+        # Get all active products (1 query)
         products, _ = self.product_service.get_all(
             page=1,
             page_size=1000,
             active_only=True
         )
 
+        # Get recent sales for ALL products in ONE query (was N queries!)
+        sales_by_product = self.sales_service.get_recent_sales_all(
+            weeks=self.sales_weeks
+        )
+
         allocations = []
         lead_time_sqrt = Decimal(str(sqrt(self.lead_time)))
 
         for product in products:
-            # Get sales history (last 4 weeks)
-            sales_history = self.sales_service.get_history(
-                product.id,
-                limit=self.sales_weeks
-            )
+            # Get pre-fetched sales history for this product
+            sales_history = sales_by_product.get(product.id, [])
 
             weeks_of_data = len(sales_history)
 
