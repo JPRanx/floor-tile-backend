@@ -111,13 +111,20 @@ async def upload_inventory(file: UploadFile = File(...)):
         content = await file.read()
         file_obj = BytesIO(content)
 
-        # Get known SKUs from products table
+        # Get products with owner_code mappings
         product_service = get_product_service()
         products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
-        known_skus = {p.sku: p.id for p in products}
+
+        # Build lookup: owner_code -> product_id
+        # Excel SKU column contains owner codes (102, 119, etc.)
+        known_owner_codes = {
+            p.owner_code: p.id
+            for p in products
+            if p.owner_code is not None
+        }
 
         # Parse Excel file
-        parse_result = parse_owner_excel(file_obj, known_skus)
+        parse_result = parse_owner_excel(file_obj, known_owner_codes)
 
         # Check for errors
         if not parse_result.success:

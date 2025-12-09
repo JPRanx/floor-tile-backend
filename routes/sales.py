@@ -70,35 +70,39 @@ async def upload_sales(file: UploadFile = File(...)):
         SalesUploadResponse with created records
     """
     try:
-        # Get known SKUs from products
+        # Get products with owner_code mappings
         product_service = get_product_service()
         products, _ = product_service.get_all(page=1, page_size=1000, active_only=False)
-        known_skus = {p.sku for p in products}
+
+        # Build lookup: owner_code -> product_id
+        # Excel SKU column contains owner codes (102, 119, etc.)
+        known_owner_codes = {
+            p.owner_code: p.id
+            for p in products
+            if p.owner_code is not None
+        }
 
         # Parse Excel file
         contents = await file.read()
-        parse_result = parse_owner_excel(contents, known_skus)
+        parse_result = parse_owner_excel(contents, known_owner_codes)
 
         # If there are errors, reject entire upload
         if parse_result.errors:
             raise ExcelParseError(
                 message=f"Upload failed with {len(parse_result.errors)} errors",
-                details={"errors": parse_result.errors}
+                details={"errors": [e.__dict__ for e in parse_result.errors]}
             )
 
-        # Create SKU to product_id mapping
-        sku_to_id = {p.sku: p.id for p in products}
-
-        # Convert parsed records to SalesRecordCreate
-        sales_records = []
-        for record in parse_result.sales_records:
-            product_id = sku_to_id.get(record["sku"])
-            if product_id:
-                sales_records.append(SalesRecordCreate(
-                    product_id=product_id,
-                    week_start=record["week_start"],
-                    quantity_m2=record["quantity_m2"]
-                ))
+        # Convert parsed sales records to SalesRecordCreate
+        # product_id already resolved by parser
+        sales_records = [
+            SalesRecordCreate(
+                product_id=record.product_id,
+                week_start=record.sale_date,
+                quantity_m2=record.quantity
+            )
+            for record in parse_result.sales
+        ]
 
         # Bulk create
         sales_service = get_sales_service()

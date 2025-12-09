@@ -108,15 +108,15 @@ class ExcelParseResult:
 
 def parse_owner_excel(
     file: Union[str, Path, BytesIO],
-    known_skus: dict[str, str],
+    known_owner_codes: dict[str, str],
 ) -> ExcelParseResult:
     """
     Parse owner upload Excel file.
 
     Args:
         file: File path (str/Path) or file-like object (BytesIO)
-        known_skus: Dict mapping SKU (uppercase) to product_id
-                   e.g., {"NOGAL CAFÉ": "uuid-123", ...}
+        known_owner_codes: Dict mapping owner_code (with leading zeros) to product_id
+                          e.g., {"0000102": "uuid-123", "0000119": "uuid-456", ...}
 
     Returns:
         ExcelParseResult with inventory, sales, and any errors
@@ -140,17 +140,17 @@ def parse_owner_excel(
 
     # Parse INVENTARIO sheet if present
     if "Inventario" in excel.sheet_names:
-        _parse_inventory_sheet(excel, known_skus, result)
+        _parse_inventory_sheet(excel, known_owner_codes, result)
     elif "INVENTARIO" in excel.sheet_names:
-        _parse_inventory_sheet(excel, known_skus, result, sheet_name="INVENTARIO")
+        _parse_inventory_sheet(excel, known_owner_codes, result, sheet_name="INVENTARIO")
     else:
         logger.debug("inventario_sheet_not_found")
 
     # Parse VENTAS sheet if present
     if "Ventas" in excel.sheet_names:
-        _parse_sales_sheet(excel, known_skus, result)
+        _parse_sales_sheet(excel, known_owner_codes, result)
     elif "VENTAS" in excel.sheet_names:
-        _parse_sales_sheet(excel, known_skus, result, sheet_name="VENTAS")
+        _parse_sales_sheet(excel, known_owner_codes, result, sheet_name="VENTAS")
     else:
         logger.debug("ventas_sheet_not_found")
 
@@ -167,7 +167,7 @@ def parse_owner_excel(
 
 def _parse_inventory_sheet(
     excel: pd.ExcelFile,
-    known_skus: dict[str, str],
+    known_owner_codes: dict[str, str],
     result: ExcelParseResult,
     sheet_name: str = "Inventario"
 ) -> None:
@@ -210,15 +210,18 @@ def _parse_inventory_sheet(
             continue
 
         row_errors = []
-        sku = str(row["sku"]).strip().upper()
+        # Owner's Excel SKU column contains integer codes (102, 119, etc.)
+        # Convert to string, pad to 7 chars to match DB format (0000102, 0000119)
+        owner_code = str(row["sku"]).strip().split(".")[0].zfill(7)
+        sku = owner_code  # Keep padded version for record
 
-        # Validate SKU
-        if sku not in known_skus:
+        # Validate owner_code against known mappings
+        if owner_code not in known_owner_codes:
             row_errors.append(ParseError(
                 sheet=sheet_name,
                 row=row_num,
                 field="SKU",
-                error=f"Unknown SKU: {sku}"
+                error=f"Unknown product code: {owner_code}"
             ))
 
         # Validate warehouse quantity
@@ -273,7 +276,7 @@ def _parse_inventory_sheet(
             result.inventory.append(InventoryRecord(
                 snapshot_date=parsed_date,
                 sku=sku,
-                product_id=known_skus[sku],
+                product_id=known_owner_codes[owner_code],
                 warehouse_qty=round(float(warehouse_qty), 2),
                 in_transit_qty=round(float(in_transit), 2),
                 notes=str(notes) if notes else None,
@@ -282,7 +285,7 @@ def _parse_inventory_sheet(
 
 def _parse_sales_sheet(
     excel: pd.ExcelFile,
-    known_skus: dict[str, str],
+    known_owner_codes: dict[str, str],
     result: ExcelParseResult,
     sheet_name: str = "Ventas"
 ) -> None:
@@ -325,15 +328,18 @@ def _parse_sales_sheet(
             continue
 
         row_errors = []
-        sku = str(row["sku"]).strip().upper()
+        # Owner's Excel SKU column contains integer codes (102, 119, etc.)
+        # Convert to string, pad to 7 chars to match DB format (0000102, 0000119)
+        owner_code = str(row["sku"]).strip().split(".")[0].zfill(7)
+        sku = owner_code  # Keep padded version for record
 
-        # Validate SKU
-        if sku not in known_skus:
+        # Validate owner_code against known mappings
+        if owner_code not in known_owner_codes:
             row_errors.append(ParseError(
                 sheet=sheet_name,
                 row=row_num,
                 field="SKU",
-                error=f"Unknown SKU: {sku}"
+                error=f"Unknown product code: {owner_code}"
             ))
 
         # Validate quantity
@@ -388,7 +394,7 @@ def _parse_sales_sheet(
             result.sales.append(SalesRecord(
                 sale_date=parsed_date,
                 sku=sku,
-                product_id=known_skus[sku],
+                product_id=known_owner_codes[owner_code],
                 quantity=round(float(quantity), 2),
                 customer=str(customer) if customer else None,
                 notes=str(notes) if notes else None,

@@ -96,12 +96,13 @@ class ProductUpdate(BaseSchema):
 class ProductResponse(BaseSchema, TimestampMixin):
     """
     Product response with all fields.
-    
+
     Used for GET responses.
     """
-    
+
     id: str = Field(..., description="Product UUID")
     sku: str = Field(..., description="Product SKU")
+    owner_code: Optional[str] = Field(None, description="Owner's Excel SKU code (e.g., '0000102', '0000119')")
     category: Category = Field(..., description="Product category")
     rotation: Optional[Rotation] = Field(None, description="Sales velocity")
     active: bool = Field(..., description="Whether product is active")
