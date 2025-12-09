@@ -261,6 +261,44 @@ class SalesService:
             )
             raise DatabaseError("insert", str(e))
 
+    def delete_by_date_range(self, start_date: date, end_date: date) -> int:
+        """
+        Delete sales records within a date range (inclusive).
+
+        Used to make uploads idempotent - delete existing before re-inserting.
+
+        Args:
+            start_date: Start of date range
+            end_date: End of date range
+
+        Returns:
+            Number of records deleted
+        """
+        logger.info(
+            "deleting_sales_by_date_range",
+            start=start_date.isoformat(),
+            end=end_date.isoformat()
+        )
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .delete()
+                .gte("week_start", start_date.isoformat())
+                .lte("week_start", end_date.isoformat())
+                .execute()
+            )
+
+            deleted = len(result.data) if result.data else 0
+
+            logger.info("sales_deleted_by_date_range", count=deleted)
+
+            return deleted
+
+        except Exception as e:
+            logger.error("delete_sales_by_date_range_failed", error=str(e))
+            raise DatabaseError("delete", str(e))
+
     def bulk_create(
         self,
         records: list[SalesRecordCreate]

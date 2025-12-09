@@ -67,7 +67,7 @@ def mock_settings():
     """Mock settings."""
     with patch("services.recommendation_service.settings") as mock:
         mock.lead_time_days = 45
-        mock.warehouse_capacity_pallets = 740
+        mock.warehouse_max_pallets = 740
         yield mock
 
 
@@ -164,7 +164,10 @@ class TestWarehouseAllocation:
             MagicMock(quantity_m2=Decimal("650")),
             MagicMock(quantity_m2=Decimal("750")),
         ]  # avg = 700
-        mock_sales_service.get_history.return_value = variable_sales
+        # Use get_recent_sales_all instead of get_history
+        mock_sales_service.get_recent_sales_all.return_value = {
+            sample_product.id: variable_sales
+        }
 
         allocations, scale = recommendation_service.allocate_warehouse_slots()
 
@@ -196,7 +199,7 @@ class TestWarehouseAllocation:
     ):
         """Products with no sales get zero allocation."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = []  # No sales
+        mock_sales_service.get_recent_sales_all.return_value = {}  # No sales
 
         allocations, _ = recommendation_service.allocate_warehouse_slots()
 
@@ -224,11 +227,12 @@ class TestWarehouseAllocation:
 
         mock_product_service.get_all.return_value = (products, 10)
 
-        # Each product: 700 m²/week × 4 weeks, high velocity
-        def get_history(product_id, limit=4):
-            return [MagicMock(quantity_m2=Decimal("2000")) for _ in range(4)]
-
-        mock_sales_service.get_history.side_effect = get_history
+        # Each product: high velocity sales data
+        sales_by_product = {
+            f"product-{i}": [MagicMock(quantity_m2=Decimal("2000")) for _ in range(4)]
+            for i in range(10)
+        }
+        mock_sales_service.get_recent_sales_all.return_value = sales_by_product
 
         allocations, scale = recommendation_service.allocate_warehouse_slots()
 
@@ -258,7 +262,9 @@ class TestWarehouseAllocation:
             MagicMock(quantity_m2=Decimal("600")),
             MagicMock(quantity_m2=Decimal("800")),
         ]
-        mock_sales_service.get_history.return_value = variable_sales
+        mock_sales_service.get_recent_sales_all.return_value = {
+            sample_product.id: variable_sales
+        }
 
         allocations, _ = recommendation_service.allocate_warehouse_slots()
 
@@ -290,7 +296,7 @@ class TestOrderRecommendations:
     ):
         """Recommendation created when current stock below target."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = sample_sales_history
+        mock_sales_service.get_recent_sales_all.return_value = {"product-uuid-123": sample_sales_history}
 
         # Low inventory: only 1000 m² (~7 pallets)
         low_inventory = MagicMock()
@@ -324,7 +330,7 @@ class TestOrderRecommendations:
     ):
         """No recommendation when stock equals or exceeds target."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = sample_sales_history
+        mock_sales_service.get_recent_sales_all.return_value = {"product-uuid-123": sample_sales_history}
 
         # High inventory: 10000 m² (well above any target)
         high_inventory = MagicMock()
@@ -359,7 +365,7 @@ class TestOrderRecommendations:
     ):
         """Warning generated when significantly over target."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = sample_sales_history
+        mock_sales_service.get_recent_sales_all.return_value = {"product-uuid-123": sample_sales_history}
 
         # Very high inventory
         high_inventory = MagicMock()
@@ -393,7 +399,7 @@ class TestOrderRecommendations:
     ):
         """Warning generated for products with no sales data."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = []  # No sales
+        mock_sales_service.get_recent_sales_all.return_value = {}  # No sales
         mock_inventory_service.get_latest.return_value = []
 
         no_sales_stockout = MagicMock()
@@ -433,7 +439,7 @@ class TestPriorityAssignment:
     ):
         """CRITICAL priority when order arrives after stockout."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = sample_sales_history
+        mock_sales_service.get_recent_sales_all.return_value = {"product-uuid-123": sample_sales_history}
 
         low_inventory = MagicMock()
         low_inventory.product_id = "product-uuid-123"
@@ -469,7 +475,7 @@ class TestPriorityAssignment:
     ):
         """HIGH priority for ALTA rotation products (not critical)."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = sample_sales_history
+        mock_sales_service.get_recent_sales_all.return_value = {"product-uuid-123": sample_sales_history}
 
         low_inventory = MagicMock()
         low_inventory.product_id = "product-uuid-123"
@@ -506,7 +512,7 @@ class TestPriorityAssignment:
     ):
         """LOW priority for BAJA rotation products."""
         mock_product_service.get_all.return_value = ([sample_product_low_rotation], 1)
-        mock_sales_service.get_history.return_value = sample_sales_history
+        mock_sales_service.get_recent_sales_all.return_value = {"product-uuid-456": sample_sales_history}
 
         low_inventory = MagicMock()
         low_inventory.product_id = "product-uuid-456"
@@ -565,9 +571,10 @@ class TestRecommendationSorting:
         mock_product_service.get_all.return_value = (products, 3)
 
         # Each needs ordering
-        mock_sales_service.get_history.return_value = [
-            MagicMock(quantity_m2=Decimal("700")) for _ in range(4)
-        ]
+        mock_sales_service.get_recent_sales_all.return_value = {
+            f"product-{i}": [MagicMock(quantity_m2=Decimal("700")) for _ in range(4)]
+            for i in range(3)
+        }
 
         # Low inventory for all
         inventories = [
@@ -630,7 +637,7 @@ class TestWarehouseStatus:
     ):
         """Warehouse utilization percentage calculated correctly."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
-        mock_sales_service.get_history.return_value = sample_sales_history
+        mock_sales_service.get_recent_sales_all.return_value = {"product-uuid-123": sample_sales_history}
 
         # 740 pallets × 135 m² = 99,900 m² capacity
         # 5000 m² current = ~37 pallets = ~5% utilization

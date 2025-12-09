@@ -331,7 +331,18 @@ class RecommendationService:
             (a.scaled_target_pallets or a.target_pallets)
             for a in allocations
         )
-        total_current = sum(r.current_pallets for r in recommendations)
+        # Calculate warehouse stock and in-transit separately
+        # Utilization is warehouse-only (matches Dashboard)
+        total_warehouse_m2 = sum(
+            Decimal(str(inv.warehouse_qty))
+            for inv in inventory_snapshots
+        )
+        total_in_transit_m2 = sum(
+            Decimal(str(inv.in_transit_qty))
+            for inv in inventory_snapshots
+        )
+        total_current = total_warehouse_m2 / M2_PER_PALLET  # Warehouse only for utilization
+        total_in_transit = total_in_transit_m2 / M2_PER_PALLET
         total_recommended_pallets = sum(r.gap_pallets for r in recommendations)
         total_recommended_m2 = sum(r.gap_m2 for r in recommendations)
 
@@ -347,7 +358,9 @@ class RecommendationService:
             total_allocated_pallets=round(total_allocated, 2),
             total_allocated_m2=round(total_allocated * M2_PER_PALLET, 2),
             total_current_pallets=round(total_current, 2),
-            total_current_m2=round(total_current * M2_PER_PALLET, 2),
+            total_current_m2=round(total_warehouse_m2, 2),
+            total_in_transit_pallets=round(total_in_transit, 2),
+            total_in_transit_m2=round(total_in_transit_m2, 2),
             utilization_percent=round(
                 (total_current / Decimal(str(self.warehouse_capacity_pallets))) * 100, 1
             ) if self.warehouse_capacity_pallets > 0 else Decimal("0"),

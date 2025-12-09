@@ -24,12 +24,12 @@ from exceptions import ExcelParseError
 
 @pytest.fixture
 def known_skus():
-    """Sample known SKUs for validation."""
+    """Sample known owner codes for validation (maps padded codes to product IDs)."""
     return {
-        "NOGAL CAFÉ": "uuid-nogal-cafe",
-        "CEIBA GRIS OSC": "uuid-ceiba-gris",
-        "TOLU GRIS": "uuid-tolu-gris",
-        "MIRACH": "uuid-mirach",
+        "0000098": "uuid-nogal-cafe",      # NOGAL CAFÉ
+        "0000101": "uuid-ceiba-gris",      # CEIBA GRIS OSC
+        "0000022": "uuid-tolu-gris",       # TOLU GRIS
+        "0000131": "uuid-mirach",          # MIRACH
     }
 
 
@@ -83,8 +83,8 @@ class TestValidFileParsing:
     def test_valid_inventory_parses_correctly(self, known_skus, yesterday):
         """Valid inventory data is parsed into InventoryRecord objects."""
         inventory_data = [
-            ["NOGAL CAFÉ", 1500.5, 250.0, yesterday.isoformat(), "Stock count"],
-            ["CEIBA GRIS OSC", 800.0, 0, yesterday.isoformat(), None],
+            [98, 1500.5, 250.0, yesterday.isoformat(), "Stock count"],   # NOGAL CAFÉ
+            [101, 800.0, 0, yesterday.isoformat(), None],                # CEIBA GRIS OSC
         ]
 
         excel_file = create_excel_file(
@@ -100,7 +100,7 @@ class TestValidFileParsing:
 
         # Check first record
         record = result.inventory[0]
-        assert record.sku == "NOGAL CAFÉ"
+        assert record.sku == "0000098"  # Padded owner code
         assert record.product_id == "uuid-nogal-cafe"
         assert record.warehouse_qty == 1500.5
         assert record.in_transit_qty == 250.0
@@ -110,8 +110,8 @@ class TestValidFileParsing:
     def test_valid_sales_parses_correctly(self, known_skus, yesterday):
         """Valid sales data is parsed into SalesRecord objects."""
         sales_data = [
-            [yesterday.isoformat(), "TOLU GRIS", 85.5, "Cliente ABC", "Order #123"],
-            [yesterday.isoformat(), "MIRACH", 120.0, None, None],
+            [yesterday.isoformat(), 22, 85.5, "Cliente ABC", "Order #123"],   # TOLU GRIS
+            [yesterday.isoformat(), 131, 120.0, None, None],                  # MIRACH
         ]
 
         excel_file = create_excel_file(
@@ -127,7 +127,7 @@ class TestValidFileParsing:
 
         # Check first record
         record = result.sales[0]
-        assert record.sku == "TOLU GRIS"
+        assert record.sku == "0000022"  # Padded owner code
         assert record.product_id == "uuid-tolu-gris"
         assert record.quantity == 85.5
         assert record.sale_date == yesterday
@@ -136,10 +136,10 @@ class TestValidFileParsing:
     def test_valid_file_with_both_sheets(self, known_skus, yesterday):
         """File with both inventory and sales is parsed correctly."""
         inventory_data = [
-            ["NOGAL CAFÉ", 1000, 0, yesterday.isoformat(), None],
+            [98, 1000, 0, yesterday.isoformat(), None],  # NOGAL CAFÉ
         ]
         sales_data = [
-            [yesterday.isoformat(), "NOGAL CAFÉ", 50, None, None],
+            [yesterday.isoformat(), 98, 50, None, None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(
@@ -153,11 +153,11 @@ class TestValidFileParsing:
         assert len(result.inventory) == 1
         assert len(result.sales) == 1
 
-    def test_sku_case_insensitive(self, known_skus, yesterday):
-        """SKUs are normalized to uppercase."""
+    def test_owner_code_padding(self, known_skus, yesterday):
+        """Owner codes are properly padded to 7 digits."""
         inventory_data = [
-            ["nogal café", 500, 0, yesterday.isoformat(), None],  # lowercase
-            ["Ceiba Gris Osc", 300, 0, yesterday.isoformat(), None],  # mixed case
+            [98, 500, 0, yesterday.isoformat(), None],   # Becomes 0000098
+            [101, 300, 0, yesterday.isoformat(), None],  # Becomes 0000101
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -166,8 +166,8 @@ class TestValidFileParsing:
 
         assert result.success is True
         assert len(result.inventory) == 2
-        assert result.inventory[0].sku == "NOGAL CAFÉ"
-        assert result.inventory[1].sku == "CEIBA GRIS OSC"
+        assert result.inventory[0].sku == "0000098"
+        assert result.inventory[1].sku == "0000101"
 
 
 # ===================
@@ -178,11 +178,11 @@ class TestSKUValidation:
     """Tests for SKU validation."""
 
     def test_invalid_sku_returns_error(self, known_skus, yesterday):
-        """Unknown SKU causes error and rejects upload."""
+        """Unknown owner code causes error and rejects upload."""
         inventory_data = [
-            ["NOGAL CAFÉ", 1000, 0, yesterday.isoformat(), None],  # valid
-            ["FAKE_SKU", 500, 0, yesterday.isoformat(), None],  # invalid
-            ["ANOTHER_FAKE", 200, 0, yesterday.isoformat(), None],  # invalid
+            [98, 1000, 0, yesterday.isoformat(), None],   # valid (NOGAL CAFÉ)
+            [999, 500, 0, yesterday.isoformat(), None],   # invalid (unknown code)
+            [888, 200, 0, yesterday.isoformat(), None],   # invalid (unknown code)
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -196,12 +196,12 @@ class TestSKUValidation:
         assert result.errors[0].sheet == "Inventario"
         assert result.errors[0].row == 3  # Row 3 (1-indexed + header)
         assert result.errors[0].field == "SKU"
-        assert "FAKE_SKU" in result.errors[0].error
+        assert "0000999" in result.errors[0].error
 
     def test_invalid_sku_in_sales(self, known_skus, yesterday):
-        """Unknown SKU in sales sheet causes error."""
+        """Unknown owner code in sales sheet causes error."""
         sales_data = [
-            [yesterday.isoformat(), "UNKNOWN_PRODUCT", 100, None, None],
+            [yesterday.isoformat(), 777, 100, None, None],  # Unknown code
         ]
 
         excel_file = create_excel_file(sales_data=sales_data)
@@ -211,7 +211,7 @@ class TestSKUValidation:
         assert result.success is False
         assert len(result.errors) == 1
         assert result.errors[0].sheet == "Ventas"
-        assert "UNKNOWN_PRODUCT" in result.errors[0].error
+        assert "0000777" in result.errors[0].error
 
 
 # ===================
@@ -285,10 +285,10 @@ class TestEmptyData:
     def test_rows_with_empty_sku_skipped(self, known_skus, yesterday):
         """Rows with empty SKU are silently skipped."""
         inventory_data = [
-            ["NOGAL CAFÉ", 1000, 0, yesterday.isoformat(), None],
-            ["", 500, 0, yesterday.isoformat(), None],  # Empty SKU
+            [98, 1000, 0, yesterday.isoformat(), None],   # NOGAL CAFÉ
+            ["", 500, 0, yesterday.isoformat(), None],    # Empty SKU
             [None, 300, 0, yesterday.isoformat(), None],  # None SKU
-            ["CEIBA GRIS OSC", 800, 0, yesterday.isoformat(), None],
+            [101, 800, 0, yesterday.isoformat(), None],   # CEIBA GRIS OSC
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -309,7 +309,7 @@ class TestDateValidation:
     def test_malformed_date_returns_error(self, known_skus):
         """Malformed date causes error."""
         inventory_data = [
-            ["NOGAL CAFÉ", 1000, 0, "not-a-date", None],
+            [98, 1000, 0, "not-a-date", None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -325,7 +325,7 @@ class TestDateValidation:
         """Future date causes error."""
         future_date = date.today() + timedelta(days=30)
         inventory_data = [
-            ["NOGAL CAFÉ", 1000, 0, future_date.isoformat(), None],
+            [98, 1000, 0, future_date.isoformat(), None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -343,7 +343,7 @@ class TestDateValidation:
 
         # Test with ISO format string
         inventory_data = [
-            ["NOGAL CAFÉ", 1000, 0, yesterday.isoformat(), None],
+            [98, 1000, 0, yesterday.isoformat(), None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -364,7 +364,7 @@ class TestQuantityValidation:
     def test_negative_warehouse_qty_returns_error(self, known_skus, yesterday):
         """Negative warehouse quantity causes error."""
         inventory_data = [
-            ["NOGAL CAFÉ", -100, 0, yesterday.isoformat(), None],
+            [98, -100, 0, yesterday.isoformat(), None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -377,7 +377,7 @@ class TestQuantityValidation:
     def test_zero_warehouse_qty_allowed(self, known_skus, yesterday):
         """Zero warehouse quantity is allowed."""
         inventory_data = [
-            ["NOGAL CAFÉ", 0, 0, yesterday.isoformat(), None],
+            [98, 0, 0, yesterday.isoformat(), None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -390,7 +390,7 @@ class TestQuantityValidation:
     def test_zero_sales_qty_returns_error(self, known_skus, yesterday):
         """Zero sales quantity causes error (sales must be positive)."""
         sales_data = [
-            [yesterday.isoformat(), "NOGAL CAFÉ", 0, None, None],
+            [yesterday.isoformat(), 98, 0, None, None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(sales_data=sales_data)
@@ -403,7 +403,7 @@ class TestQuantityValidation:
     def test_missing_quantity_returns_error(self, known_skus, yesterday):
         """Missing quantity causes error."""
         inventory_data = [
-            ["NOGAL CAFÉ", None, 0, yesterday.isoformat(), None],
+            [98, None, 0, yesterday.isoformat(), None],  # NOGAL CAFÉ
         ]
 
         excel_file = create_excel_file(inventory_data=inventory_data)
@@ -441,10 +441,10 @@ class TestExcelParseResult:
     def test_to_dict_format(self, known_skus, yesterday):
         """Result converts to expected dict format."""
         inventory_data = [
-            ["NOGAL CAFÉ", 1000, 100, yesterday.isoformat(), "Note"],
+            [98, 1000, 100, yesterday.isoformat(), "Note"],  # NOGAL CAFÉ
         ]
         sales_data = [
-            [yesterday.isoformat(), "TOLU GRIS", 50, "Customer", None],
+            [yesterday.isoformat(), 22, 50, "Customer", None],  # TOLU GRIS
         ]
 
         excel_file = create_excel_file(
@@ -460,7 +460,7 @@ class TestExcelParseResult:
         assert "errors" in result_dict
 
         assert len(result_dict["inventory"]) == 1
-        assert result_dict["inventory"][0]["sku"] == "NOGAL CAFÉ"
+        assert result_dict["inventory"][0]["sku"] == "0000098"  # Padded owner code
         assert result_dict["inventory"][0]["snapshot_date"] == yesterday.isoformat()
 
     def test_success_property(self):

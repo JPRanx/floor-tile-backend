@@ -104,8 +104,18 @@ async def upload_sales(file: UploadFile = File(...)):
             for record in parse_result.sales
         ]
 
-        # Bulk create
         sales_service = get_sales_service()
+
+        if sales_records:
+            # Make upload idempotent: delete existing records in date range
+            dates = [r.week_start for r in sales_records]
+            min_date = min(dates)
+            max_date = max(dates)
+            deleted = sales_service.delete_by_date_range(min_date, max_date)
+            if deleted > 0:
+                logger.info("sales_deleted_before_upload", count=deleted)
+
+        # Bulk create
         created = sales_service.bulk_create(sales_records)
 
         logger.info(

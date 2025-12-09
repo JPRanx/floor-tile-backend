@@ -112,12 +112,16 @@ class WarehouseStatus(BaseSchema):
     total_allocated_pallets: Decimal = Field(..., description="Sum of all target allocations")
     total_allocated_m2: Decimal
 
-    # Current totals
-    total_current_pallets: Decimal = Field(..., description="Sum of actual stock")
+    # Current warehouse stock (for utilization calculation)
+    total_current_pallets: Decimal = Field(..., description="Warehouse stock only")
     total_current_m2: Decimal
 
-    # Utilization
-    utilization_percent: Decimal = Field(..., description="current / capacity × 100")
+    # In-transit stock (shown separately, not in utilization)
+    total_in_transit_pallets: Decimal = Field(default=Decimal("0"), description="Stock in transit")
+    total_in_transit_m2: Decimal = Field(default=Decimal("0"))
+
+    # Utilization (warehouse only / capacity)
+    utilization_percent: Decimal = Field(..., description="warehouse / capacity × 100")
     allocation_scaled: bool = Field(..., description="True if allocations were scaled down")
     scale_factor: Optional[Decimal] = None
 

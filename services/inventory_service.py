@@ -256,7 +256,6 @@ class InventoryService:
                 "warehouse_qty": data.warehouse_qty,
                 "in_transit_qty": data.in_transit_qty,
                 "snapshot_date": data.snapshot_date.isoformat(),
-                "notes": data.notes,
             }
 
             result = (
@@ -282,6 +281,44 @@ class InventoryService:
                 error=str(e)
             )
             raise DatabaseError("insert", str(e))
+
+    def delete_by_dates(self, snapshot_dates: list[date]) -> int:
+        """
+        Delete inventory snapshots matching specific dates.
+
+        Used to make uploads idempotent - delete existing before re-inserting.
+
+        Args:
+            snapshot_dates: List of dates to delete
+
+        Returns:
+            Number of records deleted
+        """
+        if not snapshot_dates:
+            return 0
+
+        logger.info("deleting_inventory_by_dates", dates=len(snapshot_dates))
+
+        try:
+            # Convert dates to ISO strings for the query
+            date_strings = [d.isoformat() for d in snapshot_dates]
+
+            result = (
+                self.db.table(self.table)
+                .delete()
+                .in_("snapshot_date", date_strings)
+                .execute()
+            )
+
+            deleted = len(result.data) if result.data else 0
+
+            logger.info("inventory_deleted_by_dates", count=deleted)
+
+            return deleted
+
+        except Exception as e:
+            logger.error("delete_inventory_by_dates_failed", error=str(e))
+            raise DatabaseError("delete", str(e))
 
     def bulk_create(
         self,
@@ -311,7 +348,6 @@ class InventoryService:
                     "warehouse_qty": s.warehouse_qty,
                     "in_transit_qty": s.in_transit_qty,
                     "snapshot_date": s.snapshot_date.isoformat(),
-                    "notes": s.notes,
                 }
                 for s in snapshots
             ]
@@ -371,8 +407,6 @@ class InventoryService:
                 update_data["in_transit_qty"] = data.in_transit_qty
             if data.snapshot_date is not None:
                 update_data["snapshot_date"] = data.snapshot_date.isoformat()
-            if data.notes is not None:
-                update_data["notes"] = data.notes
 
             if not update_data:
                 # Nothing to update, return existing

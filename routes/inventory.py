@@ -155,8 +155,14 @@ async def upload_inventory(file: UploadFile = File(...)):
             for record in parse_result.inventory
         ]
 
-        # Bulk insert
         if snapshots_to_create:
+            # Make upload idempotent: delete existing records for these dates
+            unique_dates = list(set(s.snapshot_date for s in snapshots_to_create))
+            deleted = inventory_service.delete_by_dates(unique_dates)
+            if deleted > 0:
+                logger.info("inventory_deleted_before_upload", count=deleted)
+
+            # Bulk insert
             inventory_service.bulk_create(snapshots_to_create)
 
         logger.info(
