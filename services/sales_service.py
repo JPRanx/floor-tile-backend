@@ -401,6 +401,60 @@ class SalesService:
             raise DatabaseError("delete", str(e))
 
     # ===================
+    # BATCH OPERATIONS
+    # ===================
+
+    def get_recent_sales_all(
+        self,
+        weeks: int = 4
+    ) -> dict[str, list[SalesRecordResponse]]:
+        """
+        Get recent sales for ALL products in a single query.
+
+        This is much more efficient than calling get_history() per product.
+
+        Args:
+            weeks: Number of recent weeks to include
+
+        Returns:
+            Dictionary mapping product_id -> list of sales records
+        """
+        logger.debug("getting_recent_sales_all", weeks=weeks)
+
+        try:
+            # Calculate the date cutoff (N weeks ago)
+            from datetime import timedelta
+            cutoff_date = date.today() - timedelta(weeks=weeks)
+
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .gte("week_start", cutoff_date.isoformat())
+                .order("week_start", desc=True)
+                .execute()
+            )
+
+            # Group by product_id
+            sales_by_product: dict[str, list[SalesRecordResponse]] = {}
+            for row in result.data:
+                record = SalesRecordResponse(**row)
+                if record.product_id not in sales_by_product:
+                    sales_by_product[record.product_id] = []
+                sales_by_product[record.product_id].append(record)
+
+            logger.info(
+                "recent_sales_all_retrieved",
+                products=len(sales_by_product),
+                total_records=len(result.data)
+            )
+
+            return sales_by_product
+
+        except Exception as e:
+            logger.error("get_recent_sales_all_failed", error=str(e))
+            raise DatabaseError("select", str(e))
+
+    # ===================
     # UTILITY METHODS
     # ===================
 

@@ -101,34 +101,45 @@ class StockoutService:
         """
         Calculate stockout status for all products.
 
+        Optimized: Uses batch queries instead of N+1 queries.
+        - 1 query for products
+        - 1 query for inventory
+        - 1 query for sales (instead of N queries!)
+
         Returns:
             StockoutSummary with all product calculations
         """
         logger.info("calculating_stockout_all")
 
-        # Get all products
+        # Get all products (1 query)
         products, _ = self.product_service.get_all(
             page=1,
             page_size=1000,
             active_only=True
         )
 
-        # Get latest inventory for all products
+        # Get latest inventory for all products (1 query)
         inventory_snapshots = self.inventory_service.get_latest()
         inventory_by_product = {
             snap.product_id: snap
             for snap in inventory_snapshots
         }
 
-        # Calculate for each product
+        # Get recent sales for ALL products in ONE query (was N queries!)
+        sales_by_product = self.sales_service.get_recent_sales_all(
+            weeks=self.sales_weeks
+        )
+
+        # Calculate for each product using pre-fetched data
         results = []
         for product in products:
-            result = self._calculate_for_product(
+            result = self._calculate_with_sales(
                 product_id=product.id,
                 sku=product.sku,
                 category=product.category.value if product.category else None,
                 rotation=product.rotation.value if product.rotation else None,
-                inventory=inventory_by_product.get(product.id)
+                inventory=inventory_by_product.get(product.id),
+                sales_records=sales_by_product.get(product.id, [])
             )
             results.append(result)
 
@@ -196,7 +207,31 @@ class StockoutService:
         inventory
     ) -> ProductStockout:
         """
-        Internal calculation for a single product.
+        Internal calculation for a single product (fetches sales).
+
+        Used by calculate_for_product() for single-product lookups.
+        For batch operations, use _calculate_with_sales() instead.
+        """
+        # Get sales history (this makes a DB query)
+        sales_records = self.sales_service.get_history(
+            product_id,
+            limit=self.sales_weeks
+        )
+        return self._calculate_with_sales(
+            product_id, sku, category, rotation, inventory, sales_records
+        )
+
+    def _calculate_with_sales(
+        self,
+        product_id: str,
+        sku: str,
+        category: Optional[str],
+        rotation: Optional[str],
+        inventory,
+        sales_records: list
+    ) -> ProductStockout:
+        """
+        Internal calculation with pre-fetched sales data.
 
         Args:
             product_id: Product UUID
@@ -204,6 +239,7 @@ class StockoutService:
             category: Product category
             rotation: Product rotation
             inventory: Latest inventory snapshot (or None)
+            sales_records: Pre-fetched sales records for this product
 
         Returns:
             ProductStockout with calculation result
@@ -217,12 +253,6 @@ class StockoutService:
             in_transit_qty = Decimal("0")
 
         total_qty = warehouse_qty + in_transit_qty
-
-        # Get sales history (last 4 weeks)
-        sales_records = self.sales_service.get_history(
-            product_id,
-            limit=self.sales_weeks
-        )
 
         # Calculate average daily sales
         weeks_of_data = len(sales_records)
