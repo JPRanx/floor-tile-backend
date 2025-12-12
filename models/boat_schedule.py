@@ -62,7 +62,7 @@ class BoatScheduleCreate(BaseSchema):
         description="Number of days in transit"
     )
     origin_port: str = Field(
-        "Castellon",
+        "Cartagena",
         max_length=100,
         description="Origin port name"
     )
