@@ -70,7 +70,13 @@ class StockoutSummary(BaseSchema):
     well_covered_count: int = 0
     your_call_count: int = 0
 
-    # Boat arrival info
+    # Boat departure info (for user-facing display)
+    next_boat_departure: Optional[date] = None
+    second_boat_departure: Optional[date] = None
+    days_to_next_boat_departure: Optional[int] = None
+    days_to_second_boat_departure: Optional[int] = None
+
+    # Boat arrival info (kept for internal use / backwards compatibility)
     next_boat_arrival: Optional[date] = None
     second_boat_arrival: Optional[date] = None
     days_to_next_boat: Optional[int] = None
@@ -139,17 +145,24 @@ class StockoutService:
         """
         logger.info("calculating_stockout_all")
 
-        # Get boat arrival thresholds
+        # Get boat arrival thresholds (for internal priority calculations)
         today = date.today()
         next_arrival, second_arrival = self.boat_service.get_next_two_arrivals()
         days_to_next, days_to_second = self._get_boat_thresholds()
+
+        # Get boat departure dates (for user-facing display)
+        next_departure, second_departure = self.boat_service.get_next_two_departures()
+        days_to_next_departure = (next_departure - today).days if next_departure else None
+        days_to_second_departure = (second_departure - today).days if second_departure else None
 
         logger.info(
             "boat_thresholds",
             next_arrival=next_arrival,
             second_arrival=second_arrival,
             days_to_next=days_to_next,
-            days_to_second=days_to_second
+            days_to_second=days_to_second,
+            next_departure=next_departure,
+            days_to_next_departure=days_to_next_departure
         )
 
         # Get all products (1 query)
@@ -213,6 +226,12 @@ class StockoutService:
             consider_count=consider,
             well_covered_count=well_covered,
             your_call_count=your_call,
+            # Departure info (for user-facing display)
+            next_boat_departure=next_departure,
+            second_boat_departure=second_departure,
+            days_to_next_boat_departure=days_to_next_departure,
+            days_to_second_boat_departure=days_to_second_departure,
+            # Arrival info (for internal use / backwards compatibility)
             next_boat_arrival=next_arrival,
             second_boat_arrival=second_arrival,
             days_to_next_boat=days_to_next if next_arrival else None,

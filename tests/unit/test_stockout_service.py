@@ -56,6 +56,7 @@ def mock_boat_service():
         service = MagicMock()
         # Default: no boats scheduled (fallback to lead_time)
         service.get_next_two_arrivals.return_value = (None, None)
+        service.get_next_two_departures.return_value = (None, None)
         mock.return_value = service
         yield service
 

@@ -232,6 +232,29 @@ class BoatScheduleService:
 
         return next_arrival, second_arrival
 
+    def get_next_two_departures(self) -> tuple[Optional[date], Optional[date]]:
+        """
+        Get departure dates of next 2 boats.
+
+        Used for user-facing display (simpler than booking deadlines).
+
+        Returns:
+            Tuple of (next_departure_date, second_departure_date)
+            Either can be None if no boats scheduled
+        """
+        available = self.get_available(limit=2)
+
+        next_departure = available[0].departure_date if len(available) > 0 else None
+        second_departure = available[1].departure_date if len(available) > 1 else None
+
+        logger.debug(
+            "got_boat_departures",
+            next_departure=next_departure,
+            second_departure=second_departure
+        )
+
+        return next_departure, second_departure
+
     # ===================
     # WRITE OPERATIONS
     # ===================
