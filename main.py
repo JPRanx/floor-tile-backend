@@ -85,6 +85,10 @@ app.add_middleware(
         "http://localhost:3000",
         "http://localhost:5173",
         "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:5176",
+        "http://localhost:5177",
+        "http://localhost:5178",
         "https://floor-tile-frontend.vercel.app",
     ],
     allow_credentials=True,
@@ -185,6 +189,7 @@ from routes.sales import router as sales_router
 from routes.dashboard import router as dashboard_router
 from routes.settings import router as settings_router
 from routes.recommendations import router as recommendations_router
+from routes.boats import router as boats_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -192,6 +197,7 @@ app.include_router(sales_router, prefix="/api/sales", tags=["Sales"])
 app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(settings_router, prefix="/api/settings", tags=["Settings"])
 app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
+app.include_router(boats_router, prefix="/api/boats", tags=["Boats"])
 
 
 if __name__ == "__main__":

@@ -211,7 +211,7 @@ class TestSKUValidation:
         assert result.success is False
         assert len(result.errors) == 1
         assert result.errors[0].sheet == "Ventas"
-        assert "0000777" in result.errors[0].error
+        assert "777" in result.errors[0].error  # Raw SKU shown in error
 
 
 # ===================

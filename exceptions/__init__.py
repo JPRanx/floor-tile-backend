@@ -33,6 +33,10 @@ from exceptions.errors import (
 
     # Settings
     SettingNotFoundError,
+
+    # Boat Schedules
+    BoatScheduleNotFoundError,
+    BoatScheduleUploadError,
 )
 
 __all__ = [
@@ -64,4 +68,8 @@ __all__ = [
 
     # Settings
     "SettingNotFoundError",
+
+    # Boat Schedules
+    "BoatScheduleNotFoundError",
+    "BoatScheduleUploadError",
 ]

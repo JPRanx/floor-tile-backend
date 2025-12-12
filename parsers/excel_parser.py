@@ -109,6 +109,7 @@ class ExcelParseResult:
 def parse_owner_excel(
     file: Union[str, Path, BytesIO],
     known_owner_codes: dict[str, str],
+    known_sku_names: dict[str, str] = None,
 ) -> ExcelParseResult:
     """
     Parse owner upload Excel file.
@@ -117,6 +118,8 @@ def parse_owner_excel(
         file: File path (str/Path) or file-like object (BytesIO)
         known_owner_codes: Dict mapping owner_code (with leading zeros) to product_id
                           e.g., {"0000102": "uuid-123", "0000119": "uuid-456", ...}
+        known_sku_names: Optional dict mapping normalized SKU names to product_id
+                        e.g., {"ALMENDRO BEIGE BTE": "uuid-123", ...}
 
     Returns:
         ExcelParseResult with inventory, sales, and any errors
@@ -146,11 +149,14 @@ def parse_owner_excel(
     else:
         logger.debug("inventario_sheet_not_found")
 
-    # Parse VENTAS sheet if present
+    # Parse VENTAS sheet if present (try multiple naming conventions)
     if "Ventas" in excel.sheet_names:
-        _parse_sales_sheet(excel, known_owner_codes, result)
+        _parse_sales_sheet(excel, known_owner_codes, result, known_sku_names=known_sku_names)
     elif "VENTAS" in excel.sheet_names:
-        _parse_sales_sheet(excel, known_owner_codes, result, sheet_name="VENTAS")
+        _parse_sales_sheet(excel, known_owner_codes, result, sheet_name="VENTAS", known_sku_names=known_sku_names)
+    elif "Sheet1" in excel.sheet_names:
+        # Fallback: try Sheet1 as sales sheet
+        _parse_sales_sheet(excel, known_owner_codes, result, sheet_name="Sheet1", known_sku_names=known_sku_names)
     else:
         logger.debug("ventas_sheet_not_found")
 
@@ -287,7 +293,8 @@ def _parse_sales_sheet(
     excel: pd.ExcelFile,
     known_owner_codes: dict[str, str],
     result: ExcelParseResult,
-    sheet_name: str = "Ventas"
+    sheet_name: str = "Ventas",
+    known_sku_names: dict[str, str] = None,
 ) -> None:
     """Parse the VENTAS sheet."""
     logger.debug("parsing_sales_sheet", sheet=sheet_name)
@@ -328,18 +335,30 @@ def _parse_sales_sheet(
             continue
 
         row_errors = []
-        # Owner's Excel SKU column contains integer codes (102, 119, etc.)
-        # Convert to string, pad to 7 chars to match DB format (0000102, 0000119)
-        owner_code = str(row["sku"]).strip().split(".")[0].zfill(7)
-        sku = owner_code  # Keep padded version for record
+        raw_sku = str(row["sku"]).strip()
+        product_id = None
+        sku = raw_sku
 
-        # Validate owner_code against known mappings
-        if owner_code not in known_owner_codes:
+        # Try to match by owner code first (numeric codes like 102, 119)
+        if raw_sku.replace(".", "").isdigit():
+            owner_code = raw_sku.split(".")[0].zfill(7)
+            sku = owner_code
+            product_id = known_owner_codes.get(owner_code)
+
+        # If not numeric or not found, try matching by SKU name
+        if product_id is None and known_sku_names:
+            normalized_sku = _normalize_sku_name(raw_sku)
+            product_id = known_sku_names.get(normalized_sku)
+            if product_id:
+                sku = normalized_sku
+
+        # Still not found - report error
+        if product_id is None:
             row_errors.append(ParseError(
                 sheet=sheet_name,
                 row=row_num,
                 field="SKU",
-                error=f"Unknown product code: {owner_code}"
+                error=f"Unknown product: {raw_sku}"
             ))
 
         # Validate quantity
@@ -394,7 +413,7 @@ def _parse_sales_sheet(
             result.sales.append(SalesRecord(
                 sale_date=parsed_date,
                 sku=sku,
-                product_id=known_owner_codes[owner_code],
+                product_id=product_id,
                 quantity=round(float(quantity), 2),
                 customer=str(customer) if customer else None,
                 notes=str(notes) if notes else None,
@@ -405,6 +424,45 @@ def _parse_sales_sheet(
 # HELPER FUNCTIONS
 # ===================
 
+def _normalize_sku_name(sku: str) -> str:
+    """
+    Normalize SKU name for matching against product database.
+
+    Handles variations like:
+    - "TOLÚ GRIS (T) 51X51-1" -> "TOLU GRIS"
+    - "CEIBA BEIGE BTE 51X51-1" -> "CEIBA BEIGE BTE"
+    - "CARACOLÍ (T) 51X51-1" -> "CARACOLI"
+
+    Strips:
+    - Size suffix like "51X51-1", "20X61-1"
+    - Quality markers like "(T)"
+    - Normalizes accents to ASCII
+    """
+    import unicodedata
+    import re
+
+    if not sku:
+        return ""
+
+    # Convert to uppercase
+    sku = sku.upper().strip()
+
+    # Remove size patterns like "51X51-1", "20X61-1", etc.
+    sku = re.sub(r'\s*\d+X\d+(-\d+)?$', '', sku)
+
+    # Remove quality markers like "(T)"
+    sku = re.sub(r'\s*\([A-Z]+\)\s*', ' ', sku)
+
+    # Normalize Unicode (NFD decomposition) and remove accent marks
+    sku = unicodedata.normalize('NFD', sku)
+    sku = ''.join(c for c in sku if unicodedata.category(c) != 'Mn')
+
+    # Clean up whitespace
+    sku = ' '.join(sku.split())
+
+    return sku
+
+
 def _normalize_column(col: str) -> str:
     """
     Normalize column name for consistent matching.
@@ -412,6 +470,7 @@ def _normalize_column(col: str) -> str:
     "Bodega (m²)" -> "bodega_m2"
     "Fecha Conteo" -> "fecha_conteo"
     "En Tránsito (m²)" -> "en_transito_m2"
+    "MT2" -> "cantidad_m2" (alias)
     """
     col = str(col).lower().strip()
     col = col.replace("(m²)", "m2")
@@ -419,6 +478,11 @@ def _normalize_column(col: str) -> str:
     col = col.replace(" ", "_")
     col = col.replace("á", "a").replace("é", "e").replace("í", "i")
     col = col.replace("ó", "o").replace("ú", "u")
+
+    # Handle column aliases
+    if col == "mt2":
+        col = "cantidad_m2"
+
     return col
 
 

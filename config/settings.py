@@ -153,6 +153,30 @@ class Settings(BaseSettings):
         le=60,
         description="Days until stockout to trigger WARNING alert"
     )
+    velocity_window_weeks: int = Field(
+        default=12,
+        ge=4,
+        le=52,
+        description="Weeks of sales data for velocity calculations (12 weeks = 3 months)"
+    )
+    historical_window_weeks: int = Field(
+        default=52,
+        ge=12,
+        le=104,
+        description="Weeks for historical sales lookup (52 weeks = 1 year)"
+    )
+    low_volume_min_records: int = Field(
+        default=2,
+        ge=1,
+        le=12,
+        description="Minimum sales records before flagging as low volume"
+    )
+    low_volume_threshold_m2_week: float = Field(
+        default=134.4,
+        ge=50,
+        le=500,
+        description="Weekly m2 threshold for low volume classification (134.4 = 1 pallet/week)"
+    )
     free_days_critical: int = Field(
         default=2,
         ge=1,

@@ -280,3 +280,29 @@ class SettingNotFoundError(NotFoundError):
             identifier=key,
             code="SETTING_NOT_FOUND"
         )
+
+
+# ===================
+# BOAT SCHEDULE ERRORS
+# ===================
+
+class BoatScheduleNotFoundError(NotFoundError):
+    """Boat schedule not found."""
+
+    def __init__(self, schedule_id: str):
+        super().__init__(
+            resource="Boat schedule",
+            identifier=schedule_id,
+            code="BOAT_SCHEDULE_NOT_FOUND"
+        )
+
+
+class BoatScheduleUploadError(ValidationError):
+    """Boat schedule upload validation failed."""
+
+    def __init__(self, errors: list[dict]):
+        super().__init__(
+            code="BOAT_SCHEDULE_UPLOAD_FAILED",
+            message=f"Upload validation failed with {len(errors)} errors",
+            details={"errors": errors}
+        )

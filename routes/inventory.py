@@ -62,6 +62,20 @@ def handle_error(e: Exception) -> JSONResponse:
 # ROUTES
 # ===================
 
+@router.get("/latest", response_model=list[InventorySnapshotResponse])
+async def get_latest_inventory():
+    """
+    Get the most recent inventory snapshot for each product.
+
+    Returns list of snapshots (alias for /current).
+    """
+    try:
+        service = get_inventory_service()
+        return service.get_latest()
+    except Exception as e:
+        return handle_error(e)
+
+
 @router.get("/current", response_model=InventoryCurrentResponse)
 async def get_current_inventory():
     """

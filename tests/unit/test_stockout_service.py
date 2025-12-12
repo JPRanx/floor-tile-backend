@@ -1,12 +1,12 @@
 """
 Unit tests for StockoutService.
 
-Tests cover stockout calculation logic for all status types.
+Tests cover stockout calculation logic with boat-based priority system.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from services.stockout_service import (
@@ -50,15 +50,27 @@ def mock_product_service():
 
 
 @pytest.fixture
+def mock_boat_service():
+    """Mock BoatScheduleService."""
+    with patch("services.stockout_service.get_boat_schedule_service") as mock:
+        service = MagicMock()
+        # Default: no boats scheduled (fallback to lead_time)
+        service.get_next_two_arrivals.return_value = (None, None)
+        mock.return_value = service
+        yield service
+
+
+@pytest.fixture
 def mock_settings():
     """Mock settings."""
     with patch("services.stockout_service.settings") as mock:
         mock.lead_time_days = 45
+        mock.velocity_window_weeks = 12
         yield mock
 
 
 @pytest.fixture
-def stockout_service(mock_inventory_service, mock_sales_service, mock_product_service, mock_settings):
+def stockout_service(mock_inventory_service, mock_sales_service, mock_product_service, mock_boat_service, mock_settings):
     """Create StockoutService with mocked dependencies."""
     return StockoutService()
 
@@ -99,51 +111,64 @@ def sample_sales():
 
 
 # ===================
-# CRITICAL STATUS TESTS
+# HIGH_PRIORITY STATUS TESTS
 # ===================
 
-class TestCriticalStatus:
-    """Tests for CRITICAL stockout status."""
+class TestHighPriorityStatus:
+    """Tests for HIGH_PRIORITY stockout status (stockout before next boat)."""
 
-    def test_critical_when_days_below_lead_time(
+    def test_high_priority_when_stockout_before_next_boat(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
-        sample_product,
-        sample_inventory
+        mock_boat_service,
+        sample_product
     ):
-        """Product is CRITICAL when days to stockout < lead time (45)."""
-        # Setup: 100 m² inventory, 10 m²/day sales = 10 days (< 45)
-        sample_inventory.warehouse_qty = 70
-        sample_inventory.in_transit_qty = 0
+        """Product is HIGH_PRIORITY when stockout before next boat arrives."""
+        # Setup: 70 m² inventory, 10 m²/day = 7 days
+        # Next boat in 30 days → stockout before boat → HIGH_PRIORITY
+        inventory = MagicMock()
+        inventory.warehouse_qty = 70
+        inventory.in_transit_qty = 0
+
+        today = date.today()
+        mock_boat_service.get_next_two_arrivals.return_value = (
+            today + timedelta(days=30),  # next boat
+            today + timedelta(days=60),  # second boat
+        )
 
         mock_product_service.get_by_id.return_value = sample_product
-        mock_inventory_service.get_history.return_value = [sample_inventory]
+        mock_inventory_service.get_history.return_value = [inventory]
 
-        # 4 weeks of sales at 70 m²/week = 10 m²/day
+        # 4 weeks at 70 m²/week = 10 m²/day
         sales = [MagicMock(quantity_m2=Decimal("70")) for _ in range(4)]
         mock_sales_service.get_history.return_value = sales
 
         result = stockout_service.calculate_for_product("product-uuid-123")
 
-        assert result.status == StockoutStatus.CRITICAL
-        assert result.days_to_stockout < 45
+        assert result.status == StockoutStatus.HIGH_PRIORITY
 
-    def test_critical_with_zero_inventory(
+    def test_high_priority_with_zero_inventory(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product
     ):
-        """Product is CRITICAL when inventory is zero with sales."""
-        # Setup: 0 inventory, any sales velocity
+        """Product is HIGH_PRIORITY when inventory is zero with sales."""
         inventory = MagicMock()
         inventory.warehouse_qty = 0
         inventory.in_transit_qty = 0
+
+        today = date.today()
+        mock_boat_service.get_next_two_arrivals.return_value = (
+            today + timedelta(days=30),
+            today + timedelta(days=60),
+        )
 
         mock_product_service.get_by_id.return_value = sample_product
         mock_inventory_service.get_history.return_value = [inventory]
@@ -153,30 +178,38 @@ class TestCriticalStatus:
 
         result = stockout_service.calculate_for_product("product-uuid-123")
 
-        assert result.status == StockoutStatus.CRITICAL
+        assert result.status == StockoutStatus.HIGH_PRIORITY
         assert result.days_to_stockout == Decimal("0")
 
 
 # ===================
-# WARNING STATUS TESTS
+# CONSIDER STATUS TESTS
 # ===================
 
-class TestWarningStatus:
-    """Tests for WARNING stockout status."""
+class TestConsiderStatus:
+    """Tests for CONSIDER stockout status (stockout before second boat)."""
 
-    def test_warning_when_days_between_lead_and_threshold(
+    def test_consider_when_stockout_between_boats(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product
     ):
-        """Product is WARNING when 45 <= days < 59."""
-        # Setup: 500 m² inventory, 10 m²/day = 50 days (between 45 and 59)
+        """Product is CONSIDER when stockout after first but before second boat."""
+        # Setup: 400 m² inventory, 10 m²/day = 40 days
+        # Next boat in 30 days, second in 60 → stockout at day 40 → CONSIDER
         inventory = MagicMock()
-        inventory.warehouse_qty = 500
+        inventory.warehouse_qty = 400
         inventory.in_transit_qty = 0
+
+        today = date.today()
+        mock_boat_service.get_next_two_arrivals.return_value = (
+            today + timedelta(days=30),  # stockout is AFTER this
+            today + timedelta(days=60),  # stockout is BEFORE this
+        )
 
         mock_product_service.get_by_id.return_value = sample_product
         mock_inventory_service.get_history.return_value = [inventory]
@@ -187,31 +220,38 @@ class TestWarningStatus:
 
         result = stockout_service.calculate_for_product("product-uuid-123")
 
-        assert result.status == StockoutStatus.WARNING
-        assert 45 <= result.days_to_stockout < 59
+        assert result.status == StockoutStatus.CONSIDER
 
 
 # ===================
-# OK STATUS TESTS
+# WELL_COVERED STATUS TESTS
 # ===================
 
-class TestOkStatus:
-    """Tests for OK stockout status."""
+class TestWellCoveredStatus:
+    """Tests for WELL_COVERED stockout status (won't stockout for 2+ boat cycles)."""
 
-    def test_ok_when_days_above_threshold(
+    def test_well_covered_when_stockout_after_second_boat(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product
     ):
-        """Product is OK when days >= 59."""
-        # Setup: 700 m² inventory, 10 m²/day = 70 days (>= 59)
+        """Product is WELL_COVERED when stockout after second boat."""
+        # Setup: 700 m² inventory, 10 m²/day = 70 days
+        # Next boat in 30 days, second in 60 → stockout at day 70 → WELL_COVERED
         inventory = MagicMock()
         inventory.warehouse_qty = 700
         inventory.in_transit_qty = 0
 
+        today = date.today()
+        mock_boat_service.get_next_two_arrivals.return_value = (
+            today + timedelta(days=30),
+            today + timedelta(days=60),  # stockout is AFTER this
+        )
+
         mock_product_service.get_by_id.return_value = sample_product
         mock_inventory_service.get_history.return_value = [inventory]
 
@@ -221,15 +261,15 @@ class TestOkStatus:
 
         result = stockout_service.calculate_for_product("product-uuid-123")
 
-        assert result.status == StockoutStatus.OK
-        assert result.days_to_stockout >= 59
+        assert result.status == StockoutStatus.WELL_COVERED
 
-    def test_ok_with_in_transit_included(
+    def test_well_covered_with_in_transit_included(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product
     ):
         """In-transit inventory is included in calculation."""
@@ -237,6 +277,12 @@ class TestOkStatus:
         inventory = MagicMock()
         inventory.warehouse_qty = 300
         inventory.in_transit_qty = 400
+
+        today = date.today()
+        mock_boat_service.get_next_two_arrivals.return_value = (
+            today + timedelta(days=30),
+            today + timedelta(days=60),
+        )
 
         mock_product_service.get_by_id.return_value = sample_product
         mock_inventory_service.get_history.return_value = [inventory]
@@ -247,46 +293,47 @@ class TestOkStatus:
         result = stockout_service.calculate_for_product("product-uuid-123")
 
         assert result.total_qty == Decimal("700")
-        assert result.status == StockoutStatus.OK
+        assert result.status == StockoutStatus.WELL_COVERED
 
 
 # ===================
-# NO_SALES STATUS TESTS
+# YOUR_CALL STATUS TESTS
 # ===================
 
-class TestNoSalesStatus:
-    """Tests for NO_SALES stockout status."""
+class TestYourCallStatus:
+    """Tests for YOUR_CALL stockout status (no data / needs review)."""
 
-    def test_no_sales_when_no_history(
+    def test_your_call_when_no_history(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product,
         sample_inventory
     ):
-        """Product is NO_SALES when no sales history exists."""
+        """Product is YOUR_CALL when no sales history exists."""
         mock_product_service.get_by_id.return_value = sample_product
         mock_inventory_service.get_history.return_value = [sample_inventory]
         mock_sales_service.get_history.return_value = []  # No sales
 
         result = stockout_service.calculate_for_product("product-uuid-123")
 
-        assert result.status == StockoutStatus.NO_SALES
+        assert result.status == StockoutStatus.YOUR_CALL
         assert result.days_to_stockout is None
-        assert "No sales history" in result.status_reason
 
-    def test_no_sales_when_zero_sales(
+    def test_your_call_when_zero_sales(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product,
         sample_inventory
     ):
-        """Product is NO_SALES when sales are all zero."""
+        """Product is YOUR_CALL when sales are all zero."""
         mock_product_service.get_by_id.return_value = sample_product
         mock_inventory_service.get_history.return_value = [sample_inventory]
 
@@ -296,7 +343,7 @@ class TestNoSalesStatus:
 
         result = stockout_service.calculate_for_product("product-uuid-123")
 
-        assert result.status == StockoutStatus.NO_SALES
+        assert result.status == StockoutStatus.YOUR_CALL
         assert result.days_to_stockout is None
 
 
@@ -313,26 +360,26 @@ class TestCalculateAll:
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product
     ):
         """calculate_all returns StockoutSummary with all products."""
         mock_product_service.get_all.return_value = ([sample_product], 1)
         mock_inventory_service.get_latest.return_value = []
-        mock_sales_service.get_history.return_value = []
+        mock_sales_service.get_recent_sales_all.return_value = {}
 
         result = stockout_service.calculate_all()
 
         assert isinstance(result, StockoutSummary)
         assert result.total_products == 1
-        assert result.lead_time_days == 45
-        assert result.warning_threshold_days == 59
 
     def test_calculate_all_counts_statuses(
         self,
         stockout_service,
         mock_product_service,
         mock_inventory_service,
-        mock_sales_service
+        mock_sales_service,
+        mock_boat_service
     ):
         """calculate_all correctly counts status types."""
         # Create 3 products
@@ -347,12 +394,12 @@ class TestCalculateAll:
 
         mock_product_service.get_all.return_value = (products, 3)
         mock_inventory_service.get_latest.return_value = []
-        mock_sales_service.get_history.return_value = []  # All will be NO_SALES
+        mock_sales_service.get_recent_sales_all.return_value = {}  # All will be YOUR_CALL
 
         result = stockout_service.calculate_all()
 
         assert result.total_products == 3
-        assert result.no_sales_count == 3
+        assert result.your_call_count == 3
 
 
 # ===================
@@ -367,10 +414,11 @@ class TestHelperMethods:
         stockout_service,
         mock_product_service,
         mock_inventory_service,
-        mock_sales_service
+        mock_sales_service,
+        mock_boat_service
     ):
-        """get_critical_products returns only CRITICAL products."""
-        # One product with no sales (not critical)
+        """get_critical_products returns only HIGH_PRIORITY products."""
+        # One product with no sales (not high priority)
         product = MagicMock()
         product.id = "product-1"
         product.sku = "SKU-1"
@@ -379,11 +427,11 @@ class TestHelperMethods:
 
         mock_product_service.get_all.return_value = ([product], 1)
         mock_inventory_service.get_latest.return_value = []
-        mock_sales_service.get_history.return_value = []
+        mock_sales_service.get_recent_sales_all.return_value = {}
 
         result = stockout_service.get_critical_products()
 
-        # No sales = NO_SALES status, not CRITICAL
+        # No sales = YOUR_CALL status, not HIGH_PRIORITY
         assert len(result) == 0
 
     def test_get_products_by_status(
@@ -391,7 +439,8 @@ class TestHelperMethods:
         stockout_service,
         mock_product_service,
         mock_inventory_service,
-        mock_sales_service
+        mock_sales_service,
+        mock_boat_service
     ):
         """get_products_by_status filters correctly."""
         product = MagicMock()
@@ -402,12 +451,12 @@ class TestHelperMethods:
 
         mock_product_service.get_all.return_value = ([product], 1)
         mock_inventory_service.get_latest.return_value = []
-        mock_sales_service.get_history.return_value = []
+        mock_sales_service.get_recent_sales_all.return_value = {}
 
-        result = stockout_service.get_products_by_status(StockoutStatus.NO_SALES)
+        result = stockout_service.get_products_by_status(StockoutStatus.YOUR_CALL)
 
         assert len(result) == 1
-        assert result[0].status == StockoutStatus.NO_SALES
+        assert result[0].status == StockoutStatus.YOUR_CALL
 
 
 # ===================
@@ -423,6 +472,7 @@ class TestCalculations:
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product,
         sample_inventory
     ):
@@ -446,6 +496,7 @@ class TestCalculations:
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product
     ):
         """Days to stockout is calculated correctly."""
@@ -471,6 +522,7 @@ class TestCalculations:
         mock_product_service,
         mock_inventory_service,
         mock_sales_service,
+        mock_boat_service,
         sample_product
     ):
         """Handles missing inventory snapshot (defaults to 0)."""
@@ -488,6 +540,44 @@ class TestCalculations:
 
 
 # ===================
+# BOAT FALLBACK TESTS
+# ===================
+
+class TestBoatFallback:
+    """Tests for fallback behavior when no boats scheduled."""
+
+    def test_fallback_to_lead_time_when_no_boats(
+        self,
+        stockout_service,
+        mock_product_service,
+        mock_inventory_service,
+        mock_sales_service,
+        mock_boat_service,
+        sample_product
+    ):
+        """Uses lead_time as threshold when no boats scheduled."""
+        # No boats scheduled
+        mock_boat_service.get_next_two_arrivals.return_value = (None, None)
+
+        inventory = MagicMock()
+        inventory.warehouse_qty = 70
+        inventory.in_transit_qty = 0
+
+        mock_product_service.get_by_id.return_value = sample_product
+        mock_inventory_service.get_history.return_value = [inventory]
+
+        # 4 weeks at 70 m²/week = 10 m²/day
+        # 70 / 10 = 7 days < 45 (lead_time) → HIGH_PRIORITY
+        sales = [MagicMock(quantity_m2=Decimal("70")) for _ in range(4)]
+        mock_sales_service.get_history.return_value = sales
+
+        result = stockout_service.calculate_for_product("product-uuid-123")
+
+        # With 7 days of stock and lead_time of 45 days, should be HIGH_PRIORITY
+        assert result.status == StockoutStatus.HIGH_PRIORITY
+
+
+# ===================
 # SINGLETON TESTS
 # ===================
 
@@ -499,6 +589,7 @@ class TestSingleton:
         mock_inventory_service,
         mock_sales_service,
         mock_product_service,
+        mock_boat_service,
         mock_settings
     ):
         """get_stockout_service returns the same instance."""

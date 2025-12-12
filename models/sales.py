@@ -18,6 +18,8 @@ class SalesRecordCreate(BaseSchema):
     product_id: str = Field(..., description="Product UUID")
     week_start: date = Field(..., description="Start of the week (Monday)")
     quantity_m2: Decimal = Field(..., ge=0, description="Sales quantity in m²")
+    customer: Optional[str] = Field(None, description="Original customer name (with accents)")
+    customer_normalized: Optional[str] = Field(None, description="Normalized for grouping (uppercase ASCII)")
 
     @field_validator("quantity_m2", mode="before")
     @classmethod
@@ -60,6 +62,8 @@ class SalesRecordResponse(TimestampMixin, BaseSchema):
     product_id: str
     week_start: date
     quantity_m2: Decimal
+    customer: Optional[str] = None
+    customer_normalized: Optional[str] = None
 
     @field_validator("quantity_m2", mode="before")
     @classmethod

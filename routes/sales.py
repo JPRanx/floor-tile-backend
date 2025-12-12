@@ -20,6 +20,7 @@ from models.sales import (
 from services.sales_service import get_sales_service
 from services.product_service import get_product_service
 from parsers.excel_parser import parse_owner_excel
+from utils.text_utils import normalize_customer_name, clean_customer_name
 from exceptions import (
     AppError,
     SalesNotFoundError,
@@ -82,24 +83,51 @@ async def upload_sales(file: UploadFile = File(...)):
             if p.owner_code is not None
         }
 
+        # Build lookup: normalized SKU name -> product_id
+        # For Excel files that use product names instead of codes
+        from parsers.excel_parser import _normalize_sku_name
+        known_sku_names = {
+            _normalize_sku_name(p.sku): p.id
+            for p in products
+            if p.sku
+        }
+
         # Parse Excel file
         contents = await file.read()
-        parse_result = parse_owner_excel(contents, known_owner_codes)
+        parse_result = parse_owner_excel(contents, known_owner_codes, known_sku_names)
 
-        # If there are errors, reject entire upload
+        # Log errors but continue with valid records (partial success)
         if parse_result.errors:
-            raise ExcelParseError(
-                message=f"Upload failed with {len(parse_result.errors)} errors",
-                details={"errors": [e.__dict__ for e in parse_result.errors]}
-            )
+            # Group errors by type for logging
+            unknown_products = [e for e in parse_result.errors if "Unknown product" in e.error]
+            other_errors = [e for e in parse_result.errors if "Unknown product" not in e.error]
+
+            if unknown_products:
+                unique_unknown = set(e.error.split(": ")[1] for e in unknown_products if ": " in e.error)
+                logger.warning(
+                    "sales_upload_unknown_products",
+                    count=len(unknown_products),
+                    unique_products=len(unique_unknown),
+                    sample=list(unique_unknown)[:5]
+                )
+
+            # Only reject if there are non-product errors (validation errors)
+            if other_errors:
+                raise ExcelParseError(
+                    message=f"Upload failed with {len(other_errors)} validation errors",
+                    details={"errors": [e.__dict__ for e in other_errors[:20]]}
+                )
 
         # Convert parsed sales records to SalesRecordCreate
         # product_id already resolved by parser
+        # customer name is cleaned and normalized for grouping
         sales_records = [
             SalesRecordCreate(
                 product_id=record.product_id,
                 week_start=record.sale_date,
-                quantity_m2=record.quantity
+                quantity_m2=record.quantity,
+                customer=clean_customer_name(record.customer),
+                customer_normalized=normalize_customer_name(record.customer),
             )
             for record in parse_result.sales
         ]
