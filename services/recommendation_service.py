@@ -293,7 +293,9 @@ class RecommendationService:
                         "current_pallets": float(current_pallets),
                         "target_pallets": float(target_pallets),
                         "excess_pallets": float(abs(gap_pallets)),
-                    }
+                    },
+                    in_transit_m2=round(in_transit_m2, 2) if in_transit_m2 > 0 else None,
+                    in_transit_pallets=round(in_transit_pallets, 2) if in_transit_pallets > 0 else None,
                 ))
                 continue
 
@@ -330,7 +332,9 @@ class RecommendationService:
                         "current_pallets": float(current_pallets),
                         "target_pallets": float(target_pallets),
                         "days_until_empty": float(days_until_empty) if days_until_empty else None,
-                    }
+                    },
+                    in_transit_m2=round(in_transit_m2, 2) if in_transit_m2 > 0 else None,
+                    in_transit_pallets=round(in_transit_pallets, 2) if in_transit_pallets > 0 else None,
                 ))
                 continue
 

@@ -138,6 +138,9 @@ class RecommendationWarning(BaseSchema):
     action_type: ActionType = Field(..., description="Action recommendation for this warning")
     message: str
     details: Optional[dict] = None
+    # In-transit info (for WELL_STOCKED/OVER_STOCKED warnings)
+    in_transit_m2: Optional[Decimal] = Field(None, description="Stock currently in transit")
+    in_transit_pallets: Optional[Decimal] = None
 
 
 class WarehouseStatus(BaseSchema):
