@@ -16,6 +16,7 @@ from services.recommendation_service import (
     Z_SCORE,
 )
 from models.recommendation import (
+    ConfidenceLevel,
     RecommendationPriority,
     WarningType,
 )
@@ -49,6 +50,8 @@ def mock_sales_service():
     """Mock SalesService."""
     with patch("services.recommendation_service.get_sales_service") as mock:
         service = MagicMock()
+        # Default: no customer analysis data
+        service.get_customer_analysis_batch.return_value = {}
         mock.return_value = service
         yield service
 
@@ -63,11 +66,24 @@ def mock_stockout_service():
 
 
 @pytest.fixture
+def mock_boat_service():
+    """Mock BoatScheduleService."""
+    with patch("services.recommendation_service.get_boat_schedule_service") as mock:
+        service = MagicMock()
+        # Default: no boats scheduled
+        service.get_next_two_arrivals.return_value = (None, None)
+        mock.return_value = service
+        yield service
+
+
+@pytest.fixture
 def mock_settings():
     """Mock settings."""
     with patch("services.recommendation_service.settings") as mock:
         mock.lead_time_days = 45
         mock.warehouse_max_pallets = 740
+        mock.velocity_window_weeks = 12
+        mock.low_volume_min_records = 2
         yield mock
 
 
@@ -77,6 +93,7 @@ def recommendation_service(
     mock_inventory_service,
     mock_sales_service,
     mock_stockout_service,
+    mock_boat_service,
     mock_settings
 ):
     """Create RecommendationService with mocked dependencies."""
@@ -135,7 +152,7 @@ def sample_stockout():
     """Sample stockout calculation."""
     stockout = MagicMock()
     stockout.product_id = "product-uuid-123"
-    stockout.status = StockoutStatus.WARNING
+    stockout.status = StockoutStatus.CONSIDER  # Boat-based: stockout between boats
     stockout.days_to_stockout = Decimal("40")
     return stockout
 
@@ -386,7 +403,7 @@ class TestOrderRecommendations:
             if w.type == WarningType.OVER_STOCKED
         ]
         assert len(overstocked_warnings) == 1
-        assert "over target" in overstocked_warnings[0].message
+        assert "above target" in overstocked_warnings[0].message
 
     def test_no_sales_warning_generated(
         self,
@@ -404,7 +421,7 @@ class TestOrderRecommendations:
 
         no_sales_stockout = MagicMock()
         no_sales_stockout.product_id = "product-uuid-123"
-        no_sales_stockout.status = StockoutStatus.NO_SALES
+        no_sales_stockout.status = StockoutStatus.YOUR_CALL  # No sales data
         no_sales_stockout.days_to_stockout = None
 
         mock_stockout_service.calculate_all.return_value = MagicMock(
@@ -450,7 +467,7 @@ class TestPriorityAssignment:
         # Stockout in 5 days (order arrives in 45)
         critical_stockout = MagicMock()
         critical_stockout.product_id = "product-uuid-123"
-        critical_stockout.status = StockoutStatus.CRITICAL
+        critical_stockout.status = StockoutStatus.HIGH_PRIORITY  # Boat-based: stockout before next boat
         critical_stockout.days_to_stockout = Decimal("5")
 
         mock_stockout_service.calculate_all.return_value = MagicMock(
@@ -460,7 +477,7 @@ class TestPriorityAssignment:
         result = recommendation_service.get_recommendations()
 
         assert len(result.recommendations) == 1
-        assert result.recommendations[0].priority == RecommendationPriority.CRITICAL
+        assert result.recommendations[0].priority == RecommendationPriority.HIGH_PRIORITY
         assert result.recommendations[0].arrives_before_stockout is False
 
     def test_high_priority_for_alta_rotation(
@@ -483,22 +500,22 @@ class TestPriorityAssignment:
         low_inventory.in_transit_qty = 0
         mock_inventory_service.get_latest.return_value = [low_inventory]
 
-        # Not critical, just warning
-        warning_stockout = MagicMock()
-        warning_stockout.product_id = "product-uuid-123"
-        warning_stockout.status = StockoutStatus.WARNING
-        warning_stockout.days_to_stockout = Decimal("55")
+        # Not high priority, just consider
+        consider_stockout = MagicMock()
+        consider_stockout.product_id = "product-uuid-123"
+        consider_stockout.status = StockoutStatus.CONSIDER  # Boat-based: stockout between boats
+        consider_stockout.days_to_stockout = Decimal("55")
 
         mock_stockout_service.calculate_all.return_value = MagicMock(
-            products=[warning_stockout]
+            products=[consider_stockout]
         )
 
         result = recommendation_service.get_recommendations()
 
         if result.recommendations:
             rec = result.recommendations[0]
-            # Should be HIGH (ALTA rotation) not CRITICAL
-            assert rec.priority in [RecommendationPriority.HIGH, RecommendationPriority.CRITICAL]
+            # Should be CONSIDER (stockout between boats)
+            assert rec.priority in [RecommendationPriority.CONSIDER, RecommendationPriority.HIGH_PRIORITY]
 
     def test_low_priority_for_baja_rotation(
         self,
@@ -520,20 +537,25 @@ class TestPriorityAssignment:
         low_inventory.in_transit_qty = 0
         mock_inventory_service.get_latest.return_value = [low_inventory]
 
-        ok_stockout = MagicMock()
-        ok_stockout.product_id = "product-uuid-456"
-        ok_stockout.status = StockoutStatus.OK
-        ok_stockout.days_to_stockout = Decimal("80")
+        well_covered_stockout = MagicMock()
+        well_covered_stockout.product_id = "product-uuid-456"
+        well_covered_stockout.status = StockoutStatus.WELL_COVERED  # Boat-based: won't stock out for 2+ cycles
+        well_covered_stockout.days_to_stockout = Decimal("80")
 
         mock_stockout_service.calculate_all.return_value = MagicMock(
-            products=[ok_stockout]
+            products=[well_covered_stockout]
         )
 
         result = recommendation_service.get_recommendations()
 
+        # WELL_COVERED products go to warnings, not recommendations
+        # Check it's handled correctly (either in recommendations or warnings)
         if result.recommendations:
             rec = result.recommendations[0]
-            assert rec.priority == RecommendationPriority.LOW
+            assert rec.priority == RecommendationPriority.WELL_COVERED
+        else:
+            # Should be in warnings as WELL_STOCKED
+            assert len(result.warnings) > 0
 
 
 # ===================
@@ -585,9 +607,9 @@ class TestRecommendationSorting:
 
         stockouts = []
         for i, (status, days) in enumerate([
-            (StockoutStatus.OK, 30),
-            (StockoutStatus.WARNING, 50),
-            (StockoutStatus.CRITICAL, 25),
+            (StockoutStatus.WELL_COVERED, 90),   # Product 0: will be WELL_STOCKED
+            (StockoutStatus.CONSIDER, 50),       # Product 1: stockout between boats
+            (StockoutStatus.HIGH_PRIORITY, 25),  # Product 2: stockout before next boat
         ]):
             s = MagicMock()
             s.product_id = f"product-{i}"
@@ -601,20 +623,20 @@ class TestRecommendationSorting:
 
         result = recommendation_service.get_recommendations()
 
-        # Should be sorted: CRITICAL first, then by days
+        # Should be sorted by action type: ORDER_NOW first, then ORDER_SOON
         if len(result.recommendations) >= 2:
             priorities = [r.priority for r in result.recommendations]
-            # CRITICAL should come before HIGH/MEDIUM/LOW
-            critical_indices = [
+            # HIGH_PRIORITY should come before CONSIDER
+            high_priority_indices = [
                 i for i, p in enumerate(priorities)
-                if p == RecommendationPriority.CRITICAL
+                if p == RecommendationPriority.HIGH_PRIORITY
             ]
-            non_critical_indices = [
+            consider_indices = [
                 i for i, p in enumerate(priorities)
-                if p != RecommendationPriority.CRITICAL
+                if p == RecommendationPriority.CONSIDER
             ]
-            if critical_indices and non_critical_indices:
-                assert max(critical_indices) < min(non_critical_indices)
+            if high_priority_indices and consider_indices:
+                assert max(high_priority_indices) < min(consider_indices)
 
 
 # ===================
@@ -680,3 +702,310 @@ class TestSingleton:
         service2 = get_recommendation_service()
 
         assert service1 is service2
+
+
+# ===================
+# CONFIDENCE CALCULATION TESTS
+# ===================
+
+class TestConfidenceCalculation:
+    """Tests for _calculate_confidence method."""
+
+    def test_low_confidence_no_sales_data(
+        self,
+        recommendation_service
+    ):
+        """LOW confidence when no sales data."""
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[],
+            weeks_of_data=0,
+            customer_analysis=None
+        )
+
+        assert confidence == ConfidenceLevel.LOW
+        assert "No sales data" in reason
+        assert cv is None
+
+    def test_low_confidence_few_weeks(
+        self,
+        recommendation_service
+    ):
+        """LOW confidence when less than 4 weeks of data."""
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100"), Decimal("100")],
+            weeks_of_data=2,
+            customer_analysis=None
+        )
+
+        assert confidence == ConfidenceLevel.LOW
+        assert "2 weeks" in reason
+
+    def test_low_confidence_no_recent_sales(
+        self,
+        recommendation_service
+    ):
+        """LOW confidence when no sales in last 4 weeks."""
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0")],
+            weeks_of_data=4,
+            customer_analysis=None
+        )
+
+        assert confidence == ConfidenceLevel.LOW
+        assert "No sales in last 4 weeks" in reason
+
+    def test_low_confidence_top_customer_dominates(
+        self,
+        recommendation_service
+    ):
+        """LOW confidence when top customer > 70% of sales."""
+        customer_analysis = {
+            "unique_customers": 3,
+            "top_customer_name": "ACME Corp",
+            "top_customer_share": Decimal("0.75"),
+            "recurring_count": 2,
+            "recurring_share": Decimal("0.5"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 8,
+            weeks_of_data=8,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.LOW
+        assert "75%" in reason
+        assert "ACME" in reason
+
+    def test_low_confidence_single_customer(
+        self,
+        recommendation_service
+    ):
+        """LOW confidence with single customer (triggers via >70% rule first)."""
+        customer_analysis = {
+            "unique_customers": 1,
+            "top_customer_name": "Solo Buyer",
+            "top_customer_share": Decimal("1.0"),
+            "recurring_count": 1,
+            "recurring_share": Decimal("1.0"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 8,
+            weeks_of_data=8,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.LOW
+        # Single customer with 100% share triggers the ">70% from customer" rule first
+        assert "100%" in reason or "Solo Buyer" in reason
+
+    def test_low_confidence_erratic_sales(
+        self,
+        recommendation_service
+    ):
+        """LOW confidence when coefficient of variation > 0.8."""
+        # Very erratic sales: 10, 200, 5, 300, 15, 400, 10, 250 (CV > 0.8)
+        customer_analysis = {
+            "unique_customers": 5,
+            "top_customer_name": None,
+            "top_customer_share": Decimal("0.2"),
+            "recurring_count": 3,
+            "recurring_share": Decimal("0.5"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("10"), Decimal("200"), Decimal("5"), Decimal("300"),
+                         Decimal("15"), Decimal("400"), Decimal("10"), Decimal("250")],
+            weeks_of_data=8,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.LOW
+        assert "Erratic sales" in reason
+
+    def test_medium_confidence_top_customer_significant(
+        self,
+        recommendation_service
+    ):
+        """MEDIUM confidence when top customer 50-70% of sales."""
+        customer_analysis = {
+            "unique_customers": 3,
+            "top_customer_name": "Big Buyer",
+            "top_customer_share": Decimal("0.55"),
+            "recurring_count": 2,
+            "recurring_share": Decimal("0.4"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 8,
+            weeks_of_data=8,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.MEDIUM
+        assert "55%" in reason
+
+    def test_medium_confidence_few_customers(
+        self,
+        recommendation_service
+    ):
+        """MEDIUM confidence when only 2 customers."""
+        customer_analysis = {
+            "unique_customers": 2,
+            "top_customer_name": "Customer A",
+            "top_customer_share": Decimal("0.4"),
+            "recurring_count": 2,
+            "recurring_share": Decimal("0.9"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 8,
+            weeks_of_data=8,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.MEDIUM
+        assert "2 customers" in reason
+
+    def test_medium_confidence_limited_history(
+        self,
+        recommendation_service
+    ):
+        """MEDIUM confidence when 4-7 weeks of history."""
+        customer_analysis = {
+            "unique_customers": 5,
+            "top_customer_name": None,
+            "top_customer_share": Decimal("0.3"),
+            "recurring_count": 3,
+            "recurring_share": Decimal("0.5"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 5,
+            weeks_of_data=5,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.MEDIUM
+        assert "Limited history" in reason
+
+    def test_medium_confidence_variable_sales(
+        self,
+        recommendation_service
+    ):
+        """MEDIUM confidence when CV between 0.5 and 0.8 (no customer analysis)."""
+        # Variable but not erratic: pattern that gives CV ~0.4-0.6
+        # Without customer analysis, we skip to CV check
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100"), Decimal("30"), Decimal("120"), Decimal("25"),
+                         Decimal("100"), Decimal("35"), Decimal("110"), Decimal("30")],
+            weeks_of_data=8,
+            customer_analysis=None  # No customer data, will check CV
+        )
+
+        # Without customer analysis and with variable sales, should get MEDIUM
+        # If CV > 0.5, reason = "Variable sales pattern"
+        # If CV < 0.5, reason = "X weeks history"
+        assert confidence == ConfidenceLevel.MEDIUM
+        assert "Variable sales" in reason or "weeks history" in reason
+
+    def test_high_confidence_good_recurring_base(
+        self,
+        recommendation_service
+    ):
+        """HIGH confidence with >70% recurring customers and >=3 customers."""
+        customer_analysis = {
+            "unique_customers": 5,
+            "top_customer_name": "Customer A",
+            "top_customer_share": Decimal("0.3"),
+            "recurring_count": 4,
+            "recurring_share": Decimal("0.85"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 8,
+            weeks_of_data=8,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.HIGH
+        assert "5 customers" in reason
+        assert "recurring" in reason
+
+    def test_high_confidence_diverse_stable_demand(
+        self,
+        recommendation_service
+    ):
+        """HIGH confidence with diverse customers and stable demand."""
+        customer_analysis = {
+            "unique_customers": 6,
+            "top_customer_name": "Customer A",
+            "top_customer_share": Decimal("0.2"),
+            "recurring_count": 3,
+            "recurring_share": Decimal("0.5"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 10,
+            weeks_of_data=10,
+            customer_analysis=customer_analysis
+        )
+
+        assert confidence == ConfidenceLevel.HIGH
+        assert "stable demand" in reason
+
+    def test_customer_metrics_populated(
+        self,
+        recommendation_service
+    ):
+        """Customer metrics are correctly populated from analysis."""
+        customer_analysis = {
+            "unique_customers": 8,
+            "top_customer_name": "Big Corp",
+            "top_customer_share": Decimal("0.25"),
+            "recurring_count": 5,
+            "recurring_share": Decimal("0.6"),
+        }
+
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 10,
+            weeks_of_data=10,
+            customer_analysis=customer_analysis
+        )
+
+        assert metrics["unique_customers"] == 8
+        assert metrics["top_customer_name"] == "Big Corp"
+        assert metrics["top_customer_share"] == Decimal("0.25")
+        assert metrics["recurring_customers"] == 5
+        assert metrics["recurring_share"] == Decimal("0.6")
+
+    def test_cv_calculated_correctly(
+        self,
+        recommendation_service
+    ):
+        """Coefficient of variation is calculated correctly."""
+        # All same values -> CV = 0
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 8,
+            weeks_of_data=8,
+            customer_analysis={"unique_customers": 5, "top_customer_share": Decimal("0.2"), "recurring_share": Decimal("0.8"), "recurring_count": 4}
+        )
+
+        assert cv == Decimal("0")
+
+    def test_default_metrics_when_no_customer_analysis(
+        self,
+        recommendation_service
+    ):
+        """Default metrics when no customer analysis provided."""
+        confidence, reason, cv, metrics = recommendation_service._calculate_confidence(
+            weekly_sales=[Decimal("100")] * 4,
+            weeks_of_data=4,
+            customer_analysis=None
+        )
+
+        assert metrics["unique_customers"] == 0
+        assert metrics["top_customer_name"] is None
+        assert metrics["top_customer_share"] is None
+        assert metrics["recurring_customers"] == 0

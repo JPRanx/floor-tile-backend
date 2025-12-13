@@ -180,7 +180,8 @@ class TestHighPriorityStatus:
         result = stockout_service.calculate_for_product("product-uuid-123")
 
         assert result.status == StockoutStatus.HIGH_PRIORITY
-        assert result.days_to_stockout == Decimal("0")
+        # Zero inventory = already stocked out, stockout_date is today
+        assert result.stockout_date == date.today()
 
 
 # ===================
@@ -410,7 +411,7 @@ class TestCalculateAll:
 class TestHelperMethods:
     """Tests for helper methods."""
 
-    def test_get_critical_products(
+    def test_get_high_priority_products(
         self,
         stockout_service,
         mock_product_service,
@@ -418,7 +419,7 @@ class TestHelperMethods:
         mock_sales_service,
         mock_boat_service
     ):
-        """get_critical_products returns only HIGH_PRIORITY products."""
+        """get_products_by_status returns only HIGH_PRIORITY products."""
         # One product with no sales (not high priority)
         product = MagicMock()
         product.id = "product-1"
@@ -430,7 +431,7 @@ class TestHelperMethods:
         mock_inventory_service.get_latest.return_value = []
         mock_sales_service.get_recent_sales_all.return_value = {}
 
-        result = stockout_service.get_critical_products()
+        result = stockout_service.get_products_by_status(StockoutStatus.HIGH_PRIORITY)
 
         # No sales = YOUR_CALL status, not HIGH_PRIORITY
         assert len(result) == 0
