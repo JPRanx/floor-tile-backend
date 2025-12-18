@@ -242,7 +242,7 @@ class RecommendationService:
             target_pallets = alloc.scaled_target_pallets or alloc.target_pallets
             target_m2 = alloc.scaled_target_m2 or alloc.target_m2
 
-            # Skip products with no sales data
+            # Products with no sales data go to YOUR_CALL
             if alloc.weeks_of_data == 0:
                 warnings.append(RecommendationWarning(
                     product_id=alloc.product_id,
@@ -250,6 +250,48 @@ class RecommendationService:
                     type=WarningType.NO_SALES_DATA,
                     action_type=ActionType.REVIEW,
                     message=f"No sales history available — cannot calculate allocation",
+                ))
+                # Still add to recommendations for Order Builder visibility
+                inventory = inventory_map.get(alloc.product_id)
+                warehouse_m2 = Decimal(str(inventory.warehouse_qty)) if inventory else Decimal("0")
+                in_transit_m2 = Decimal(str(inventory.in_transit_qty)) if inventory else Decimal("0")
+                recommendations.append(ProductRecommendation(
+                    product_id=alloc.product_id,
+                    sku=alloc.sku,
+                    category=alloc.category,
+                    rotation=alloc.rotation,
+                    target_pallets=Decimal("0"),
+                    target_m2=Decimal("0"),
+                    warehouse_pallets=round(warehouse_m2 / M2_PER_PALLET, 2),
+                    warehouse_m2=round(warehouse_m2, 2),
+                    in_transit_pallets=round(in_transit_m2 / M2_PER_PALLET, 2),
+                    in_transit_m2=round(in_transit_m2, 2),
+                    current_pallets=round((warehouse_m2 + in_transit_m2) / M2_PER_PALLET, 2),
+                    current_m2=round(warehouse_m2 + in_transit_m2, 2),
+                    gap_pallets=Decimal("0"),
+                    gap_m2=Decimal("0"),
+                    days_to_cover=days_to_cover,
+                    total_demand_m2=Decimal("0"),
+                    coverage_gap_m2=Decimal("0"),
+                    coverage_gap_pallets=0,
+                    daily_velocity=Decimal("0"),
+                    days_until_empty=None,
+                    stockout_date=None,
+                    order_arrives_date=order_arrives,
+                    arrives_before_stockout=True,
+                    confidence=ConfidenceLevel.LOW,
+                    confidence_reason="No sales data",
+                    weeks_of_data=0,
+                    velocity_cv=None,
+                    unique_customers=0,
+                    top_customer_name=None,
+                    top_customer_share=None,
+                    recurring_customers=0,
+                    recurring_share=None,
+                    priority=RecommendationPriority.YOUR_CALL,
+                    action_type=ActionType.REVIEW,
+                    action="Needs manual review — no sales history",
+                    reason="Cannot calculate recommendation without sales data.",
                 ))
                 continue
 
@@ -320,7 +362,7 @@ class RecommendationService:
             # Determine action type based on health status
             action_type = self._determine_action_type(health_status, gap_pallets)
 
-            # Move WELL_STOCKED to warnings (Skip This Cycle)
+            # WELL_STOCKED products: add to warnings AND recommendations (for Order Builder)
             if action_type == ActionType.WELL_STOCKED:
                 warnings.append(RecommendationWarning(
                     product_id=alloc.product_id,
@@ -335,6 +377,59 @@ class RecommendationService:
                     },
                     in_transit_m2=round(in_transit_m2, 2) if in_transit_m2 > 0 else None,
                     in_transit_pallets=round(in_transit_pallets, 2) if in_transit_pallets > 0 else None,
+                ))
+                # Also add to recommendations for Order Builder visibility
+                product_sales = sales_by_product.get(alloc.product_id, [])
+                weekly_quantities = [s.quantity_m2 for s in product_sales]
+                customer_analysis = customer_analysis_map.get(alloc.product_id)
+                confidence, confidence_reason, velocity_cv, customer_metrics = self._calculate_confidence(
+                    weekly_sales=weekly_quantities,
+                    weeks_of_data=alloc.weeks_of_data,
+                    customer_analysis=customer_analysis,
+                )
+                total_demand_m2, coverage_gap_m2, coverage_gap_pallets = self._calculate_coverage_gap(
+                    daily_velocity=alloc.daily_velocity,
+                    available_m2=current_m2,
+                    days_to_cover=days_to_cover,
+                )
+                weeks_of_stock = int(days_until_empty / 7) if days_until_empty else 0
+                recommendations.append(ProductRecommendation(
+                    product_id=alloc.product_id,
+                    sku=alloc.sku,
+                    category=alloc.category,
+                    rotation=alloc.rotation,
+                    target_pallets=round(target_pallets, 2),
+                    target_m2=round(target_m2, 2),
+                    warehouse_pallets=round(warehouse_pallets, 2),
+                    warehouse_m2=round(warehouse_m2, 2),
+                    in_transit_pallets=round(in_transit_pallets, 2),
+                    in_transit_m2=round(in_transit_m2, 2),
+                    current_pallets=round(current_pallets, 2),
+                    current_m2=round(current_m2, 2),
+                    gap_pallets=round(gap_pallets, 2),
+                    gap_m2=round(gap_m2, 2),
+                    days_to_cover=days_to_cover,
+                    total_demand_m2=total_demand_m2,
+                    coverage_gap_m2=coverage_gap_m2,
+                    coverage_gap_pallets=coverage_gap_pallets,
+                    daily_velocity=alloc.daily_velocity,
+                    days_until_empty=round(days_until_empty, 1) if days_until_empty else None,
+                    stockout_date=stockout_date,
+                    order_arrives_date=order_arrives,
+                    arrives_before_stockout=arrives_before_stockout,
+                    confidence=confidence,
+                    confidence_reason=confidence_reason,
+                    weeks_of_data=alloc.weeks_of_data,
+                    velocity_cv=velocity_cv,
+                    unique_customers=customer_metrics.get("unique_customers", 0),
+                    top_customer_name=customer_metrics.get("top_customer_name"),
+                    top_customer_share=customer_metrics.get("top_customer_share"),
+                    recurring_customers=customer_metrics.get("recurring_customers", 0),
+                    recurring_share=customer_metrics.get("recurring_share"),
+                    priority=RecommendationPriority.WELL_COVERED,
+                    action_type=ActionType.WELL_STOCKED,
+                    action=f"{weeks_of_stock} weeks of inventory — no action needed",
+                    reason="Stock levels are healthy.",
                 ))
                 continue
 
