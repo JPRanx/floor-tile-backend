@@ -22,6 +22,14 @@ logger = structlog.get_logger(__name__)
 
 
 @dataclass
+class ProductExtract:
+    """Product extracted from Excel for seeding."""
+    sku: str
+    category: str
+    rotation: Optional[str] = None
+
+
+@dataclass
 class InventoryRecord:
     """Parsed inventory record ready for database insertion."""
     snapshot_date: date
@@ -181,6 +189,120 @@ def parse_owner_excel(
     )
 
     return result
+
+
+def extract_products_from_excel(
+    file: Union[str, Path, BytesIO],
+) -> list[ProductExtract]:
+    """
+    Extract unique products from INVENTARIO sheet for seeding.
+
+    Reads the INVENTARIO sheet and extracts unique SKUs with their
+    category and rotation. Used to seed products before parsing.
+
+    Args:
+        file: File path or file-like object
+
+    Returns:
+        List of ProductExtract with normalized SKU, category, and rotation
+    """
+    logger.info("extracting_products_from_excel")
+
+    try:
+        excel = pd.ExcelFile(file, engine="openpyxl")
+    except Exception as e:
+        logger.error("excel_read_failed", error=str(e))
+        raise ExcelParseError(
+            message="Failed to read Excel file",
+            details={"original_error": str(e)}
+        )
+
+    # Find inventory sheet
+    inventory_sheet_names = [
+        "Inventario", "INVENTARIO",
+        "INVENTARIO CERÁMICO", "INVENTARIO CERAMICO",
+        "INVENTARIO MUEBLES"
+    ]
+
+    sheet_name = None
+    for name in inventory_sheet_names:
+        if name in excel.sheet_names:
+            sheet_name = name
+            break
+
+    if not sheet_name:
+        logger.warning("no_inventory_sheet_found_for_products")
+        return []
+
+    try:
+        df = excel.parse(sheet_name)
+    except Exception as e:
+        logger.error("failed_to_parse_inventory_sheet", error=str(e))
+        return []
+
+    # Normalize column names
+    df.columns = [_normalize_column(col) for col in df.columns]
+
+    # Check for required columns
+    if "sku" not in df.columns:
+        logger.warning("sku_column_not_found")
+        return []
+
+    # Extract unique products
+    products_seen = set()
+    products = []
+
+    for _, row in df.iterrows():
+        if pd.isna(row.get("sku")) or str(row.get("sku")).strip() == "":
+            continue
+
+        raw_sku = str(row["sku"]).strip()
+        normalized_sku = _normalize_sku_name(raw_sku)
+
+        if normalized_sku in products_seen:
+            continue
+        products_seen.add(normalized_sku)
+
+        # Get category (map to our enum values)
+        category = row.get("categoria", "")
+        if pd.isna(category):
+            category = "MADERAS"  # Default
+        else:
+            category = str(category).upper().strip()
+            # Map their values to our enum
+            category_map = {
+                "MADERA": "MADERAS",
+                "MADERAS": "MADERAS",
+                "MARMOLIZADO": "MARMOLIZADOS",
+                "MARMOLIZADOS": "MARMOLIZADOS",
+                "EXTERIORES": "EXTERIORES",
+            }
+            category = category_map.get(category, "MADERAS")
+
+        # Get rotation (map to our enum values)
+        rotation = row.get("rotacion", None)
+        if pd.isna(rotation):
+            rotation = None
+        else:
+            rotation = str(rotation).upper().strip()
+            # Map their values to our enum
+            rotation_map = {
+                "ALTA": "ALTA",
+                "MEDIA ALTA": "MEDIA-ALTA",
+                "MEDIA-ALTA": "MEDIA-ALTA",
+                "MEDIA": "MEDIA",
+                "BAJA": "BAJA",
+            }
+            rotation = rotation_map.get(rotation, None)
+
+        products.append(ProductExtract(
+            sku=normalized_sku,
+            category=category,
+            rotation=rotation,
+        ))
+
+    logger.info("products_extracted", count=len(products))
+    return products
 
 
 def _parse_inventory_sheet(

@@ -20,9 +20,10 @@ from models.inventory import (
     InventoryCurrentResponse,
     InventoryUploadResponse,
 )
+from models.product import ProductCreate, Category, Rotation
 from services.inventory_service import get_inventory_service
 from services.product_service import get_product_service
-from parsers.excel_parser import parse_owner_excel
+from parsers.excel_parser import parse_owner_excel, extract_products_from_excel, _normalize_sku_name
 from exceptions import (
     AppError,
     InventoryNotFoundError,
@@ -108,11 +109,11 @@ async def upload_inventory(file: UploadFile = File(...)):
     Upload inventory data from Excel file.
 
     Parses the INVENTARIO sheet from the owner template.
-    Validates all SKUs exist before inserting.
+    Auto-creates products from the sheet if they don't exist.
     Rejects entire upload if any row has errors.
 
     Raises:
-        422: Validation error (invalid SKU, missing columns, etc.)
+        422: Validation error (missing columns, invalid data, etc.)
     """
     logger.info(
         "inventory_upload_started",
@@ -125,20 +126,48 @@ async def upload_inventory(file: UploadFile = File(...)):
         content = await file.read()
         file_obj = BytesIO(content)
 
-        # Get products with owner_code mappings
         product_service = get_product_service()
+
+        # STEP 1: Extract and seed products from Excel
+        extracted_products = extract_products_from_excel(BytesIO(content))
+
+        if extracted_products:
+            # Convert to ProductCreate objects
+            products_to_upsert = []
+            for p in extracted_products:
+                try:
+                    products_to_upsert.append(ProductCreate(
+                        sku=p.sku,
+                        category=Category(p.category),
+                        rotation=Rotation(p.rotation) if p.rotation else None,
+                    ))
+                except ValueError as e:
+                    logger.warning("invalid_product_data", sku=p.sku, error=str(e))
+                    continue
+
+            # Upsert products
+            created, updated = product_service.bulk_upsert(products_to_upsert)
+            logger.info("products_seeded", created=created, updated=updated)
+
+        # STEP 2: Re-fetch products to get updated mappings
         products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
 
         # Build lookup: owner_code -> product_id
-        # Excel SKU column contains owner codes (102, 119, etc.)
         known_owner_codes = {
             p.owner_code: p.id
             for p in products
             if p.owner_code is not None
         }
 
-        # Parse Excel file
-        parse_result = parse_owner_excel(file_obj, known_owner_codes)
+        # Build lookup: normalized SKU name -> product_id
+        known_sku_names = {
+            _normalize_sku_name(p.sku): p.id
+            for p in products
+            if p.sku
+        }
+
+        # STEP 3: Parse Excel file (now products exist)
+        parse_result = parse_owner_excel(file_obj, known_owner_codes, known_sku_names)
 
         # Check for errors
         if not parse_result.success:

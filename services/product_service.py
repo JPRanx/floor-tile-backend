@@ -344,13 +344,66 @@ class ProductService:
             raise DatabaseError("update", str(e))
     
     # ===================
+    # BULK OPERATIONS
+    # ===================
+
+    def bulk_upsert(self, products: list[ProductCreate]) -> tuple[int, int]:
+        """
+        Bulk upsert products (create if not exists, update if exists).
+
+        Args:
+            products: List of ProductCreate objects
+
+        Returns:
+            Tuple of (created_count, updated_count)
+        """
+        logger.info("bulk_upsert_products", count=len(products))
+
+        created = 0
+        updated = 0
+
+        for data in products:
+            try:
+                existing = self.get_by_sku(data.sku)
+
+                if existing:
+                    # Update existing product
+                    update_data = {
+                        "category": data.category.value,
+                        "active": True  # Re-activate if was inactive
+                    }
+                    if data.rotation:
+                        update_data["rotation"] = data.rotation.value
+
+                    self.db.table(self.table).update(update_data).eq("id", existing.id).execute()
+                    updated += 1
+                else:
+                    # Create new product
+                    insert_data = {
+                        "sku": data.sku,
+                        "category": data.category.value,
+                        "rotation": data.rotation.value if data.rotation else None,
+                        "active": True
+                    }
+                    self.db.table(self.table).insert(insert_data).execute()
+                    created += 1
+
+            except Exception as e:
+                logger.error("bulk_upsert_product_failed", sku=data.sku, error=str(e))
+                # Continue with next product
+                continue
+
+        logger.info("bulk_upsert_complete", created=created, updated=updated)
+        return created, updated
+
+    # ===================
     # UTILITY METHODS
     # ===================
-    
+
     def sku_exists(self, sku: str) -> bool:
         """Check if a SKU already exists."""
         return self.get_by_sku(sku) is not None
-    
+
     def count(self, active_only: bool = True) -> int:
         """Count total products."""
         try:
