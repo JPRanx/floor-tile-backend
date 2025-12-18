@@ -169,21 +169,36 @@ async def upload_inventory(file: UploadFile = File(...)):
         # STEP 3: Parse Excel file (now products exist)
         parse_result = parse_owner_excel(file_obj, known_owner_codes, known_sku_names)
 
-        # Check for errors
-        if not parse_result.success:
-            logger.warning(
-                "inventory_upload_validation_failed",
-                error_count=len(parse_result.errors)
-            )
-            raise InventoryUploadError([
-                {
-                    "sheet": e.sheet,
-                    "row": e.row,
-                    "field": e.field,
-                    "error": e.error
-                }
-                for e in parse_result.errors
-            ])
+        # Check for inventory-specific errors only (ignore sales errors)
+        if parse_result.errors:
+            # Filter to only inventory sheet errors
+            inventory_errors = [
+                e for e in parse_result.errors
+                if e.sheet.upper().startswith("INVENTARIO")
+            ]
+            other_errors = len(parse_result.errors) - len(inventory_errors)
+
+            if other_errors > 0:
+                logger.info(
+                    "inventory_upload_ignoring_sales_errors",
+                    sales_error_count=other_errors
+                )
+
+            # Only reject if there are actual inventory errors
+            if inventory_errors:
+                logger.warning(
+                    "inventory_upload_validation_failed",
+                    error_count=len(inventory_errors)
+                )
+                raise InventoryUploadError([
+                    {
+                        "sheet": e.sheet,
+                        "row": e.row,
+                        "field": e.field,
+                        "error": e.error
+                    }
+                    for e in inventory_errors
+                ])
 
         # Convert parsed records to create models
         inventory_service = get_inventory_service()
