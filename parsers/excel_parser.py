@@ -141,23 +141,35 @@ def parse_owner_excel(
             details={"original_error": str(e)}
         )
 
-    # Parse INVENTARIO sheet if present
-    if "Inventario" in excel.sheet_names:
-        _parse_inventory_sheet(excel, known_owner_codes, result)
-    elif "INVENTARIO" in excel.sheet_names:
-        _parse_inventory_sheet(excel, known_owner_codes, result, sheet_name="INVENTARIO")
-    else:
+    # Parse INVENTARIO sheet if present (try multiple naming conventions)
+    inventory_sheet_names = [
+        "Inventario", "INVENTARIO",
+        "INVENTARIO CERÁMICO", "INVENTARIO CERAMICO",
+        "INVENTARIO MUEBLES"
+    ]
+    inventory_found = False
+    for sheet_name in inventory_sheet_names:
+        if sheet_name in excel.sheet_names:
+            _parse_inventory_sheet(excel, known_owner_codes, result, sheet_name=sheet_name, known_sku_names=known_sku_names)
+            inventory_found = True
+            break
+    if not inventory_found:
         logger.debug("inventario_sheet_not_found")
 
     # Parse VENTAS sheet if present (try multiple naming conventions)
-    if "Ventas" in excel.sheet_names:
-        _parse_sales_sheet(excel, known_owner_codes, result, known_sku_names=known_sku_names)
-    elif "VENTAS" in excel.sheet_names:
-        _parse_sales_sheet(excel, known_owner_codes, result, sheet_name="VENTAS", known_sku_names=known_sku_names)
-    elif "Sheet1" in excel.sheet_names:
-        # Fallback: try Sheet1 as sales sheet
-        _parse_sales_sheet(excel, known_owner_codes, result, sheet_name="Sheet1", known_sku_names=known_sku_names)
-    else:
+    sales_sheet_names = [
+        "Ventas", "VENTAS",
+        "VENTAS25CERAMICOS", "VENTAS24",
+        "VENTAS25MUEBLES",
+        "Sheet1"  # Fallback
+    ]
+    sales_found = False
+    for sheet_name in sales_sheet_names:
+        if sheet_name in excel.sheet_names:
+            _parse_sales_sheet(excel, known_owner_codes, result, sheet_name=sheet_name, known_sku_names=known_sku_names)
+            sales_found = True
+            break
+    if not sales_found:
         logger.debug("ventas_sheet_not_found")
 
     logger.info(
@@ -175,7 +187,8 @@ def _parse_inventory_sheet(
     excel: pd.ExcelFile,
     known_owner_codes: dict[str, str],
     result: ExcelParseResult,
-    sheet_name: str = "Inventario"
+    sheet_name: str = "Inventario",
+    known_sku_names: dict[str, str] = None,
 ) -> None:
     """Parse the INVENTARIO sheet."""
     logger.debug("parsing_inventory_sheet", sheet=sheet_name)
@@ -216,18 +229,30 @@ def _parse_inventory_sheet(
             continue
 
         row_errors = []
-        # Owner's Excel SKU column contains integer codes (102, 119, etc.)
-        # Convert to string, pad to 7 chars to match DB format (0000102, 0000119)
-        owner_code = str(row["sku"]).strip().split(".")[0].zfill(7)
-        sku = owner_code  # Keep padded version for record
+        raw_sku = str(row["sku"]).strip()
+        product_id = None
+        sku = raw_sku
 
-        # Validate owner_code against known mappings
-        if owner_code not in known_owner_codes:
+        # Try to match by owner code first (numeric codes like 102, 119)
+        if raw_sku.replace(".", "").isdigit():
+            owner_code = raw_sku.split(".")[0].zfill(7)
+            sku = owner_code
+            product_id = known_owner_codes.get(owner_code)
+
+        # If not numeric or not found, try matching by SKU name
+        if product_id is None and known_sku_names:
+            normalized_sku = _normalize_sku_name(raw_sku)
+            product_id = known_sku_names.get(normalized_sku)
+            if product_id:
+                sku = normalized_sku
+
+        # Still not found - report error
+        if product_id is None:
             row_errors.append(ParseError(
                 sheet=sheet_name,
                 row=row_num,
                 field="SKU",
-                error=f"Unknown product code: {owner_code}"
+                error=f"Unknown product: {raw_sku}"
             ))
 
         # Validate warehouse quantity
@@ -282,7 +307,7 @@ def _parse_inventory_sheet(
             result.inventory.append(InventoryRecord(
                 snapshot_date=parsed_date,
                 sku=sku,
-                product_id=known_owner_codes[owner_code],
+                product_id=product_id,
                 warehouse_qty=round(float(warehouse_qty), 2),
                 in_transit_qty=round(float(in_transit), 2),
                 notes=str(notes) if notes else None,

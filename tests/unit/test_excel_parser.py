@@ -196,7 +196,7 @@ class TestSKUValidation:
         assert result.errors[0].sheet == "Inventario"
         assert result.errors[0].row == 3  # Row 3 (1-indexed + header)
         assert result.errors[0].field == "SKU"
-        assert "0000999" in result.errors[0].error
+        assert "999" in result.errors[0].error  # Shows raw SKU value
 
     def test_invalid_sku_in_sales(self, known_skus, yesterday):
         """Unknown owner code in sales sheet causes error."""
