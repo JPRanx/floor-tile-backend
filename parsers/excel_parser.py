@@ -649,7 +649,12 @@ def _denormalize_columns(cols: list[str]) -> list[str]:
 
 
 def _parse_date(value) -> Optional[date]:
-    """Parse various date formats to date object."""
+    """
+    Parse various date formats to date object.
+
+    IMPORTANT: This parser assumes DD/MM/YYYY format (Latin American standard).
+    American MM/DD/YYYY format is NOT supported.
+    """
     if pd.isna(value):
         return None
 
@@ -662,14 +667,15 @@ def _parse_date(value) -> Optional[date]:
     # Try string parsing
     try:
         value_str = str(value).strip()
-        # Try common formats
-        for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"]:
+        # Try DD/MM/YYYY formats only (Latin American standard)
+        # DO NOT include %m/%d/%Y (American format)
+        for fmt in ["%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d", "%Y/%m/%d"]:
             try:
                 return datetime.strptime(value_str, fmt).date()
             except ValueError:
                 continue
-        # Try pandas parsing as fallback
-        return pd.to_datetime(value_str).date()
+        # Try pandas parsing as fallback with dayfirst=True
+        return pd.to_datetime(value_str, dayfirst=True).date()
     except Exception:
         return None
 

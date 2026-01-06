@@ -447,7 +447,12 @@ def _swap_day_month(d: date) -> Optional[date]:
 
 
 def _parse_date(value) -> Optional[date]:
-    """Parse various date formats to date object."""
+    """
+    Parse various date formats to date object.
+
+    IMPORTANT: This parser assumes DD/MM/YYYY format (Latin American standard).
+    American MM/DD/YYYY format is NOT supported.
+    """
     if pd.isna(value):
         return None
 
@@ -465,14 +470,15 @@ def _parse_date(value) -> Optional[date]:
         if not value_str:
             return None
 
-        # Try common formats
-        for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y"]:
+        # Try DD/MM/YYYY formats only (Latin American standard)
+        # DO NOT include %m/%d/%Y (American format)
+        for fmt in ["%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d", "%Y/%m/%d"]:
             try:
                 return datetime.strptime(value_str, fmt).date()
             except ValueError:
                 continue
 
-        # Try pandas parsing as fallback with dayfirst=True for European format
+        # Try pandas parsing as fallback with dayfirst=True
         result = pd.to_datetime(value_str, dayfirst=True)
         if pd.isna(result):
             return None
