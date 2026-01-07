@@ -306,3 +306,81 @@ class BoatScheduleUploadError(ValidationError):
             message=f"Upload validation failed with {len(errors)} errors",
             details={"errors": errors}
         )
+
+
+# ===================
+# FACTORY ORDER ERRORS
+# ===================
+
+class FactoryOrderNotFoundError(NotFoundError):
+    """Factory order not found."""
+
+    def __init__(self, order_id: str):
+        super().__init__(
+            resource="Factory order",
+            identifier=order_id,
+            code="FACTORY_ORDER_NOT_FOUND"
+        )
+
+
+class FactoryOrderPVExistsError(DuplicateError):
+    """Factory order PV number already exists."""
+
+    def __init__(self, pv_number: str):
+        super().__init__(
+            resource="Factory order",
+            field="pv_number",
+            value=pv_number
+        )
+
+
+class InvalidStatusTransitionError(ValidationError):
+    """Invalid status transition."""
+
+    def __init__(self, current_status: str, new_status: str, terminal_status: str = "SHIPPED"):
+        super().__init__(
+            code="INVALID_STATUS_TRANSITION",
+            message=f"Cannot transition from {current_status} to {new_status}",
+            details={
+                "current_status": current_status,
+                "new_status": new_status,
+                "reason": f"Status can only move forward, and {terminal_status} is terminal"
+            }
+        )
+
+
+# ===================
+# SHIPMENT ERRORS
+# ===================
+
+class ShipmentNotFoundError(NotFoundError):
+    """Shipment not found."""
+
+    def __init__(self, shipment_id: str):
+        super().__init__(
+            resource="Shipment",
+            identifier=shipment_id,
+            code="SHIPMENT_NOT_FOUND"
+        )
+
+
+class ShipmentBookingExistsError(DuplicateError):
+    """Shipment booking number already exists."""
+
+    def __init__(self, booking_number: str):
+        super().__init__(
+            resource="Shipment",
+            field="booking_number",
+            value=booking_number
+        )
+
+
+class ShipmentSHPExistsError(DuplicateError):
+    """Shipment SHP number already exists."""
+
+    def __init__(self, shp_number: str):
+        super().__init__(
+            resource="Shipment",
+            field="shp_number",
+            value=shp_number
+        )

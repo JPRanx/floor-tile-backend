@@ -37,6 +37,16 @@ from exceptions.errors import (
     # Boat Schedules
     BoatScheduleNotFoundError,
     BoatScheduleUploadError,
+
+    # Factory Orders
+    FactoryOrderNotFoundError,
+    FactoryOrderPVExistsError,
+    InvalidStatusTransitionError,
+
+    # Shipments
+    ShipmentNotFoundError,
+    ShipmentBookingExistsError,
+    ShipmentSHPExistsError,
 )
 
 __all__ = [
@@ -72,4 +82,14 @@ __all__ = [
     # Boat Schedules
     "BoatScheduleNotFoundError",
     "BoatScheduleUploadError",
+
+    # Factory Orders
+    "FactoryOrderNotFoundError",
+    "FactoryOrderPVExistsError",
+    "InvalidStatusTransitionError",
+
+    # Shipments
+    "ShipmentNotFoundError",
+    "ShipmentBookingExistsError",
+    "ShipmentSHPExistsError",
 ]

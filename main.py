@@ -136,12 +136,13 @@ async def root():
             "products": "/api/products",
             "inventory": "/api/inventory",
             "sales": "/api/sales",
-            "factory": "/api/factory",
+            "factory_orders": "/api/factory-orders",
             "shipments": "/api/shipments",
             "containers": "/api/containers",
             "dashboard": "/api/dashboard",
             "recommendations": "/api/recommendations",
             "order_builder": "/api/order-builder",
+            "boats": "/api/boats",
             "alerts": "/api/alerts",
             "settings": "/api/settings"
         }
@@ -192,6 +193,8 @@ from routes.settings import router as settings_router
 from routes.recommendations import router as recommendations_router
 from routes.boats import router as boats_router
 from routes.order_builder import router as order_builder_router
+from routes.factory_orders import router as factory_orders_router
+from routes.shipments import router as shipments_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -201,6 +204,8 @@ app.include_router(settings_router, prefix="/api/settings", tags=["Settings"])
 app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
 app.include_router(boats_router, prefix="/api/boats", tags=["Boats"])
 app.include_router(order_builder_router)  # Prefix already in router
+app.include_router(factory_orders_router)  # Prefix already in router
+app.include_router(shipments_router)  # Prefix already in router
 
 
 if __name__ == "__main__":
