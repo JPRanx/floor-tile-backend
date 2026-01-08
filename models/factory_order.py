@@ -145,7 +145,7 @@ class FactoryOrderUpdate(BaseSchema):
     Update factory order.
 
     All fields optional - only provided fields are updated.
-    Status is updated via separate endpoint.
+    Status can be updated here or via dedicated /status endpoint.
     """
 
     pv_number: Optional[str] = Field(
@@ -156,6 +156,10 @@ class FactoryOrderUpdate(BaseSchema):
     order_date: Optional[date] = Field(
         None,
         description="Order date"
+    )
+    status: Optional[OrderStatus] = Field(
+        None,
+        description="Order status"
     )
     notes: Optional[str] = Field(
         None,

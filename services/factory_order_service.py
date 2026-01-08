@@ -365,6 +365,11 @@ class FactoryOrderService:
                 update_data["order_date"] = data.order_date.isoformat()
             if data.notes is not None:
                 update_data["notes"] = data.notes
+            if data.status is not None:
+                # Validate status transition
+                if not is_valid_status_transition(existing.status, data.status):
+                    raise InvalidStatusTransitionError(existing.status.value, data.status.value)
+                update_data["status"] = data.status.value
 
             if not update_data:
                 return self.get_by_id(order_id)
