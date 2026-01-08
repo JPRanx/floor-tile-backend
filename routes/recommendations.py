@@ -110,11 +110,13 @@ async def get_recommendations_summary():
             "total_recommended_m2": result.total_recommended_m2,
             "total_warnings": len(result.warnings),
             "by_priority": {
-                "critical": result.critical_count,
-                "high": result.high_count,
-                "medium": result.medium_count,
-                "low": result.low_count,
-            }
+                "high_priority": result.high_priority_count,
+                "consider": result.consider_count,
+                "well_covered": result.well_covered_count,
+                "your_call": result.your_call_count,
+            },
+            "next_boat_arrival": result.next_boat_arrival,
+            "days_to_next_boat": result.days_to_next_boat,
         }
 
     except Exception as e:

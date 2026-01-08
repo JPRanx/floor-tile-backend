@@ -151,20 +151,18 @@ async def get_dashboard_summary():
         return {
             "stockout": {
                 "total_products": stockout.total_products,
-                "critical": stockout.critical_count,
-                "warning": stockout.warning_count,
-                "ok": stockout.ok_count,
-                "low_volume": stockout.low_volume_count,
-                "overstock": stockout.overstock_count,
-                "no_recent_sales": stockout.no_recent_sales_count,
-                "no_history": stockout.no_history_count,
-                "lead_time_days": stockout.lead_time_days,
-                "warning_threshold_days": stockout.warning_threshold_days,
-                "low_volume_threshold_m2_week": stockout.low_volume_threshold_m2_week,
+                "high_priority": stockout.high_priority_count,
+                "consider": stockout.consider_count,
+                "well_covered": stockout.well_covered_count,
+                "your_call": stockout.your_call_count,
+                "next_boat_departure": stockout.next_boat_departure,
+                "second_boat_departure": stockout.second_boat_departure,
+                "days_to_next_boat_departure": stockout.days_to_next_boat_departure,
+                "days_to_second_boat_departure": stockout.days_to_second_boat_departure,
             },
             "alerts": {
-                "urgent_count": stockout.critical_count,
-                "attention_count": stockout.warning_count + stockout.low_volume_count,
+                "urgent_count": stockout.high_priority_count,
+                "attention_count": stockout.consider_count,
             }
         }
 
