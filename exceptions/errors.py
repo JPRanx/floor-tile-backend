@@ -384,3 +384,18 @@ class ShipmentSHPExistsError(DuplicateError):
             field="shp_number",
             value=shp_number
         )
+
+
+# ===================
+# SHIPMENT EVENT ERRORS
+# ===================
+
+class ShipmentEventNotFoundError(NotFoundError):
+    """No events found for shipment."""
+
+    def __init__(self, shipment_id: str):
+        super().__init__(
+            resource="Shipment events",
+            identifier=shipment_id,
+            code="SHIPMENT_EVENT_NOT_FOUND"
+        )

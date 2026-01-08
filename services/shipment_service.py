@@ -7,6 +7,7 @@ See STANDARDS_ERRORS.md for error handling patterns.
 
 from typing import Optional
 from decimal import Decimal
+from datetime import datetime
 import structlog
 
 from config import get_supabase_client
@@ -18,6 +19,8 @@ from models.shipment import (
     ShipmentStatus,
     is_valid_shipment_status_transition,
 )
+from models.shipment_event import ShipmentEventCreate
+from services.shipment_event_service import get_shipment_event_service
 from exceptions import (
     ShipmentNotFoundError,
     ShipmentBookingExistsError,
@@ -311,6 +314,15 @@ class ShipmentService:
                 shp_number=data.shp_number
             )
 
+            # Create initial shipment event
+            event_service = get_shipment_event_service()
+            event_service.create(ShipmentEventCreate(
+                shipment_id=shipment_id,
+                status=ShipmentStatus.AT_FACTORY,
+                occurred_at=datetime.utcnow(),
+                notes="Shipment created"
+            ))
+
             return self.get_by_id(shipment_id)
 
         except (ShipmentBookingExistsError, ShipmentSHPExistsError):
@@ -452,6 +464,15 @@ class ShipmentService:
                 from_status=current_status.value,
                 to_status=new_status.value
             )
+
+            # Create shipment event for status change
+            event_service = get_shipment_event_service()
+            event_service.create(ShipmentEventCreate(
+                shipment_id=shipment_id,
+                status=new_status,
+                occurred_at=datetime.utcnow(),
+                notes=f"Status changed from {current_status.value} to {new_status.value}"
+            ))
 
             return self.get_by_id(shipment_id)
 

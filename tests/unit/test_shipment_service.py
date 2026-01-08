@@ -67,8 +67,10 @@ def sample_shipment_data():
 @pytest.fixture
 def mock_db_shipments(mock_supabase, sample_shipment_data):
     """Patch database for shipment service."""
-    with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase):
+    with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase), \
+         patch("services.shipment_event_service.get_supabase_client", return_value=mock_supabase):
         mock_supabase.set_table_data("shipments", [sample_shipment_data])
+        mock_supabase.set_table_data("shipment_events", [])
         yield mock_supabase
 
 
@@ -311,8 +313,10 @@ class TestShipmentServiceCreate:
             "updated_at": "2025-01-06T10:00:00Z",
         }
 
-        with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase):
+        with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase), \
+             patch("services.shipment_event_service.get_supabase_client", return_value=mock_supabase):
             mock_supabase.set_table_data("shipments", [created_shipment])
+            mock_supabase.set_table_data("shipment_events", [])
             service = ShipmentService()
 
             data = ShipmentCreate(

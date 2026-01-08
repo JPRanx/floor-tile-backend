@@ -47,6 +47,9 @@ from exceptions.errors import (
     ShipmentNotFoundError,
     ShipmentBookingExistsError,
     ShipmentSHPExistsError,
+
+    # Shipment Events
+    ShipmentEventNotFoundError,
 )
 
 __all__ = [
@@ -92,4 +95,7 @@ __all__ = [
     "ShipmentNotFoundError",
     "ShipmentBookingExistsError",
     "ShipmentSHPExistsError",
+
+    # Shipment Events
+    "ShipmentEventNotFoundError",
 ]
