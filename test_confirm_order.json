@@ -1,0 +1,13 @@
+{
+  "boat_id": "test-boat-123",
+  "boat_name": "MSC Mediterranean",
+  "boat_departure": "2026-02-15",
+  "products": [
+    {
+      "product_id": "58897249-a854-42cc-a2cc-1575e5981c8a",
+      "sku": "ALMENDRO BEIGE BTE",
+      "pallets": 14
+    }
+  ],
+  "notes": "Test order from Order Builder integration"
+}

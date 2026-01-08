@@ -7,6 +7,7 @@ See STANDARDS_ERRORS.md for error handling patterns.
 
 from typing import Optional
 from decimal import Decimal
+from datetime import date
 import structlog
 
 from config import get_supabase_client
@@ -513,6 +514,30 @@ class FactoryOrderService:
             return result.count or 0
         except Exception as e:
             logger.error("count_factory_orders_failed", error=str(e))
+            raise DatabaseError("count", str(e))
+
+    def count_by_date(self, order_date: date) -> int:
+        """
+        Count factory orders created on a specific date.
+
+        Used for auto-generating sequential PV numbers (e.g., PV-20260108-001).
+
+        Args:
+            order_date: Date to count orders for
+
+        Returns:
+            Number of orders with this order_date
+        """
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("id", count="exact")
+                .eq("order_date", order_date.isoformat())
+                .execute()
+            )
+            return result.count or 0
+        except Exception as e:
+            logger.error("count_by_date_failed", date=order_date.isoformat(), error=str(e))
             raise DatabaseError("count", str(e))
 
 

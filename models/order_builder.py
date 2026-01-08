@@ -127,3 +127,46 @@ class OrderBuilderResponse(BaseSchema):
 
     # Summary
     summary: OrderBuilderSummary
+
+
+# ===================
+# CONFIRM ORDER (Create Factory Order)
+# ===================
+
+class ConfirmOrderProductItem(BaseSchema):
+    """Product item for order confirmation."""
+
+    product_id: str = Field(..., description="Product UUID")
+    sku: str = Field(..., description="Product SKU")
+    pallets: int = Field(..., gt=0, description="Number of pallets to order")
+
+
+class ConfirmOrderRequest(BaseSchema):
+    """Request to confirm order and create factory_order."""
+
+    boat_id: str = Field(..., description="Boat schedule UUID")
+    boat_name: str = Field(..., description="Boat name for notes")
+    boat_departure: date = Field(..., description="Boat departure date")
+    products: list[ConfirmOrderProductItem] = Field(
+        ...,
+        min_length=1,
+        description="Selected products with pallets"
+    )
+    pv_number: Optional[str] = Field(
+        None,
+        description="Optional PV number. Auto-generated if not provided."
+    )
+    notes: Optional[str] = Field(None, description="Optional order notes")
+
+
+class ConfirmOrderResponse(BaseSchema):
+    """Response after confirming order."""
+
+    factory_order_id: str = Field(..., description="Created factory order UUID")
+    pv_number: str = Field(..., description="PV number (e.g., PV-20260108-001)")
+    status: str = Field(..., description="Order status (PENDING)")
+    order_date: date = Field(..., description="Order date")
+    items_count: int = Field(..., description="Number of line items")
+    total_m2: Decimal = Field(..., description="Total m² ordered")
+    total_pallets: int = Field(..., description="Total pallets ordered")
+    created_at: str = Field(..., description="Created timestamp")
