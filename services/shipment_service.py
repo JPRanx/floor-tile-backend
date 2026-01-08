@@ -20,13 +20,16 @@ from models.shipment import (
     is_valid_shipment_status_transition,
 )
 from models.shipment_event import ShipmentEventCreate
+from models.factory_order import OrderStatus, FactoryOrderStatusUpdate
 from services.shipment_event_service import get_shipment_event_service
+from services.factory_order_service import get_factory_order_service
 from exceptions import (
     ShipmentNotFoundError,
     ShipmentBookingExistsError,
     ShipmentSHPExistsError,
     InvalidStatusTransitionError,
     DatabaseError,
+    FactoryOrderNotFoundError,
 )
 
 logger = structlog.get_logger(__name__)
@@ -322,6 +325,34 @@ class ShipmentService:
                 occurred_at=datetime.utcnow(),
                 notes="Shipment created"
             ))
+
+            # Auto-update factory order status to SHIPPED if linked
+            if data.factory_order_id:
+                try:
+                    factory_order_service = get_factory_order_service()
+                    factory_order_service.update_status(
+                        order_id=data.factory_order_id,
+                        data=FactoryOrderStatusUpdate(status=OrderStatus.SHIPPED)
+                    )
+                    logger.info(
+                        "factory_order_auto_shipped",
+                        factory_order_id=data.factory_order_id,
+                        shipment_id=shipment_id
+                    )
+                except FactoryOrderNotFoundError:
+                    # Log warning but don't fail shipment creation
+                    # FK constraint already validated the ID exists
+                    logger.warning(
+                        "factory_order_not_found_for_auto_ship",
+                        factory_order_id=data.factory_order_id
+                    )
+                except Exception as e:
+                    # Log error but don't fail shipment creation
+                    logger.error(
+                        "factory_order_auto_ship_failed",
+                        factory_order_id=data.factory_order_id,
+                        error=str(e)
+                    )
 
             return self.get_by_id(shipment_id)
 
