@@ -399,3 +399,29 @@ class ShipmentEventNotFoundError(NotFoundError):
             identifier=shipment_id,
             code="SHIPMENT_EVENT_NOT_FOUND"
         )
+
+
+# ===================
+# CONTAINER ERRORS
+# ===================
+
+class ContainerNotFoundError(NotFoundError):
+    """Container not found."""
+
+    def __init__(self, container_id: str):
+        super().__init__(
+            resource="Container",
+            identifier=container_id,
+            code="CONTAINER_NOT_FOUND"
+        )
+
+
+class ContainerItemNotFoundError(NotFoundError):
+    """Container item not found."""
+
+    def __init__(self, item_id: str):
+        super().__init__(
+            resource="Container item",
+            identifier=item_id,
+            code="CONTAINER_ITEM_NOT_FOUND"
+        )
