@@ -6,7 +6,7 @@ Sends formatted alert messages to a Telegram channel/chat.
 
 import os
 from typing import Optional
-import requests
+import httpx
 import structlog
 
 from models.alert import AlertResponse, AlertType, AlertSeverity
@@ -131,7 +131,7 @@ def send_message(message: str, parse_mode: str = "Markdown") -> bool:
     try:
         logger.info("sending_telegram_message", chat_id=chat_id)
 
-        response = requests.post(url, json=payload, timeout=10)
+        response = httpx.post(url, json=payload, timeout=10)
         response.raise_for_status()
 
         result = response.json()
@@ -144,7 +144,7 @@ def send_message(message: str, parse_mode: str = "Markdown") -> bool:
         logger.info("telegram_message_sent", message_id=result.get("result", {}).get("message_id"))
         return True
 
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         logger.error("telegram_request_failed", error=str(e))
         raise TelegramError(f"Failed to send Telegram message: {str(e)}")
 
@@ -194,7 +194,7 @@ def test_connection() -> dict:
     url = f"https://api.telegram.org/bot{bot_token}/getMe"
 
     try:
-        response = requests.get(url, timeout=10)
+        response = httpx.get(url, timeout=10)
         response.raise_for_status()
 
         result = response.json()
@@ -217,6 +217,6 @@ def test_connection() -> dict:
             "test_message_sent": True,
         }
 
-    except requests.exceptions.RequestException as e:
+    except httpx.RequestError as e:
         logger.error("telegram_connection_test_failed", error=str(e))
         raise TelegramError(f"Failed to test Telegram connection: {str(e)}")
