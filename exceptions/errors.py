@@ -425,3 +425,30 @@ class ContainerItemNotFoundError(NotFoundError):
             identifier=item_id,
             code="CONTAINER_ITEM_NOT_FOUND"
         )
+
+
+# ===================
+# ALERT ERRORS
+# ===================
+
+class AlertNotFoundError(NotFoundError):
+    """Alert not found."""
+
+    def __init__(self, alert_id: str):
+        super().__init__(
+            resource="Alert",
+            identifier=alert_id,
+            code="ALERT_NOT_FOUND"
+        )
+
+
+class TelegramError(AppError):
+    """Telegram API error."""
+
+    def __init__(self, message: str, details: Optional[dict] = None):
+        super().__init__(
+            code="TELEGRAM_ERROR",
+            message=message,
+            status_code=500,
+            details=details
+        )
