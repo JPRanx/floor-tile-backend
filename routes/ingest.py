@@ -266,12 +266,9 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                 destination_port_id = destination_port.id
                 logger.info("destination_port_resolved", name=data.pod, port_id=destination_port_id)
 
-            # Ports are required for shipment creation
-            if not origin_port_id or not destination_port_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Both origin and destination ports are required"
-                )
+            # Ports are optional - can be added later from departure/arrival documents
+            if not origin_port_id and not destination_port_id:
+                logger.info("shipment_created_without_ports", shp_number=shp_number)
 
             create_data = ShipmentCreate(
                 shp_number=shp_number,

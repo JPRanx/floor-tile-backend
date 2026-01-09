@@ -62,8 +62,8 @@ class ShipmentCreate(BaseSchema):
     """
     Create a new shipment.
 
-    Required: origin_port_id, destination_port_id
-    Optional: All other fields
+    All fields optional - can create minimal shipment from booking
+    and add ports later from departure/arrival documents.
     """
 
     # FK references
@@ -79,13 +79,13 @@ class ShipmentCreate(BaseSchema):
         None,
         description="Shipping company UUID"
     )
-    origin_port_id: str = Field(
-        ...,
-        description="Origin port UUID"
+    origin_port_id: Optional[str] = Field(
+        None,
+        description="Origin port UUID (can be added later)"
     )
-    destination_port_id: str = Field(
-        ...,
-        description="Destination port UUID"
+    destination_port_id: Optional[str] = Field(
+        None,
+        description="Destination port UUID (can be added later)"
     )
 
     # Reference numbers
@@ -240,8 +240,8 @@ class ShipmentResponse(BaseSchema, TimestampMixin):
     factory_order_id: Optional[str] = Field(None, description="Factory order UUID")
     boat_schedule_id: Optional[str] = Field(None, description="Boat schedule UUID")
     shipping_company_id: Optional[str] = Field(None, description="Shipping company UUID")
-    origin_port_id: str = Field(..., description="Origin port UUID")
-    destination_port_id: str = Field(..., description="Destination port UUID")
+    origin_port_id: Optional[str] = Field(None, description="Origin port UUID")
+    destination_port_id: Optional[str] = Field(None, description="Destination port UUID")
 
     # Status
     status: ShipmentStatus = Field(..., description="Current status")

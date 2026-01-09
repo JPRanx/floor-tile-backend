@@ -68,9 +68,15 @@ class DocumentParserService:
     ]
 
     VESSEL_PATTERNS = [
-        r'VESSEL[:\s]+([A-Z\s]{3,50}?)(?=\n|VOY)',
-        r'VESSEL\s+NAME[:\s]+([A-Z\s]+)',
+        # M/V or MV prefix: M/V PERITO MORENO
+        r'(?:M/?V|MV)\s+([A-Z][A-Z0-9\s]{2,25}?)(?=\s*(?:\n|$|VOY|/))',
+        # VESSEL: followed by vessel name (1-3 words, 3+ chars each)
+        # Excludes generic text by requiring compact vessel-like names
+        r'VESSEL(?:\s+NAME)?[:\s]+([A-Z]{3,15}(?:\s+[A-Z]{3,15}){0,2})(?=\s*(?:\n|$|VOY))',
     ]
+
+    # Words that should NOT appear in vessel names (indicates garbage extraction)
+    VESSEL_EXCLUDE_WORDS = {'OPERATOR', 'FOR', 'THE', 'PARTICULAR', 'OCEAN', 'CARRIER', 'SHIPPING', 'LINE'}
 
     def extract_text_from_pdf(self, pdf_bytes: bytes) -> str:
         """
@@ -344,6 +350,36 @@ class DocumentParserService:
 
         return sum(scores) / len(scores)
 
+    def validate_vessel_name(self, vessel: Optional[ParsedFieldConfidence]) -> Optional[ParsedFieldConfidence]:
+        """
+        Validate extracted vessel name and reject garbage text.
+
+        Args:
+            vessel: Extracted vessel field
+
+        Returns:
+            Vessel if valid, None if garbage text detected
+        """
+        if not vessel:
+            return None
+
+        # Check if vessel name contains excluded words (garbage text)
+        vessel_words = set(vessel.value.upper().split())
+        if vessel_words & self.VESSEL_EXCLUDE_WORDS:
+            logger.info(
+                "vessel_rejected_garbage",
+                value=vessel.value,
+                matched_excluded=list(vessel_words & self.VESSEL_EXCLUDE_WORDS)
+            )
+            return None
+
+        # Reject very short names (likely partial matches)
+        if len(vessel.value) < 4:
+            logger.info("vessel_rejected_too_short", value=vessel.value)
+            return None
+
+        return vessel
+
     def parse_pdf(self, pdf_bytes: bytes) -> ParsedDocumentData:
         """
         Parse PDF and extract all shipment data.
@@ -379,8 +415,9 @@ class DocumentParserService:
         # Parse ports
         pol, pod = self.parse_ports(text)
 
-        # Parse vessel
-        vessel = self.parse_field(text, self.VESSEL_PATTERNS, "vessel")
+        # Parse vessel and validate (reject garbage text)
+        vessel_raw = self.parse_field(text, self.VESSEL_PATTERNS, "vessel")
+        vessel = self.validate_vessel_name(vessel_raw)
 
         # Build parsed data
         parsed_data = ParsedDocumentData(
