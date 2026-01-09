@@ -158,7 +158,7 @@ def mock_supabase() -> MockSupabaseClient:
 def mock_db(mock_supabase) -> Generator:
     """
     Patch the database client with mock.
-    
+
     Usage:
         def test_something(mock_db, mock_supabase):
             mock_supabase.set_table_data("products", [...])
@@ -166,7 +166,9 @@ def mock_db(mock_supabase) -> Generator:
     """
     with patch("config.database.get_supabase_client", return_value=mock_supabase):
         with patch("services.product_service.get_supabase_client", return_value=mock_supabase):
-            yield mock_supabase
+            with patch("services.port_service.get_supabase_client", return_value=mock_supabase):
+                with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase):
+                    yield mock_supabase
 
 
 @pytest.fixture
