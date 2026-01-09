@@ -168,13 +168,15 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                 logger.info("existing_shipment_found_by_booking", shipment_id=existing_shipment.id)
 
         # Determine status based on document type
+        # HBL/MBL don't change status - they just add reference info
         status_map = {
             "booking": ShipmentStatus.AT_FACTORY,  # Booking confirmed, still at factory
             "departure": ShipmentStatus.IN_TRANSIT,  # Departed from origin port
             "arrival": ShipmentStatus.AT_DESTINATION_PORT,  # Arrived at destination
-            "hbl": ShipmentStatus.AT_ORIGIN_PORT,  # HBL issued, at origin port
-            "mbl": ShipmentStatus.AT_ORIGIN_PORT,  # MBL issued, at origin port
         }
+
+        # HBL/MBL should NOT change status
+        should_update_status = data.document_type not in ["hbl", "mbl"]
         new_status = status_map.get(data.document_type, ShipmentStatus.AT_FACTORY)
 
         if existing_shipment:
@@ -193,8 +195,9 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                 update_data
             )
 
-            # Update status separately if it changed
-            if new_status != existing_shipment.status:
+            # Update status separately if it changed AND we should update status
+            # HBL/MBL documents should NOT change status
+            if should_update_status and new_status != existing_shipment.status:
                 updated_shipment = shipment_service.update_status(
                     existing_shipment.id,
                     new_status
@@ -222,6 +225,16 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
 
         else:
             # CREATE new shipment
+
+            # HBL/MBL documents should only update existing shipments, not create new ones
+            if data.document_type in ["hbl", "mbl"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot create new shipment from {data.document_type.upper()} document. "
+                           f"No existing shipment found with SHP '{data.shp_number}' or booking '{data.booking_number}'. "
+                           "Please ingest a booking confirmation first."
+                )
+
             # Generate SHP number if not provided
             shp_number = data.shp_number
             if not shp_number:

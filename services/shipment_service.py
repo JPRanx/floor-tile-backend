@@ -189,26 +189,50 @@ class ShipmentService:
         """
         Get a shipment by SHP number.
 
+        Handles flexible matching:
+        - "0049831" matches "SHP0049831" (adds prefix)
+        - "SHP0049831" matches "0049831" (strips prefix)
+        - Exact match always tried first
+
         Args:
-            shp_number: TIBA shipment reference
+            shp_number: TIBA shipment reference (with or without SHP prefix)
 
         Returns:
             ShipmentResponse or None if not found
         """
         logger.debug("getting_shipment_by_shp", shp_number=shp_number)
 
+        shp_upper = shp_number.upper().strip()
+
+        # Build list of variants to try
+        variants = [shp_upper]
+
+        # If doesn't have SHP prefix, try with it
+        if not shp_upper.startswith("SHP"):
+            variants.append(f"SHP{shp_upper}")
+
+        # If has SHP prefix, try without it
+        if shp_upper.startswith("SHP"):
+            variants.append(shp_upper[3:])  # Remove "SHP" prefix
+
         try:
-            result = (
-                self.db.table(self.table)
-                .select("*")
-                .eq("shp_number", shp_number.upper())
-                .execute()
-            )
+            for variant in variants:
+                result = (
+                    self.db.table(self.table)
+                    .select("*")
+                    .eq("shp_number", variant)
+                    .execute()
+                )
 
-            if not result.data:
-                return None
+                if result.data:
+                    logger.debug(
+                        "shipment_found_by_shp_variant",
+                        original=shp_number,
+                        matched_variant=variant
+                    )
+                    return self._row_to_response(result.data[0])
 
-            return self._row_to_response(result.data[0])
+            return None
 
         except Exception as e:
             logger.error("get_shipment_by_shp_failed", shp_number=shp_number, error=str(e))

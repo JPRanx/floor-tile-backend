@@ -37,9 +37,10 @@ class DocumentParserService:
 
     BOOKING_PATTERNS = [
         r'BOOKING[#:\s]*([A-Z]{3}\d{7})',  # BGA0505879
-        r'N[úu]mero de Booking[:\s]*([A-Z0-9-]+)',  # Spanish
-        r'Booking\s+No[.:]?\s*([A-Z0-9-]+)',
-        r'B/L\s*No[.:]?\s*([A-Z0-9-]+)',
+        r'BOOKING\s*(?:NUMBER|NO|#|:)\s*[:\s]*([A-Z0-9]{5,})',  # Generic booking number
+        r'N[úu]mero de Booking[:\s]*([A-Z0-9]{5,})',  # Spanish (min 5 chars)
+        r'Booking\s+No[.:]?\s*([A-Z]{2,}\d{5,})',  # At least 2 letters + 5 digits
+        # NOTE: B/L patterns removed - those are Bill of Lading numbers, not booking numbers
     ]
 
     PV_PATTERNS = [
