@@ -18,16 +18,59 @@ from models.shipment import (
     ShipmentCreate,
     ShipmentUpdate,
     ShipmentStatus,
+    ShipmentStatusUpdate,
 )
 from services.document_parser_service import get_parser_service
 from services.shipment_service import get_shipment_service
 from services.port_service import get_port_service
 from services.alert_service import get_alert_service
+from services.container_service import get_container_service
 from models.alert import AlertType, AlertSeverity, AlertCreate
+from models.container import ContainerCreate
 from exceptions import NotFoundError, DatabaseError
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/shipments/ingest", tags=["Shipment Ingestion"])
+
+
+def _create_containers_for_shipment(shipment_id: str, container_numbers: list[str]) -> int:
+    """
+    Create containers for a shipment, avoiding duplicates.
+
+    Args:
+        shipment_id: UUID of the shipment
+        container_numbers: List of container numbers to create
+
+    Returns:
+        Number of containers created
+    """
+    if not container_numbers:
+        return 0
+
+    container_service = get_container_service()
+
+    # Get existing containers for this shipment
+    existing_containers = container_service.get_by_shipment(shipment_id)
+    existing_numbers = {c.container_number.upper() for c in existing_containers if c.container_number}
+
+    created_count = 0
+    for container_num in container_numbers:
+        # Skip if already exists
+        if container_num.upper() in existing_numbers:
+            logger.debug("container_already_exists", container_number=container_num)
+            continue
+
+        try:
+            container_service.create(ContainerCreate(
+                shipment_id=shipment_id,
+                container_number=container_num.upper()
+            ))
+            created_count += 1
+            logger.info("container_created", shipment_id=shipment_id, container_number=container_num)
+        except Exception as e:
+            logger.warning("container_creation_failed", container_number=container_num, error=str(e))
+
+    return created_count
 
 
 @router.post("/pdf", response_model=IngestResponse)
@@ -199,10 +242,38 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
 
             # Update status separately if it changed AND we should update status
             # HBL/MBL documents should NOT change status
-            if should_update_status and new_status != existing_shipment.status:
+            # Note: existing_shipment.status is a string value, new_status is ShipmentStatus enum
+            if should_update_status and new_status.value != existing_shipment.status:
                 updated_shipment = shipment_service.update_status(
                     existing_shipment.id,
-                    new_status
+                    ShipmentStatusUpdate(status=new_status)
+                )
+
+            # Update destination port if provided and not already set
+            if data.pod and not existing_shipment.destination_port_id:
+                port_service = get_port_service()
+                destination_port = port_service.find_or_create(
+                    name=data.pod,
+                    port_type="DESTINATION",
+                    country="Guatemala"
+                )
+                shipment_service.update(
+                    existing_shipment.id,
+                    ShipmentUpdate(destination_port_id=destination_port.id)
+                )
+                logger.info("destination_port_updated", name=data.pod, port_id=destination_port.id)
+
+            # Create containers from document (avoiding duplicates)
+            if data.containers:
+                containers_created = _create_containers_for_shipment(
+                    existing_shipment.id,
+                    data.containers
+                )
+                logger.info(
+                    "containers_added_to_shipment",
+                    shipment_id=existing_shipment.id,
+                    containers_requested=len(data.containers),
+                    containers_created=containers_created
                 )
 
             # Add note about the update
@@ -289,6 +360,18 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                 shipment_id=new_shipment.id,
                 shp_number=new_shipment.shp_number
             )
+
+            # Create containers from document
+            if data.containers:
+                containers_created = _create_containers_for_shipment(
+                    new_shipment.id,
+                    data.containers
+                )
+                logger.info(
+                    "containers_created_for_shipment",
+                    shipment_id=new_shipment.id,
+                    containers_count=containers_created
+                )
 
             # Send Telegram alert for new shipment
             try:

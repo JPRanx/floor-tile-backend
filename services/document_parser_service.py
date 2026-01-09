@@ -33,6 +33,8 @@ class DocumentParserService:
         r'SHP[#:\s]*(\d{7})',  # SHP0065011
         r'SHP[#:\s]*(\d{4,7})',  # SHP followed by 4-7 digits
         r'embarque\s+SHP(\d{7})',  # Spanish: embarque SHP0065011
+        r'B/L\s*No[.:]?\s*(SHP\d{7})',  # B/L No.: SHP0045642 (HBL format)
+        r'B/L\s*No[.:]?\s*(\d{7})',  # B/L No.: 0045642 (numeric only)
     ]
 
     BOOKING_PATTERNS = [
@@ -40,6 +42,7 @@ class DocumentParserService:
         r'BOOKING\s*(?:NUMBER|NO|#|:)\s*[:\s]*([A-Z0-9]{5,})',  # Generic booking number
         r'N[úu]mero de Booking[:\s]*([A-Z0-9]{5,})',  # Spanish (min 5 chars)
         r'Booking\s+No[.:]?\s*([A-Z]{2,}\d{5,})',  # At least 2 letters + 5 digits
+        r'REFERENCIA\s+DESTINATARIO\s+([A-Z]{2,3}\d{5,})',  # Spanish arrival: REFERENCIA DESTINATARIO BGA0496181
         # NOTE: B/L patterns removed - those are Bill of Lading numbers, not booking numbers
     ]
 
@@ -73,6 +76,11 @@ class DocumentParserService:
         # VESSEL: followed by vessel name (1-3 words, 3+ chars each)
         # Excludes generic text by requiring compact vessel-like names
         r'VESSEL(?:\s+NAME)?[:\s]+([A-Z]{3,15}(?:\s+[A-Z]{3,15}){0,2})(?=\s*(?:\n|$|VOY))',
+        # Table format: "Vessel" header with vessel name on same line or below
+        # Matches: Vessel    HANSA SIEGBURG    Voyage No.
+        r'Vessel\s+([A-Z][A-Z\s]{3,25}?)(?=\s+(?:Voyage|0\d|$|\n))',
+        # BUQUE/BARCO (Spanish) followed by vessel name
+        r'(?:BUQUE|BARCO)[:\s]+([A-Z][A-Z0-9\s]{2,25}?)(?=\s*(?:\n|$|VIAJE|/))',
     ]
 
     # Words that should NOT appear in vessel names (indicates garbage extraction)
@@ -105,7 +113,12 @@ class DocumentParserService:
                     details={"pdf_size_bytes": len(pdf_bytes)}
                 )
 
-            logger.info("pdf_text_extracted", text_length=len(all_text))
+            logger.info(
+                "pdf_text_extracted",
+                text_length=len(all_text),
+                page_count=len(pdf.pages) if 'pdf' in dir() else 0,
+                preview=all_text[:500].replace('\n', ' ')[:200]  # First 200 chars for debugging
+            )
             return all_text
 
         except PDFParseError:
@@ -135,20 +148,38 @@ class DocumentParserService:
         # High confidence matches
         if "BOOKING CONFIRMATION" in text_upper:
             return ("booking", 0.95)
+        if "RESERVA DE ESPACIO" in text_upper:  # Spanish booking
+            return ("booking", 0.9)
         if "DEPARTURE CONFIRMATION" in text_upper or "CONFIRMO ZARPE" in text_upper:
             return ("departure", 0.95)
-        if "HOUSE BILL OF LADING" in text_upper and "HBL" in text_upper:
+        if "HOUSE BILL OF LADING" in text_upper:
             return ("hbl", 0.9)
-        if "MASTER BILL OF LADING" in text_upper and "MBL" in text_upper:
+        if "MASTER BILL OF LADING" in text_upper:
             return ("mbl", 0.9)
-        if "ARRIVAL" in text_upper and ("NOTICE" in text_upper or "CONFIRMATION" in text_upper):
+        if "NOTIFICACIÓN DE ARRIBO" in text_upper or "NOTIFICACION DE ARRIBO" in text_upper:
+            return ("arrival", 0.9)
+        if "ARRIVAL" in text_upper and ("NOTICE" in text_upper or "NOTIFICATION" in text_upper):
             return ("arrival", 0.85)
 
         # Medium confidence based on keywords
         if "BOOKING" in text_upper and "CONFIRMATION" in text_upper:
             return ("booking", 0.7)
+
+        # Bill of Lading detection with context clues
         if "BILL OF LADING" in text_upper:
-            return ("hbl", 0.6)  # Could be HBL or MBL
+            # Check for HBL indicators (freight forwarders, house-specific terms)
+            hbl_indicators = ["TIBA", "WORLDWIDE CONTAINER", "FREIGHT FORWARDER", "HOUSE B/L", "SHP"]
+            mbl_indicators = ["CMA CGM", "MAERSK", "MSC", "HAPAG", "EVERGREEN", "MASTER B/L"]
+
+            hbl_score = sum(1 for ind in hbl_indicators if ind in text_upper)
+            mbl_score = sum(1 for ind in mbl_indicators if ind in text_upper)
+
+            if mbl_score > hbl_score:
+                return ("mbl", 0.75)
+            elif hbl_score > 0:
+                return ("hbl", 0.75)
+            else:
+                return ("hbl", 0.6)  # Default to HBL
 
         # Low confidence fallback
         if "SHP" in text and "CONTAINER" in text_upper:
@@ -256,13 +287,21 @@ class DocumentParserService:
                 source_text=eta_match.group(0)
             )
 
-        atd_match = re.search(r'ATD[:\s]+(\d{1,2}[-/]\w{3}[-/]\d{2,4})', text, re.IGNORECASE)
-        if atd_match:
-            dates["atd"] = ParsedFieldConfidence(
-                value=atd_match.group(1),
-                confidence=0.95,
-                source_text=atd_match.group(0)
-            )
+        # ATD patterns - multiple formats
+        atd_patterns = [
+            r'ATD[:\s]+(\d{1,2}[-/]\w{3}[-/]\d{2,4})',
+            r'On\s+Board[:\s]+(\d{1,2}[-/]\w{3}[-/]\d{2,4})',  # "On Board: 19-Nov-25"
+            r'Shipped\s+on\s+Board[^\n]*?(\d{1,2}[-/]\w{3}[-/]\d{4})',  # "Shipped on Board ... 20-NOV-2025"
+        ]
+        for pattern in atd_patterns:
+            atd_match = re.search(pattern, text, re.IGNORECASE)
+            if atd_match:
+                dates["atd"] = ParsedFieldConfidence(
+                    value=atd_match.group(1),
+                    confidence=0.95,
+                    source_text=atd_match.group(0)[:100]
+                )
+                break
 
         ata_match = re.search(r'ATA[:\s]+(\d{1,2}[-/]\w{3}[-/]\d{2,4})', text, re.IGNORECASE)
         if ata_match:
@@ -290,23 +329,37 @@ class DocumentParserService:
         pol = None
         pod = None
 
-        # POL
-        pol_match = re.search(r'POL[:\s]+([A-Za-z\s,]+?)(?=\n|POD|MODE|$)', text, re.IGNORECASE)
-        if pol_match:
-            pol = ParsedFieldConfidence(
-                value=pol_match.group(1).strip(),
-                confidence=0.85,
-                source_text=pol_match.group(0)[:100]
-            )
+        # POL patterns (try multiple formats)
+        pol_patterns = [
+            r'POL[:\s]+([A-Za-z\s,]+?)(?=\n|POD|MODE|$)',
+            r'Port\s+of\s+Loading[:\s]*\n?\s*([A-Za-z\s,]+?)(?=\n|Port|Vessel|$)',
+            r'Puerto\s+de\s+Carga[:\s]*\n?\s*([A-Za-z\s,]+?)(?=\n|Puerto|Terminal|$)',
+        ]
+        for pattern in pol_patterns:
+            pol_match = re.search(pattern, text, re.IGNORECASE)
+            if pol_match:
+                pol = ParsedFieldConfidence(
+                    value=pol_match.group(1).strip(),
+                    confidence=0.85,
+                    source_text=pol_match.group(0)[:100]
+                )
+                break
 
-        # POD
-        pod_match = re.search(r'POD[:\s]+([A-Za-z\s,]+?)(?=\n|MODE|ATD|ETA|$)', text, re.IGNORECASE)
-        if pod_match:
-            pod = ParsedFieldConfidence(
-                value=pod_match.group(1).strip(),
-                confidence=0.85,
-                source_text=pod_match.group(0)[:100]
-            )
+        # POD patterns (try multiple formats)
+        pod_patterns = [
+            r'POD[:\s]+([A-Za-z\s,]+?)(?=\n|MODE|ATD|ETA|$)',
+            r'Port\s+of\s+Discharge[:\s]*\n?\s*([A-Za-z\s,]+?)(?=\n|Place|Final|$)',
+            r'Puerto\s+de\s+Descarga[:\s]*\n?\s*([A-Za-z\s,]+?)(?=\n|Lugar|Destino|$)',
+        ]
+        for pattern in pod_patterns:
+            pod_match = re.search(pattern, text, re.IGNORECASE)
+            if pod_match:
+                pod = ParsedFieldConfidence(
+                    value=pod_match.group(1).strip(),
+                    confidence=0.85,
+                    source_text=pod_match.group(0)[:100]
+                )
+                break
 
         return (pol, pod)
 
