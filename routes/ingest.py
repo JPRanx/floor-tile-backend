@@ -22,6 +22,8 @@ from models.shipment import (
 from services.document_parser_service import get_parser_service
 from services.shipment_service import get_shipment_service
 from services.port_service import get_port_service
+from services.alert_service import get_alert_service
+from models.alert import AlertType, AlertSeverity, AlertCreate
 from exceptions import NotFoundError, DatabaseError
 
 logger = structlog.get_logger(__name__)
@@ -287,6 +289,24 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                 shipment_id=new_shipment.id,
                 shp_number=new_shipment.shp_number
             )
+
+            # Send Telegram alert for new shipment
+            try:
+                alert_service = get_alert_service()
+                alert_service.create(
+                    AlertCreate(
+                        type=AlertType.CONTAINER_READY,
+                        severity=AlertSeverity.INFO,
+                        title=f"Nuevo embarque: {new_shipment.shp_number}",
+                        message=f"📦 Nuevo embarque creado: {new_shipment.shp_number}\n\n"
+                                f"Booking: {new_shipment.booking_number or 'N/A'}\n"
+                                f"Buque: {new_shipment.vessel_name or 'N/A'}",
+                        shipment_id=new_shipment.id,
+                    ),
+                    send_telegram=True
+                )
+            except Exception as alert_error:
+                logger.warning("shipment_alert_failed", error=str(alert_error))
 
             return IngestResponse(
                 success=True,

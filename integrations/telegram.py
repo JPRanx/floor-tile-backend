@@ -4,11 +4,11 @@ Telegram bot integration for sending alerts.
 Sends formatted alert messages to a Telegram channel/chat.
 """
 
-import os
 from typing import Optional
 import httpx
 import structlog
 
+from config import settings
 from models.alert import AlertResponse, AlertType, AlertSeverity
 
 logger = structlog.get_logger(__name__)
@@ -41,13 +41,13 @@ class TelegramError(Exception):
 
 def get_telegram_config() -> tuple[Optional[str], Optional[str]]:
     """
-    Get Telegram configuration from environment.
+    Get Telegram configuration from settings.
 
     Returns:
         tuple: (bot_token, chat_id)
     """
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    bot_token = settings.telegram_bot_token
+    chat_id = settings.telegram_chat_id
 
     if not bot_token or not chat_id:
         logger.warning(

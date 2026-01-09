@@ -21,8 +21,10 @@ from models.shipment import (
 )
 from models.shipment_event import ShipmentEventCreate
 from models.factory_order import OrderStatus, FactoryOrderStatusUpdate
+from models.alert import AlertType, AlertSeverity, AlertCreate
 from services.shipment_event_service import get_shipment_event_service
 from services.factory_order_service import get_factory_order_service
+from services.alert_service import get_alert_service
 from exceptions import (
     ShipmentNotFoundError,
     ShipmentBookingExistsError,
@@ -528,6 +530,56 @@ class ShipmentService:
                 occurred_at=datetime.utcnow(),
                 notes=f"Status changed from {current_status.value} to {new_status.value}"
             ))
+
+            # Send Telegram alerts for key status changes
+            try:
+                alert_service = get_alert_service()
+                shp_number = existing.shp_number or existing.booking_number or shipment_id[:8]
+
+                if new_status == ShipmentStatus.IN_TRANSIT:
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.SHIPMENT_DEPARTED,
+                            severity=AlertSeverity.INFO,
+                            title=f"Embarque zarpó: {shp_number}",
+                            message=f"🚢 Embarque {shp_number} ha zarpado\n\n"
+                                    f"Buque: {existing.vessel_name or 'N/A'}\n"
+                                    f"ETA: {existing.eta or 'N/A'}",
+                            shipment_id=shipment_id,
+                        ),
+                        send_telegram=True
+                    )
+
+                elif new_status == ShipmentStatus.AT_DESTINATION_PORT:
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.SHIPMENT_ARRIVED,
+                            severity=AlertSeverity.INFO,
+                            title=f"Embarque llegó: {shp_number}",
+                            message=f"⚓ Embarque {shp_number} llegó a puerto\n\n"
+                                    f"Buque: {existing.vessel_name or 'N/A'}\n"
+                                    f"Siguiente paso: Despacho de aduana",
+                            shipment_id=shipment_id,
+                        ),
+                        send_telegram=True
+                    )
+
+                elif new_status == ShipmentStatus.DELIVERED:
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.SHIPMENT_ARRIVED,
+                            severity=AlertSeverity.INFO,
+                            title=f"Embarque entregado: {shp_number}",
+                            message=f"✅ Embarque {shp_number} entregado a bodega\n\n"
+                                    f"Buque: {existing.vessel_name or 'N/A'}\n"
+                                    f"Estado: Completado",
+                            shipment_id=shipment_id,
+                        ),
+                        send_telegram=True
+                    )
+
+            except Exception as alert_error:
+                logger.warning("shipment_status_alert_failed", error=str(alert_error))
 
             return self.get_by_id(shipment_id)
 
