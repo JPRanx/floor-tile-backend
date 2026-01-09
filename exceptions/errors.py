@@ -452,3 +452,44 @@ class TelegramError(AppError):
             status_code=500,
             details=details
         )
+
+
+# ===================
+# PORT ERRORS
+# ===================
+
+class PortNotFoundError(NotFoundError):
+    """Port not found."""
+
+    def __init__(self, port_id: str):
+        super().__init__(
+            resource="Port",
+            identifier=port_id,
+            code="PORT_NOT_FOUND"
+        )
+
+
+# ===================
+# DOCUMENT INGESTION ERRORS
+# ===================
+
+class PDFParseError(ValidationError):
+    """PDF parsing failed."""
+
+    def __init__(self, message: str, details: Optional[dict] = None):
+        super().__init__(
+            code="PDF_PARSE_ERROR",
+            message=message,
+            details=details
+        )
+
+
+class DocumentTypeDetectionError(ValidationError):
+    """Could not detect document type."""
+
+    def __init__(self, details: Optional[dict] = None):
+        super().__init__(
+            code="DOCUMENT_TYPE_UNKNOWN",
+            message="Could not determine document type",
+            details=details
+        )

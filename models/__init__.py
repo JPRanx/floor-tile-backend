@@ -54,6 +54,16 @@ from models.recommendation import (
     WarehouseStatus,
     OrderRecommendations,
 )
+from models.port import (
+    PortCreate,
+    PortResponse,
+)
+from models.ingest import (
+    ParsedFieldConfidence,
+    ParsedDocumentData,
+    ConfirmIngestRequest,
+    IngestResponse,
+)
 
 __all__ = [
     # Base
@@ -105,4 +115,14 @@ __all__ = [
     "RecommendationWarning",
     "WarehouseStatus",
     "OrderRecommendations",
+
+    # Ports
+    "PortCreate",
+    "PortResponse",
+
+    # Document Ingestion
+    "ParsedFieldConfidence",
+    "ParsedDocumentData",
+    "ConfirmIngestRequest",
+    "IngestResponse",
 ]
