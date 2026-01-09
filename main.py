@@ -199,6 +199,7 @@ from routes.shipment_events import router as shipment_events_router
 from routes.containers import router as containers_router
 from routes.alerts import router as alerts_router
 from routes.ingest import router as ingest_router
+from routes.ports import router as ports_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -214,6 +215,7 @@ app.include_router(shipment_events_router)  # Prefix already in router
 app.include_router(containers_router)  # Prefix already in router
 app.include_router(alerts_router)  # Prefix already in router
 app.include_router(ingest_router)  # Prefix already in router
+app.include_router(ports_router)  # Prefix already in router
 
 
 if __name__ == "__main__":
