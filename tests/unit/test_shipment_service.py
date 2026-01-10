@@ -245,6 +245,92 @@ class TestShipmentServiceGetBySHPNumber:
 
 
 # ===================
+# GET BY CONTAINER NUMBERS TESTS
+# ===================
+
+class TestShipmentServiceGetByContainerNumbers:
+    """Tests for ShipmentService.get_by_container_numbers()"""
+
+    def test_get_by_container_numbers_single_match(self, mock_supabase, sample_shipment_data):
+        """Should return shipment when container found."""
+        container_data = {
+            "id": "container-uuid-1",
+            "shipment_id": "shipment-uuid-123",
+            "container_number": "OOLU1234567",
+        }
+
+        with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase), \
+             patch("services.shipment_event_service.get_supabase_client", return_value=mock_supabase):
+            mock_supabase.set_table_data("shipments", [sample_shipment_data])
+            mock_supabase.set_table_data("containers", [container_data])
+            service = ShipmentService()
+
+            shipment = service.get_by_container_numbers(["OOLU1234567"])
+
+            assert shipment is not None
+            assert shipment.id == "shipment-uuid-123"
+
+    def test_get_by_container_numbers_multiple_containers(self, mock_supabase, sample_shipment_data):
+        """Should return shipment when any container matches."""
+        container_data = {
+            "id": "container-uuid-1",
+            "shipment_id": "shipment-uuid-123",
+            "container_number": "OOLU7654321",
+        }
+
+        with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase), \
+             patch("services.shipment_event_service.get_supabase_client", return_value=mock_supabase):
+            mock_supabase.set_table_data("shipments", [sample_shipment_data])
+            mock_supabase.set_table_data("containers", [container_data])
+            service = ShipmentService()
+
+            # Search with multiple containers, only one matches
+            shipment = service.get_by_container_numbers(["XXXX1111111", "OOLU7654321", "YYYY2222222"])
+
+            assert shipment is not None
+            assert shipment.id == "shipment-uuid-123"
+
+    def test_get_by_container_numbers_not_found_returns_none(self, mock_supabase):
+        """Should return None when no containers match."""
+        with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase):
+            mock_supabase.set_table_data("containers", [])
+            service = ShipmentService()
+
+            shipment = service.get_by_container_numbers(["NONEXISTENT1"])
+
+            assert shipment is None
+
+    def test_get_by_container_numbers_empty_list_returns_none(self, mock_supabase):
+        """Should return None when given empty container list."""
+        with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase):
+            service = ShipmentService()
+
+            shipment = service.get_by_container_numbers([])
+
+            assert shipment is None
+
+    def test_get_by_container_numbers_normalizes_input(self, mock_supabase, sample_shipment_data):
+        """Should normalize container numbers (uppercase, trim whitespace)."""
+        container_data = {
+            "id": "container-uuid-1",
+            "shipment_id": "shipment-uuid-123",
+            "container_number": "OOLU1234567",
+        }
+
+        with patch("services.shipment_service.get_supabase_client", return_value=mock_supabase), \
+             patch("services.shipment_event_service.get_supabase_client", return_value=mock_supabase):
+            mock_supabase.set_table_data("shipments", [sample_shipment_data])
+            mock_supabase.set_table_data("containers", [container_data])
+            service = ShipmentService()
+
+            # Search with lowercase and spaces
+            shipment = service.get_by_container_numbers(["  oolu1234567  "])
+
+            assert shipment is not None
+            assert shipment.id == "shipment-uuid-123"
+
+
+# ===================
 # GET BY FACTORY ORDER ID TESTS
 # ===================
 

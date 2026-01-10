@@ -69,7 +69,11 @@ class MockSupabaseQuery:
     
     def neq(self, column, value):
         return self
-    
+
+    def in_(self, column, values):
+        """Filter by values in list (IN query)."""
+        return self
+
     def single(self):
         self._is_single = True
         return self

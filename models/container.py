@@ -33,6 +33,11 @@ class ContainerCreate(BaseSchema):
         max_length=50,
         description="Container number (e.g., TCNU1234567)"
     )
+    container_type: Optional[str] = Field(
+        None,
+        max_length=10,
+        description="Container type (e.g., 20GP, 40HC)"
+    )
     seal_number: Optional[str] = Field(
         None,
         max_length=50,
@@ -97,6 +102,7 @@ class ContainerUpdate(BaseSchema):
     """
 
     container_number: Optional[str] = Field(None, max_length=50)
+    container_type: Optional[str] = Field(None, max_length=10)
     seal_number: Optional[str] = Field(None, max_length=50)
     trucking_company_id: Optional[str] = None
     total_pallets: Optional[int] = Field(None, ge=0)
@@ -133,6 +139,7 @@ class ContainerResponse(BaseSchema, TimestampMixin):
     id: str = Field(..., description="Container UUID")
     shipment_id: str = Field(..., description="Shipment UUID")
     container_number: Optional[str] = Field(None, description="Container number")
+    container_type: Optional[str] = Field(None, description="Container type (e.g., 20GP, 40HC)")
     seal_number: Optional[str] = Field(None, description="Seal number")
     trucking_company_id: Optional[str] = Field(None, description="Trucking company UUID")
     total_pallets: Optional[int] = Field(None, description="Total pallets")
@@ -229,6 +236,7 @@ class ContainerWithItemsResponse(BaseSchema, TimestampMixin):
     id: str = Field(..., description="Container UUID")
     shipment_id: str = Field(..., description="Shipment UUID")
     container_number: Optional[str] = Field(None, description="Container number")
+    container_type: Optional[str] = Field(None, description="Container type (e.g., 20GP, 40HC)")
     seal_number: Optional[str] = Field(None, description="Seal number")
     trucking_company_id: Optional[str] = Field(None, description="Trucking company UUID")
     total_pallets: Optional[int] = Field(None, description="Total pallets")

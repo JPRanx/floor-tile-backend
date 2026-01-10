@@ -176,6 +176,8 @@ class ShipmentUpdate(BaseSchema):
     factory_order_id: Optional[str] = Field(None, description="Factory order UUID")
     boat_schedule_id: Optional[str] = Field(None, description="Boat schedule UUID")
     shipping_company_id: Optional[str] = Field(None, description="Shipping company UUID")
+    origin_port_id: Optional[str] = Field(None, description="Origin port UUID")
+    destination_port_id: Optional[str] = Field(None, description="Destination port UUID")
 
     # Reference numbers
     booking_number: Optional[str] = Field(None, max_length=50, description="CMA CGM booking reference")

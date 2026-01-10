@@ -10,9 +10,11 @@ import structlog
 
 from models.ingest import (
     ParsedDocumentData,
+    ParsedContainerDetails,
     ConfirmIngestRequest,
     StructuredIngestRequest,
     IngestResponse,
+    CandidateShipment,
 )
 from models.shipment import (
     ShipmentCreate,
@@ -71,6 +73,163 @@ def _create_containers_for_shipment(shipment_id: str, container_numbers: list[st
             logger.warning("container_creation_failed", container_number=container_num, error=str(e))
 
     return created_count
+
+
+def _create_containers_with_details_for_shipment(
+    shipment_id: str,
+    container_numbers: list[str],
+    container_details: list[ParsedContainerDetails]
+) -> int:
+    """
+    Create containers for a shipment with detailed info (type, weight, volume, pallets).
+
+    Args:
+        shipment_id: UUID of the shipment
+        container_numbers: List of container numbers to create
+        container_details: Parsed container details (type, weight, volume, pallets)
+
+    Returns:
+        Number of containers created
+    """
+    if not container_numbers:
+        return 0
+
+    container_service = get_container_service()
+
+    # Build lookup dict for container details
+    details_lookup = {
+        detail.container_number.upper(): detail
+        for detail in container_details
+    }
+
+    # Get existing containers for this shipment
+    existing_containers = container_service.get_by_shipment(shipment_id)
+    existing_numbers = {c.container_number.upper() for c in existing_containers if c.container_number}
+
+    created_count = 0
+    for container_num in container_numbers:
+        container_num_upper = container_num.upper()
+
+        # Skip if already exists
+        if container_num_upper in existing_numbers:
+            logger.debug("container_already_exists", container_number=container_num)
+            continue
+
+        # Get details if available
+        detail = details_lookup.get(container_num_upper)
+
+        try:
+            from decimal import Decimal
+            container_data = ContainerCreate(
+                shipment_id=shipment_id,
+                container_number=container_num_upper,
+                container_type=detail.container_type if detail else None,
+                total_weight_kg=Decimal(str(detail.weight_kg)) if detail and detail.weight_kg else None,
+                total_m2=Decimal(str(detail.volume_m3)) if detail and detail.volume_m3 else None,
+                total_pallets=detail.pallets if detail else None,
+            )
+            container_service.create(container_data)
+            created_count += 1
+            logger.info(
+                "container_created_with_details",
+                shipment_id=shipment_id,
+                container_number=container_num,
+                container_type=detail.container_type if detail else None,
+                weight_kg=detail.weight_kg if detail else None,
+                pallets=detail.pallets if detail else None
+            )
+        except Exception as e:
+            logger.warning("container_creation_failed", container_number=container_num, error=str(e))
+
+    return created_count
+
+
+def _check_cross_reference_discrepancies(
+    shipment_id: str,
+    parsed_data: ParsedDocumentData
+) -> list[str]:
+    """
+    Compare HBL/MBL totals against linked factory order.
+
+    Foundation for cross-reference validation between documents and orders.
+
+    Args:
+        shipment_id: UUID of the shipment
+        parsed_data: Parsed document data with container details
+
+    Returns:
+        List of discrepancy messages (empty if no discrepancies)
+    """
+    discrepancies = []
+
+    # Skip if no container details
+    if not parsed_data.container_details:
+        return discrepancies
+
+    try:
+        shipment_service = get_shipment_service()
+        shipment = shipment_service.get_by_id(shipment_id)
+
+        if not shipment or not shipment.factory_order_id:
+            logger.debug("no_factory_order_linked", shipment_id=shipment_id)
+            return discrepancies
+
+        # Calculate totals from HBL/MBL container details
+        hbl_total_pallets = sum(
+            d.pallets or 0 for d in parsed_data.container_details
+        )
+        hbl_total_weight = sum(
+            d.weight_kg or 0 for d in parsed_data.container_details
+        )
+        hbl_total_volume = sum(
+            d.volume_m3 or 0 for d in parsed_data.container_details
+        )
+
+        # Future: Get order details from factory_order_service
+        # For now, just log the totals for comparison
+        logger.info(
+            "cross_reference_totals",
+            shipment_id=shipment_id,
+            factory_order_id=shipment.factory_order_id,
+            hbl_pallets=hbl_total_pallets,
+            hbl_weight_kg=hbl_total_weight,
+            hbl_volume_m3=hbl_total_volume
+        )
+
+        # TODO: When factory order service is available:
+        # order = get_factory_order_service().get_by_id(shipment.factory_order_id)
+        # if order:
+        #     if abs(order.total_pallets - hbl_total_pallets) > 0:
+        #         discrepancies.append(
+        #             f"Pallets mismatch: Order={order.total_pallets}, HBL={hbl_total_pallets}"
+        #         )
+        #     if abs(order.total_weight_kg - hbl_total_weight) > 100:  # 100kg tolerance
+        #         discrepancies.append(
+        #             f"Weight mismatch: Order={order.total_weight_kg}kg, HBL={hbl_total_weight}kg"
+        #         )
+
+        if discrepancies:
+            # Create alert for discrepancies
+            try:
+                alert_service = get_alert_service()
+                alert_service.create(
+                    AlertCreate(
+                        type=AlertType.CONTAINER_READY,  # TODO: Add DISCREPANCY type
+                        severity=AlertSeverity.WARNING,
+                        title=f"Discrepancy detected: {shipment.shp_number}",
+                        message=f"⚠️ Cross-reference discrepancies found:\n\n" +
+                                "\n".join(f"• {d}" for d in discrepancies),
+                        shipment_id=shipment_id,
+                    ),
+                    send_telegram=True
+                )
+            except Exception as alert_error:
+                logger.warning("discrepancy_alert_failed", error=str(alert_error))
+
+    except Exception as e:
+        logger.warning("cross_reference_check_failed", shipment_id=shipment_id, error=str(e))
+
+    return discrepancies
 
 
 @router.post("/pdf", response_model=IngestResponse)
@@ -189,28 +348,69 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
         document_type=data.document_type
     )
 
-    # Validate: Must have at least one identifier
-    if not data.shp_number and not data.booking_number:
+    # DEBUG: Print all identifiers for matching
+    print(f"=== CONFIRM INGEST DEBUG ===")
+    print(f"SHP: {data.shp_number}")
+    print(f"Booking: {data.booking_number}")
+    print(f"Containers: {data.containers}")
+    print(f"Document Type: {data.document_type}")
+    print(f"Target Shipment ID: {data.target_shipment_id}")
+    print(f"==============================")
+
+    # Validate: Must have at least one identifier (unless manual assignment)
+    # HBL/MBL can match by containers alone, so allow that for those document types
+    if not data.target_shipment_id and not data.shp_number and not data.booking_number and not data.containers:
         raise HTTPException(
             status_code=400,
-            detail="Must provide either SHP number or booking number"
+            detail="Must provide SHP number, booking number, or containers for matching"
         )
 
     shipment_service = get_shipment_service()
 
     try:
-        # Try to find existing shipment
+        # Try to find existing shipment using multi-tier matching
         existing_shipment = None
+        matched_by = None  # Track how we matched for logging
 
-        if data.shp_number:
+        # 0. If target_shipment_id is provided (manual assignment), use that directly
+        if data.target_shipment_id:
+            existing_shipment = shipment_service.get_by_id(data.target_shipment_id)
+            if existing_shipment:
+                matched_by = "manual_assignment"
+                logger.info(
+                    "existing_shipment_found_by_manual_assignment",
+                    shipment_id=existing_shipment.id
+                )
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Target shipment not found: {data.target_shipment_id}"
+                )
+
+        # 1. Try SHP number (most reliable)
+        if not existing_shipment and data.shp_number:
             existing_shipment = shipment_service.get_by_shp_number(data.shp_number)
             if existing_shipment:
+                matched_by = "shp"
                 logger.info("existing_shipment_found_by_shp", shipment_id=existing_shipment.id)
 
+        # 2. Try Booking number
         if not existing_shipment and data.booking_number:
             existing_shipment = shipment_service.get_by_booking_number(data.booking_number)
             if existing_shipment:
+                matched_by = "booking"
                 logger.info("existing_shipment_found_by_booking", shipment_id=existing_shipment.id)
+
+        # 3. Try Container numbers (key for HBL/MBL that lack booking reference)
+        if not existing_shipment and data.containers:
+            existing_shipment = shipment_service.get_by_container_numbers(data.containers)
+            if existing_shipment:
+                matched_by = "container"
+                logger.info(
+                    "existing_shipment_found_by_container",
+                    shipment_id=existing_shipment.id,
+                    containers=data.containers
+                )
 
         # Determine status based on document type
         # HBL/MBL don't change status - they just add reference info
@@ -226,14 +426,62 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
 
         if existing_shipment:
             # UPDATE existing shipment
-            update_data = ShipmentUpdate(
-                booking_number=data.booking_number or existing_shipment.booking_number,
-                vessel_name=data.vessel or existing_shipment.vessel_name,
-                etd=data.etd or data.atd or existing_shipment.etd,
-                eta=data.eta or data.ata or existing_shipment.eta,
-                actual_departure=data.atd if data.atd else None,
-                actual_arrival=data.ata if data.ata else None,
-            )
+            # DEBUG: Log what we're updating with
+            print(f"=== HBL UPDATE DEBUG ===")
+            print(f"Document type: {data.document_type}")
+            print(f"Matched by: {matched_by}")
+            print(f"Data SHP: {data.shp_number}")
+            print(f"Data Booking: {data.booking_number}")
+            print(f"Data Vessel: {data.vessel}")
+            print(f"Data Voyage: {data.voyage}")
+            print(f"Data POL: {data.pol}")
+            print(f"Data POD: {data.pod}")
+            print(f"Existing SHP: {existing_shipment.shp_number}")
+            print(f"Existing Booking: {existing_shipment.booking_number}")
+            print(f"Existing Vessel: {existing_shipment.vessel_name}")
+            print(f"Existing Voyage: {existing_shipment.voyage_number}")
+            print(f"=======================")
+
+            # For HBL/MBL: Special update logic to preserve booking and update B/L
+            if data.document_type in ["hbl", "mbl"]:
+                update_data = ShipmentUpdate(
+                    # PRESERVE existing booking - only set if currently empty
+                    booking_number=existing_shipment.booking_number or data.booking_number,
+                    # Update vessel and voyage from HBL
+                    vessel_name=data.vessel or existing_shipment.vessel_name,
+                    voyage_number=data.voyage or existing_shipment.voyage_number,
+                    # Dates
+                    etd=data.etd or data.atd or existing_shipment.etd,
+                    eta=data.eta or data.ata or existing_shipment.eta,
+                    actual_departure=data.atd if data.atd else existing_shipment.actual_departure,
+                    actual_arrival=data.ata if data.ata else existing_shipment.actual_arrival,
+                )
+
+                # Update SHP from HBL (regardless of how we matched - container or manual)
+                if data.shp_number and data.shp_number != existing_shipment.shp_number:
+                    update_data.shp_number = data.shp_number
+                    logger.info(
+                        "updating_shp_from_hbl",
+                        old_shp=existing_shipment.shp_number,
+                        new_shp=data.shp_number,
+                        matched_by=matched_by
+                    )
+
+                # Store HBL number as bill_of_lading
+                if data.shp_number:
+                    update_data.bill_of_lading = data.shp_number
+                    logger.info("setting_bill_of_lading", bill_of_lading=data.shp_number)
+
+            else:
+                # Non-HBL/MBL documents: Standard update logic
+                update_data = ShipmentUpdate(
+                    booking_number=data.booking_number or existing_shipment.booking_number,
+                    vessel_name=data.vessel or existing_shipment.vessel_name,
+                    etd=data.etd or data.atd or existing_shipment.etd,
+                    eta=data.eta or data.ata or existing_shipment.eta,
+                    actual_departure=data.atd if data.atd else None,
+                    actual_arrival=data.ata if data.ata else None,
+                )
 
             updated_shipment = shipment_service.update(
                 existing_shipment.id,
@@ -249,32 +497,92 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                     ShipmentStatusUpdate(status=new_status)
                 )
 
-            # Update destination port if provided and not already set
-            if data.pod and not existing_shipment.destination_port_id:
+            # Update origin port if provided
+            # DEBUG: Log port processing
+            print(f"=== PORT UPDATE DEBUG ===")
+            print(f"Data POL: {data.pol}")
+            print(f"Data POD: {data.pod}")
+            print(f"Existing origin_port_id: {existing_shipment.origin_port_id}")
+            print(f"Existing destination_port_id: {existing_shipment.destination_port_id}")
+
+            if data.pol:
+                port_service = get_port_service()
+                origin_port = port_service.find_or_create(
+                    name=data.pol,
+                    port_type="ORIGIN",
+                    country="Colombia"
+                )
+                origin_port_id_str = str(origin_port.id)
+                print(f"Origin port resolved: {origin_port_id_str} - {origin_port.name}")
+                # Update if not already set OR if HBL/MBL (which should fill in missing data)
+                if not existing_shipment.origin_port_id or data.document_type in ["hbl", "mbl"]:
+                    port_update = ShipmentUpdate(origin_port_id=origin_port_id_str)
+                    print(f"Updating origin_port_id with: {port_update}")
+                    result = shipment_service.update(existing_shipment.id, port_update)
+                    print(f"Origin port update result: {result.origin_port_id if result else 'FAILED'}")
+                    logger.info("origin_port_updated", name=data.pol, port_id=origin_port_id_str)
+
+            # Update destination port if provided
+            if data.pod:
                 port_service = get_port_service()
                 destination_port = port_service.find_or_create(
                     name=data.pod,
                     port_type="DESTINATION",
                     country="Guatemala"
                 )
-                shipment_service.update(
-                    existing_shipment.id,
-                    ShipmentUpdate(destination_port_id=destination_port.id)
-                )
-                logger.info("destination_port_updated", name=data.pod, port_id=destination_port.id)
+                dest_port_id_str = str(destination_port.id)
+                print(f"Destination port resolved: {dest_port_id_str} - {destination_port.name}")
+                # Update if not already set OR if HBL/MBL (which should fill in missing data)
+                if not existing_shipment.destination_port_id or data.document_type in ["hbl", "mbl"]:
+                    port_update = ShipmentUpdate(destination_port_id=dest_port_id_str)
+                    print(f"Updating destination_port_id with: {port_update}")
+                    result = shipment_service.update(existing_shipment.id, port_update)
+                    print(f"Destination port update result: {result.destination_port_id if result else 'FAILED'}")
+                    logger.info("destination_port_updated", name=data.pod, port_id=dest_port_id_str)
+
+            print(f"=========================")
 
             # Create containers from document (avoiding duplicates)
+            # Use detailed container info if available (from HBL/MBL parsing)
             if data.containers:
-                containers_created = _create_containers_for_shipment(
-                    existing_shipment.id,
-                    data.containers
-                )
+                container_details = []
+                if data.original_parsed_data and data.original_parsed_data.container_details:
+                    container_details = data.original_parsed_data.container_details
+                    logger.info(
+                        "using_container_details",
+                        count=len(container_details)
+                    )
+
+                if container_details:
+                    containers_created = _create_containers_with_details_for_shipment(
+                        existing_shipment.id,
+                        data.containers,
+                        container_details
+                    )
+                else:
+                    containers_created = _create_containers_for_shipment(
+                        existing_shipment.id,
+                        data.containers
+                    )
                 logger.info(
                     "containers_added_to_shipment",
                     shipment_id=existing_shipment.id,
                     containers_requested=len(data.containers),
                     containers_created=containers_created
                 )
+
+            # Cross-reference check for HBL/MBL documents
+            if data.document_type in ["hbl", "mbl"] and data.original_parsed_data:
+                discrepancies = _check_cross_reference_discrepancies(
+                    existing_shipment.id,
+                    data.original_parsed_data
+                )
+                if discrepancies:
+                    logger.warning(
+                        "cross_reference_discrepancies_found",
+                        shipment_id=existing_shipment.id,
+                        discrepancies=discrepancies
+                    )
 
             # Add note about the update
             event_notes = f"Updated via {data.source} - {data.document_type} document"
@@ -300,12 +608,38 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
             # CREATE new shipment
 
             # HBL/MBL documents should only update existing shipments, not create new ones
+            # Instead of error, return candidate shipments for manual assignment
             if data.document_type in ["hbl", "mbl"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cannot create new shipment from {data.document_type.upper()} document. "
-                           f"No existing shipment found with SHP '{data.shp_number}' or booking '{data.booking_number}'. "
-                           "Please ingest a booking confirmation first."
+                logger.info(
+                    "hbl_mbl_needs_manual_assignment",
+                    document_type=data.document_type,
+                    shp_number=data.shp_number,
+                    booking_number=data.booking_number,
+                    containers=data.containers
+                )
+
+                # Get all active shipments as candidates
+                shipments_list, _total = shipment_service.get_all(page=1, page_size=50)
+                candidates = [
+                    CandidateShipment(
+                        id=s.id,
+                        shp_number=s.shp_number,
+                        booking_number=s.booking_number,
+                        vessel_name=s.vessel_name,
+                        status=s.status.value if hasattr(s.status, 'value') else str(s.status),
+                        etd=s.etd,
+                        eta=s.eta,
+                        created_at=s.created_at.isoformat() if hasattr(s.created_at, 'isoformat') else str(s.created_at)
+                    )
+                    for s in shipments_list
+                ]
+
+                return IngestResponse(
+                    success=False,
+                    message=f"No matching shipment found for {data.document_type.upper()} document. "
+                            "Please select an existing shipment to update or create a booking first.",
+                    action="needs_assignment",
+                    candidate_shipments=candidates
                 )
 
             # Generate SHP number if not provided

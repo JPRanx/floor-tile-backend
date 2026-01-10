@@ -240,6 +240,68 @@ class ShipmentService:
             logger.error("get_shipment_by_shp_failed", shp_number=shp_number, error=str(e))
             raise DatabaseError("select", str(e))
 
+    def get_by_container_numbers(self, container_numbers: list[str]) -> Optional[ShipmentResponse]:
+        """
+        Get a shipment by container numbers.
+
+        Finds shipment that has ANY of the provided containers.
+        Useful for HBL/MBL matching when booking number is not available.
+
+        Args:
+            container_numbers: List of container numbers (e.g., ['OOLU1234567', 'OOLU7654321'])
+
+        Returns:
+            ShipmentResponse or None if no matching shipment found
+        """
+        if not container_numbers:
+            return None
+
+        logger.debug("getting_shipment_by_containers", container_count=len(container_numbers))
+
+        # Normalize container numbers
+        normalized = [c.upper().strip().replace(" ", "") for c in container_numbers if c]
+
+        if not normalized:
+            return None
+
+        try:
+            # DEBUG: Log what we're searching for
+            print(f"=== CONTAINER MATCH DEBUG ===")
+            print(f"Looking for containers: {normalized}")
+
+            # Query containers table to find shipment_id for any matching container
+            container_result = (
+                self.db.table("containers")
+                .select("shipment_id, container_number")
+                .in_("container_number", normalized)
+                .limit(1)
+                .execute()
+            )
+
+            print(f"Query result: {container_result.data}")
+            print(f"==============================")
+
+            if not container_result.data:
+                logger.debug("no_shipment_found_by_containers", containers=normalized)
+                return None
+
+            # Get the shipment by its ID
+            shipment_id = container_result.data[0]["shipment_id"]
+
+            logger.info(
+                "shipment_found_by_container",
+                shipment_id=shipment_id,
+                matched_container=container_result.data[0]
+            )
+
+            return self.get_by_id(shipment_id)
+
+        except ShipmentNotFoundError:
+            return None
+        except Exception as e:
+            logger.error("get_shipment_by_containers_failed", containers=normalized, error=str(e))
+            raise DatabaseError("select", str(e))
+
     def get_by_factory_order_id(self, factory_order_id: str) -> list[ShipmentResponse]:
         """
         Get all shipments for a factory order.
@@ -431,6 +493,10 @@ class ShipmentService:
                 update_data["boat_schedule_id"] = data.boat_schedule_id
             if data.shipping_company_id is not None:
                 update_data["shipping_company_id"] = data.shipping_company_id
+            if data.origin_port_id is not None:
+                update_data["origin_port_id"] = data.origin_port_id
+            if data.destination_port_id is not None:
+                update_data["destination_port_id"] = data.destination_port_id
             if data.booking_number is not None:
                 update_data["booking_number"] = data.booking_number.upper()
             if data.shp_number is not None:
