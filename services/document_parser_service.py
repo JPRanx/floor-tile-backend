@@ -159,6 +159,9 @@ class DocumentParserService:
         """
         Extract text using OCR (for scanned PDFs).
 
+        Memory-optimized: processes one page at a time to stay under 512MB.
+        Uses 200 DPI grayscale (sufficient for printed shipping documents).
+
         Args:
             pdf_bytes: PDF file content as bytes
 
@@ -170,22 +173,59 @@ class DocumentParserService:
             return ""
 
         try:
-            print("Starting OCR extraction...")
+            import gc
+            from pdf2image import pdfinfo_from_bytes
+
+            print("Starting OCR extraction (memory-optimized)...")
             logger.info("ocr_extraction_started", pdf_size=len(pdf_bytes))
 
-            # Convert PDF pages to images
-            images = convert_from_bytes(pdf_bytes, dpi=300)
+            # Get page count first (minimal memory)
+            try:
+                info = pdfinfo_from_bytes(pdf_bytes)
+                total_pages = info.get('Pages', 1)
+            except Exception:
+                total_pages = 5  # Assume max if can't read info
+
+            max_pages = 5  # Safety limit for memory
+            pages_to_process = min(total_pages, max_pages)
 
             all_text = []
-            for i, img in enumerate(images):
-                # OCR with Spanish + English
-                text = pytesseract.image_to_string(img, lang='spa+eng')
-                all_text.append(text)
-                logger.debug("ocr_page_processed", page=i+1, text_length=len(text))
+
+            # Process ONE page at a time to minimize memory
+            for page_num in range(1, pages_to_process + 1):
+                try:
+                    # Convert single page with memory-optimized settings
+                    images = convert_from_bytes(
+                        pdf_bytes,
+                        dpi=200,  # Reduced from 300 - still good for printed text
+                        first_page=page_num,
+                        last_page=page_num,
+                        grayscale=True,  # 1/3 memory of RGB
+                        thread_count=1,  # Single thread = less memory overhead
+                    )
+
+                    if images:
+                        # OCR this single page
+                        text = pytesseract.image_to_string(images[0], lang='spa+eng')
+                        all_text.append(text)
+                        logger.debug("ocr_page_processed", page=page_num, text_length=len(text))
+
+                        # Explicitly release memory
+                        del images
+
+                    # Force garbage collection after each page
+                    gc.collect()
+
+                except Exception as page_err:
+                    logger.warning("ocr_page_failed", page=page_num, error=str(page_err))
+                    continue
+
+            if total_pages > max_pages:
+                logger.warning("ocr_page_limit_reached", total_pages=total_pages, processed=max_pages)
 
             result = "\n".join(all_text)
-            print(f"OCR extracted: {len(result)} chars")
-            logger.info("ocr_extraction_completed", text_length=len(result))
+            print(f"OCR extracted: {len(result)} chars from {len(all_text)} pages")
+            logger.info("ocr_extraction_completed", text_length=len(result), pages=len(all_text))
             return result
 
         except Exception as e:
