@@ -21,15 +21,20 @@ from models.ingest import (
 )
 from exceptions.errors import PDFParseError
 
-# OCR imports - optional, graceful degradation if not available
-try:
-    import pytesseract
-    from pdf2image import convert_from_bytes
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
+# OCR imports - optional, controlled by ENABLE_OCR env var
+# Disabled by default in production to avoid memory issues on Render free tier
+OCR_ENABLED_IN_ENV = os.getenv("ENABLE_OCR", "false").lower() == "true"
 
-print(f"OCR_AVAILABLE: {OCR_AVAILABLE}")
+OCR_AVAILABLE = False
+if OCR_ENABLED_IN_ENV:
+    try:
+        import pytesseract
+        from pdf2image import convert_from_bytes
+        OCR_AVAILABLE = True
+    except ImportError:
+        OCR_AVAILABLE = False
+
+print(f"OCR_AVAILABLE: {OCR_AVAILABLE} (ENABLE_OCR={OCR_ENABLED_IN_ENV})")
 
 logger = structlog.get_logger(__name__)
 
