@@ -63,3 +63,7 @@ tzlocal==5.3.1
 uvicorn==0.38.0
 websockets==15.0.1
 yarl==1.22.0
+
+# OCR dependencies
+pytesseract==0.3.13
+pdf2image==1.17.0
