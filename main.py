@@ -90,7 +90,9 @@ app.add_middleware(
         "http://localhost:5177",
         "http://localhost:5178",
         "https://floor-tile-frontend.vercel.app",
+        "https://floor-tile-saas.vercel.app",
     ],
+    allow_origin_regex=r"https://floor-tile-.*\.vercel\.app",  # Allow Vercel preview deployments
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
