@@ -1,15 +1,17 @@
 """
 Email ingestion routes.
 
-Handles processing emails forwarded from Power Automate.
+Handles processing emails forwarded from Power Automate or Make.com Mailhook.
 """
 
 import base64
+import json
 from datetime import date
 from typing import Optional
 import structlog
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 
 from models.ingest import (
     EmailIngestRequest,
@@ -26,6 +28,90 @@ router = APIRouter(prefix="/api/shipments/ingest", tags=["Email Ingestion"])
 
 # Confidence threshold for auto-confirmation
 AUTO_CONFIRM_THRESHOLD = 0.90
+
+
+def _normalize_attachment(att) -> dict | None:
+    """
+    Convert Make.com Mailhook attachment format to standard format.
+
+    Handles:
+    - JSON strings (Make.com sends attachments as stringified JSON)
+    - Buffer format {"type": "Buffer", "data": [bytes...]} -> base64
+    - Various field name formats (camelCase, snake_case, spaces)
+
+    Returns:
+        Normalized dict with {filename, content_type, content_base64} or None
+    """
+    # If string, parse JSON first (Make.com sends stringified attachments)
+    if isinstance(att, str):
+        try:
+            att = json.loads(att)
+        except json.JSONDecodeError:
+            logger.warning("attachment_json_parse_failed", raw=att[:100] if len(att) > 100 else att)
+            return None
+
+    if not isinstance(att, dict):
+        return None
+
+    # Extract filename (multiple possible field names)
+    filename = (
+        att.get("fileName") or
+        att.get("filename") or
+        att.get("File name") or
+        att.get("name")
+    )
+
+    # Extract content type
+    content_type = (
+        att.get("contentType") or
+        att.get("content_type") or
+        att.get("MIME type") or
+        att.get("mimeType")
+    )
+
+    # Extract data
+    data = (
+        att.get("data") or
+        att.get("Data") or
+        att.get("content_base64") or
+        att.get("content")
+    )
+
+    if not all([filename, content_type, data]):
+        logger.warning(
+            "attachment_missing_fields",
+            has_filename=bool(filename),
+            has_content_type=bool(content_type),
+            has_data=bool(data)
+        )
+        return None
+
+    # Convert Buffer format to base64
+    if isinstance(data, dict) and data.get("type") == "Buffer":
+        byte_array = data.get("data", [])
+        try:
+            content_base64 = base64.b64encode(bytes(byte_array)).decode("utf-8")
+        except Exception as e:
+            logger.warning("buffer_to_base64_failed", error=str(e))
+            return None
+    elif isinstance(data, str):
+        content_base64 = data  # Already base64
+    else:
+        logger.warning("attachment_data_unknown_format", data_type=type(data).__name__)
+        return None
+
+    logger.debug(
+        "attachment_normalized",
+        filename=filename,
+        content_type=content_type,
+        data_length=len(content_base64)
+    )
+
+    return {
+        "filename": filename,
+        "content_type": content_type,
+        "content_base64": content_base64
+    }
 
 
 def _extract_pdf_from_attachments(attachments: list) -> tuple[Optional[bytes], Optional[str]]:
@@ -137,19 +223,54 @@ Please check the email manually."""
 
 
 @router.post("/email", response_model=EmailIngestResponse)
-async def ingest_email(data: EmailIngestRequest) -> EmailIngestResponse:
+async def ingest_email(request: Request) -> EmailIngestResponse:
     """
-    Process email forwarded from Power Automate.
+    Process email forwarded from Power Automate or Make.com Mailhook.
+
+    Handles multiple attachment formats:
+    - Power Automate: {filename, content_type, content_base64}
+    - Make.com Mailhook: stringified JSON with Buffer format
 
     Extracts PDF from attachments, parses with Claude Vision using email
     context, and auto-confirms if confidence is high enough.
 
-    Args:
-        data: Email payload from Power Automate
-
     Returns:
         EmailIngestResponse with processing result
     """
+    # Get raw JSON body
+    try:
+        raw_body = await request.json()
+    except Exception as e:
+        logger.error("invalid_json_body", error=str(e))
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {str(e)}")
+
+    logger.info(
+        "email_ingest_raw_received",
+        has_from=bool(raw_body.get("from")),
+        has_subject=bool(raw_body.get("subject")),
+        attachment_count=len(raw_body.get("attachments", [])),
+        attachment_types=[type(a).__name__ for a in raw_body.get("attachments", [])[:3]]
+    )
+
+    # Normalize attachments before Pydantic validation
+    if "attachments" in raw_body and raw_body["attachments"]:
+        normalized = []
+        for att in raw_body["attachments"]:
+            norm = _normalize_attachment(att)
+            if norm:
+                normalized.append(norm)
+                logger.info("attachment_processed", filename=norm["filename"])
+            else:
+                logger.warning("attachment_skipped", raw_type=type(att).__name__)
+        raw_body["attachments"] = normalized
+
+    # Validate with Pydantic
+    try:
+        data = EmailIngestRequest(**raw_body)
+    except ValidationError as e:
+        logger.error("validation_failed", errors=e.errors())
+        raise HTTPException(status_code=422, detail=e.errors())
+
     logger.info(
         "email_ingest_started",
         sender=data.sender,

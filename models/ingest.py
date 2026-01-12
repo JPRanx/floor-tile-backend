@@ -194,28 +194,15 @@ class IngestResponse(BaseModel):
 
 class EmailAttachment(BaseModel):
     """
-    Email attachment from Power Automate or Make.com Mailhook.
+    Email attachment (normalized format).
 
-    Accepts both formats:
-    - Original: {"filename": "...", "content_type": "...", "content_base64": "..."}
-    - Mailhook: {"File name": "...", "MIME type": "...", "Data": "..."}
+    The endpoint preprocesses incoming attachments to this format,
+    handling various source formats (Power Automate, Make.com Mailhook, etc.)
     """
 
-    filename: str = Field(
-        description="Original filename",
-        alias="File name"
-    )
-    content_type: str = Field(
-        description="MIME type (e.g., application/pdf)",
-        alias="MIME type"
-    )
-    content_base64: str = Field(
-        description="Base64-encoded file content",
-        alias="Data"
-    )
-
-    class Config:
-        populate_by_name = True  # Accept both alias ("File name") and field name ("filename")
+    filename: str = Field(description="Original filename")
+    content_type: str = Field(description="MIME type (e.g., application/pdf)")
+    content_base64: str = Field(description="Base64-encoded file content")
 
 
 class EmailIngestRequest(BaseModel):
