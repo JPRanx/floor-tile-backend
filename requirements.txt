@@ -64,6 +64,5 @@ uvicorn==0.38.0
 websockets==15.0.1
 yarl==1.22.0
 
-# OCR dependencies
-pytesseract==0.3.13
-pdf2image==1.17.0
+# AI / LLM (Claude Vision for scanned PDF parsing)
+anthropic>=0.39.0

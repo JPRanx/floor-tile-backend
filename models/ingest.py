@@ -181,11 +181,58 @@ class IngestResponse(BaseModel):
     message: str
     shipment_id: Optional[str] = None
     shp_number: Optional[str] = None
-    action: Literal["created", "updated", "parsed_pending_confirmation", "needs_assignment"] = "parsed_pending_confirmation"
+    action: Literal["created", "updated", "parsed_pending_confirmation", "needs_assignment", "needs_review"] = "parsed_pending_confirmation"
     parsed_data: Optional[ParsedDocumentData] = None
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0, description="Overall confidence score")
 
     # For manual assignment when auto-match fails
     candidate_shipments: Optional[list[CandidateShipment]] = Field(
         None,
         description="List of candidate shipments for manual assignment (when action='needs_assignment')"
     )
+
+
+class EmailAttachment(BaseModel):
+    """Email attachment from Power Automate."""
+
+    filename: str = Field(description="Original filename")
+    content_type: str = Field(description="MIME type (e.g., application/pdf)")
+    content_base64: str = Field(description="Base64-encoded file content")
+
+
+class EmailIngestRequest(BaseModel):
+    """
+    Email forwarded from Power Automate.
+
+    Power Automate watches the inbox and POSTs to this endpoint.
+    """
+
+    sender: str = Field(alias="from", description="Sender email address")
+    subject: str = Field(description="Email subject line")
+    body: str = Field(description="Email body text (plain or HTML stripped)")
+    attachments: list[EmailAttachment] = Field(
+        default_factory=list,
+        description="List of email attachments"
+    )
+
+    # Optional metadata from Power Automate
+    received_at: Optional[str] = Field(None, description="ISO timestamp when email received")
+    message_id: Optional[str] = Field(None, description="Email message ID for deduplication")
+
+    class Config:
+        populate_by_name = True  # Allow both "from" and "sender"
+
+
+class EmailIngestResponse(BaseModel):
+    """Response after email ingestion."""
+
+    success: bool
+    action: Literal["updated_shipment", "created_shipment", "needs_review", "error"]
+    message: str
+    shipment_id: Optional[str] = None
+    booking_number: Optional[str] = None
+    document_type: Optional[str] = None
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+
+    # For debugging/audit
+    parsed_fields: Optional[dict] = Field(None, description="Key fields extracted")

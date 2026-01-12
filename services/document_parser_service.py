@@ -2,13 +2,11 @@
 Document parser service for extracting shipment data from PDFs.
 
 Uses pattern matching and text extraction to parse shipping documents.
-Includes OCR fallback for scanned PDFs.
+Falls back to Claude Vision for scanned PDFs that pdfplumber cannot extract.
 """
 
 import re
 import os
-import tempfile
-from datetime import datetime
 from typing import Optional, Tuple
 import pdfplumber
 import structlog
@@ -20,21 +18,6 @@ from models.ingest import (
     ParsedContainerDetails,
 )
 from exceptions.errors import PDFParseError
-
-# OCR imports - optional, controlled by ENABLE_OCR env var
-# Disabled by default in production to avoid memory issues on Render free tier
-OCR_ENABLED_IN_ENV = os.getenv("ENABLE_OCR", "false").lower() == "true"
-
-OCR_AVAILABLE = False
-if OCR_ENABLED_IN_ENV:
-    try:
-        import pytesseract
-        from pdf2image import convert_from_bytes
-        OCR_AVAILABLE = True
-    except ImportError:
-        OCR_AVAILABLE = False
-
-print(f"OCR_AVAILABLE: {OCR_AVAILABLE} (ENABLE_OCR={OCR_ENABLED_IN_ENV})")
 
 logger = structlog.get_logger(__name__)
 
@@ -160,86 +143,12 @@ class DocumentParserService:
                     all_text += page_text + "\n"
         return all_text
 
-    def _extract_with_ocr(self, pdf_bytes: bytes) -> str:
-        """
-        Extract text using OCR (for scanned PDFs).
-
-        Memory-optimized: processes one page at a time to stay under 512MB.
-        Uses 200 DPI grayscale (sufficient for printed shipping documents).
-
-        Args:
-            pdf_bytes: PDF file content as bytes
-
-        Returns:
-            Extracted text as string
-        """
-        if not OCR_AVAILABLE:
-            logger.warning("ocr_not_available", reason="pytesseract or pdf2image not installed")
-            return ""
-
-        try:
-            import gc
-            from pdf2image import pdfinfo_from_bytes
-
-            print("Starting OCR extraction (memory-optimized)...")
-            logger.info("ocr_extraction_started", pdf_size=len(pdf_bytes))
-
-            # Get page count first (minimal memory)
-            try:
-                info = pdfinfo_from_bytes(pdf_bytes)
-                total_pages = info.get('Pages', 1)
-            except Exception:
-                total_pages = 5  # Assume max if can't read info
-
-            max_pages = 5  # Safety limit for memory
-            pages_to_process = min(total_pages, max_pages)
-
-            all_text = []
-
-            # Process ONE page at a time to minimize memory
-            for page_num in range(1, pages_to_process + 1):
-                try:
-                    # Convert single page with memory-optimized settings
-                    images = convert_from_bytes(
-                        pdf_bytes,
-                        dpi=200,  # Reduced from 300 - still good for printed text
-                        first_page=page_num,
-                        last_page=page_num,
-                        grayscale=True,  # 1/3 memory of RGB
-                        thread_count=1,  # Single thread = less memory overhead
-                    )
-
-                    if images:
-                        # OCR this single page
-                        text = pytesseract.image_to_string(images[0], lang='spa+eng')
-                        all_text.append(text)
-                        logger.debug("ocr_page_processed", page=page_num, text_length=len(text))
-
-                        # Explicitly release memory
-                        del images
-
-                    # Force garbage collection after each page
-                    gc.collect()
-
-                except Exception as page_err:
-                    logger.warning("ocr_page_failed", page=page_num, error=str(page_err))
-                    continue
-
-            if total_pages > max_pages:
-                logger.warning("ocr_page_limit_reached", total_pages=total_pages, processed=max_pages)
-
-            result = "\n".join(all_text)
-            print(f"OCR extracted: {len(result)} chars from {len(all_text)} pages")
-            logger.info("ocr_extraction_completed", text_length=len(result), pages=len(all_text))
-            return result
-
-        except Exception as e:
-            logger.error("ocr_extraction_failed", error=str(e))
-            return ""
-
     def extract_text_from_pdf(self, pdf_bytes: bytes) -> str:
         """
-        Extract all text from PDF, with OCR fallback for scanned documents.
+        Extract all text from PDF using pdfplumber.
+
+        For scanned PDFs with insufficient text, raises PDFParseError
+        which signals the caller to use Claude Vision instead.
 
         Args:
             pdf_bytes: PDF file content as bytes
@@ -248,37 +157,33 @@ class DocumentParserService:
             Extracted text as single string
 
         Raises:
-            PDFParseError: If PDF cannot be read
+            PDFParseError: If PDF cannot be read or has insufficient text
         """
         try:
-            # Try pdfplumber first (faster, works for native PDFs)
+            # Try pdfplumber (fast, works for native PDFs)
             all_text = self._extract_with_pdfplumber(pdf_bytes)
             print(f"pdfplumber extracted: {len(all_text.strip())} chars")
 
-            # If too little text, try OCR fallback
-            if len(all_text.strip()) < 50:
-                print("Triggering OCR fallback...")
+            # If too little text, signal that Claude Vision should be used
+            if len(all_text.strip()) < 100:
                 logger.info(
                     "pdfplumber_insufficient_text",
                     text_length=len(all_text.strip()),
-                    trying_ocr=OCR_AVAILABLE
+                    suggestion="use_claude_vision"
                 )
-                if OCR_AVAILABLE:
-                    ocr_text = self._extract_with_ocr(pdf_bytes)
-                    if len(ocr_text.strip()) > len(all_text.strip()):
-                        all_text = ocr_text
-                        logger.info("using_ocr_text", text_length=len(all_text))
-
-            if not all_text.strip():
                 raise PDFParseError(
-                    message="No text could be extracted from PDF (may be scanned image without OCR)",
-                    details={"pdf_size_bytes": len(pdf_bytes), "ocr_available": OCR_AVAILABLE}
+                    message="Insufficient text extracted - document may be scanned",
+                    details={
+                        "pdf_size_bytes": len(pdf_bytes),
+                        "text_length": len(all_text.strip()),
+                        "use_claude_vision": True
+                    }
                 )
 
             logger.info(
                 "pdf_text_extracted",
                 text_length=len(all_text),
-                preview=all_text[:500].replace('\n', ' ')[:200]  # First 200 chars for debugging
+                preview=all_text[:500].replace('\n', ' ')[:200]
             )
             return all_text
 

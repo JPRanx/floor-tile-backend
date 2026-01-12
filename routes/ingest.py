@@ -23,6 +23,8 @@ from models.shipment import (
     ShipmentStatusUpdate,
 )
 from services.document_parser_service import get_parser_service
+from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
+from exceptions.errors import PDFParseError
 from services.shipment_service import get_shipment_service
 from services.port_service import get_port_service
 from services.alert_service import get_alert_service
@@ -35,9 +37,57 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/shipments/ingest", tags=["Shipment Ingestion"])
 
 
+def _find_similar_container(
+    new_number: str,
+    existing_numbers: list[str],
+    threshold: float = 0.9
+) -> str | None:
+    """
+    Check if new_number is similar to any existing container (fuzzy match).
+
+    Handles OCR misreads where a single digit is wrong:
+    - DFSU9116028 matches DFSU1916028 (10/11 = 91% similar)
+    - Helps prevent duplicate containers from MBL misreads
+
+    Args:
+        new_number: Container number to check
+        existing_numbers: List of existing container numbers
+        threshold: Minimum similarity (0.9 = 10 of 11 chars must match)
+
+    Returns:
+        The existing container number if match found, None otherwise
+    """
+    new_upper = new_number.upper().replace(" ", "")
+
+    for existing in existing_numbers:
+        existing_upper = existing.upper().replace(" ", "")
+
+        # Must be same length for comparison
+        if len(new_upper) != len(existing_upper):
+            continue
+
+        # Count matching characters
+        matches = sum(a == b for a, b in zip(new_upper, existing_upper))
+        similarity = matches / len(new_upper)
+
+        if similarity >= threshold:
+            logger.info(
+                "fuzzy_container_match",
+                new_container=new_number,
+                matched_to=existing,
+                similarity=f"{similarity:.1%}",
+                mismatched_chars=len(new_upper) - matches
+            )
+            return existing
+
+    return None
+
+
 def _create_containers_for_shipment(shipment_id: str, container_numbers: list[str]) -> int:
     """
     Create containers for a shipment, avoiding duplicates.
+
+    Uses fuzzy matching to detect near-duplicates from OCR misreads.
 
     Args:
         shipment_id: UUID of the shipment
@@ -53,21 +103,38 @@ def _create_containers_for_shipment(shipment_id: str, container_numbers: list[st
 
     # Get existing containers for this shipment
     existing_containers = container_service.get_by_shipment(shipment_id)
-    existing_numbers = {c.container_number.upper() for c in existing_containers if c.container_number}
+    existing_numbers_set = {c.container_number.upper() for c in existing_containers if c.container_number}
+    existing_numbers_list = list(existing_numbers_set)
 
     created_count = 0
     for container_num in container_numbers:
-        # Skip if already exists
-        if container_num.upper() in existing_numbers:
+        container_num_upper = container_num.upper()
+
+        # Skip if exact match exists
+        if container_num_upper in existing_numbers_set:
             logger.debug("container_already_exists", container_number=container_num)
+            continue
+
+        # Check for fuzzy match (handles OCR misreads like 1→9)
+        fuzzy_match = _find_similar_container(container_num_upper, existing_numbers_list)
+        if fuzzy_match:
+            # Skip - this is likely the same container with OCR error
+            logger.info(
+                "container_skipped_fuzzy_match",
+                new_container=container_num,
+                matched_existing=fuzzy_match
+            )
             continue
 
         try:
             container_service.create(ContainerCreate(
                 shipment_id=shipment_id,
-                container_number=container_num.upper()
+                container_number=container_num_upper
             ))
             created_count += 1
+            # Add to existing list to prevent duplicates within same batch
+            existing_numbers_set.add(container_num_upper)
+            existing_numbers_list.append(container_num_upper)
             logger.info("container_created", shipment_id=shipment_id, container_number=container_num)
         except Exception as e:
             logger.warning("container_creation_failed", container_number=container_num, error=str(e))
@@ -82,6 +149,8 @@ def _create_containers_with_details_for_shipment(
 ) -> int:
     """
     Create containers for a shipment with detailed info (type, weight, volume, pallets).
+
+    Uses fuzzy matching to detect near-duplicates from OCR misreads.
 
     Args:
         shipment_id: UUID of the shipment
@@ -104,15 +173,27 @@ def _create_containers_with_details_for_shipment(
 
     # Get existing containers for this shipment
     existing_containers = container_service.get_by_shipment(shipment_id)
-    existing_numbers = {c.container_number.upper() for c in existing_containers if c.container_number}
+    existing_numbers_set = {c.container_number.upper() for c in existing_containers if c.container_number}
+    existing_numbers_list = list(existing_numbers_set)
 
     created_count = 0
     for container_num in container_numbers:
         container_num_upper = container_num.upper()
 
-        # Skip if already exists
-        if container_num_upper in existing_numbers:
+        # Skip if exact match exists
+        if container_num_upper in existing_numbers_set:
             logger.debug("container_already_exists", container_number=container_num)
+            continue
+
+        # Check for fuzzy match (handles OCR misreads like 1→9)
+        fuzzy_match = _find_similar_container(container_num_upper, existing_numbers_list)
+        if fuzzy_match:
+            # Skip - this is likely the same container with OCR error
+            logger.info(
+                "container_skipped_fuzzy_match",
+                new_container=container_num,
+                matched_existing=fuzzy_match
+            )
             continue
 
         # Get details if available
@@ -130,6 +211,9 @@ def _create_containers_with_details_for_shipment(
             )
             container_service.create(container_data)
             created_count += 1
+            # Add to existing list to prevent duplicates within same batch
+            existing_numbers_set.add(container_num_upper)
+            existing_numbers_list.append(container_num_upper)
             logger.info(
                 "container_created_with_details",
                 shipment_id=shipment_id,
@@ -283,13 +367,44 @@ async def ingest_pdf(
                 detail="Uploaded file is empty"
             )
 
-        # Parse PDF
-        parser = get_parser_service()
-        parsed_data = parser.parse_pdf(pdf_bytes)
+        parsed_data = None
+        parser_used = "pdfplumber"
+
+        # Try pdfplumber first (fast, free for native text PDFs)
+        try:
+            parser = get_parser_service()
+            parsed_data = parser.parse_pdf(pdf_bytes)
+            logger.info("pdf_parsed_with_pdfplumber", filename=file.filename)
+
+        except PDFParseError as parse_error:
+            # Check if we should fall back to Claude Vision
+            if parse_error.details and parse_error.details.get("use_claude_vision"):
+                logger.info(
+                    "falling_back_to_claude_vision",
+                    filename=file.filename,
+                    reason="insufficient_text"
+                )
+
+                if not CLAUDE_AVAILABLE:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="PDF appears to be scanned but Claude Vision is not configured. "
+                               "Set ANTHROPIC_API_KEY environment variable to enable."
+                    )
+
+                # Use Claude Vision for scanned PDFs
+                claude_parser = get_claude_parser_service()
+                parsed_data = await claude_parser.parse_pdf(pdf_bytes)
+                parser_used = "claude_vision"
+                logger.info("pdf_parsed_with_claude_vision", filename=file.filename)
+            else:
+                # Re-raise other PDFParseErrors
+                raise
 
         logger.info(
             "pdf_parsed_successfully",
             filename=file.filename,
+            parser_used=parser_used,
             document_type=parsed_data.document_type,
             overall_confidence=parsed_data.overall_confidence,
             has_shp=bool(parsed_data.shp_number),
@@ -299,13 +414,19 @@ async def ingest_pdf(
 
         return IngestResponse(
             success=True,
-            message=f"PDF parsed successfully. Document type: {parsed_data.document_type}. "
+            message=f"PDF parsed successfully ({parser_used}). Document type: {parsed_data.document_type}. "
                     f"Confidence: {parsed_data.overall_confidence:.0%}. "
                     "Please review and confirm the data.",
             action="parsed_pending_confirmation",
             parsed_data=parsed_data
         )
 
+    except PDFParseError as e:
+        logger.error("pdf_parsing_failed", filename=file.filename, error=str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse PDF: {str(e)}"
+        )
     except ValueError as e:
         logger.error("pdf_parsing_failed", filename=file.filename, error=str(e))
         raise HTTPException(
@@ -436,10 +557,15 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
             print(f"Data Voyage: {data.voyage}")
             print(f"Data POL: {data.pol}")
             print(f"Data POD: {data.pod}")
+            print(f"Data ETD: {data.etd}")
+            print(f"Data ETA: {data.eta}")
+            print(f"Data ATD: {data.atd}")
+            print(f"Data ATA: {data.ata}")
             print(f"Existing SHP: {existing_shipment.shp_number}")
             print(f"Existing Booking: {existing_shipment.booking_number}")
             print(f"Existing Vessel: {existing_shipment.vessel_name}")
             print(f"Existing Voyage: {existing_shipment.voyage_number}")
+            print(f"Existing ATD: {existing_shipment.actual_departure}")
             print(f"=======================")
 
             # For HBL/MBL: Special update logic to preserve booking and update B/L
