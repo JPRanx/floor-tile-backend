@@ -29,6 +29,7 @@ from services.shipment_service import get_shipment_service
 from services.port_service import get_port_service
 from services.alert_service import get_alert_service
 from services.container_service import get_container_service
+from services.ingestion_service import get_ingestion_service
 from models.alert import AlertType, AlertSeverity, AlertCreate
 from models.container import ContainerCreate
 from exceptions import NotFoundError, DatabaseError
@@ -489,49 +490,36 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
     shipment_service = get_shipment_service()
 
     try:
-        # Try to find existing shipment using multi-tier matching
-        existing_shipment = None
-        matched_by = None  # Track how we matched for logging
-
-        # 0. If target_shipment_id is provided (manual assignment), use that directly
+        # Validate target_shipment_id if provided (manual assignment)
         if data.target_shipment_id:
-            existing_shipment = shipment_service.get_by_id(data.target_shipment_id)
-            if existing_shipment:
-                matched_by = "manual_assignment"
-                logger.info(
-                    "existing_shipment_found_by_manual_assignment",
-                    shipment_id=existing_shipment.id
-                )
-            else:
+            try:
+                target_check = shipment_service.get_by_id(data.target_shipment_id)
+                if not target_check:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Target shipment not found: {data.target_shipment_id}"
+                    )
+            except Exception:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Target shipment not found: {data.target_shipment_id}"
                 )
 
-        # 1. Try SHP number (most reliable)
-        if not existing_shipment and data.shp_number:
-            existing_shipment = shipment_service.get_by_shp_number(data.shp_number)
-            if existing_shipment:
-                matched_by = "shp"
-                logger.info("existing_shipment_found_by_shp", shipment_id=existing_shipment.id)
+        # Use shared ingestion service for matching
+        # Order: target_id → shp → booking → containers (manual path prioritizes SHP)
+        existing_shipment, matched_by = get_ingestion_service().find_matching_shipment(
+            booking_number=data.booking_number,
+            shp_number=data.shp_number,
+            container_numbers=data.containers,
+            target_shipment_id=data.target_shipment_id,
+            match_order=["target_id", "shp", "booking", "containers"]
+        )
 
-        # 2. Try Booking number
-        if not existing_shipment and data.booking_number:
-            existing_shipment = shipment_service.get_by_booking_number(data.booking_number)
-            if existing_shipment:
-                matched_by = "booking"
-                logger.info("existing_shipment_found_by_booking", shipment_id=existing_shipment.id)
-
-        # 3. Try Container numbers (key for HBL/MBL that lack booking reference)
-        if not existing_shipment and data.containers:
-            existing_shipment = shipment_service.get_by_container_numbers(data.containers)
-            if existing_shipment:
-                matched_by = "container"
-                logger.info(
-                    "existing_shipment_found_by_container",
-                    shipment_id=existing_shipment.id,
-                    containers=data.containers
-                )
+        # Normalize matched_by for logging consistency
+        if matched_by == "target_id":
+            matched_by = "manual_assignment"
+        elif matched_by == "containers":
+            matched_by = "container"
 
         # Determine status based on document type
         # HBL/MBL don't change status - they just add reference info

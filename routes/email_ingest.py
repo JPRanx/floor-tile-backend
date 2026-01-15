@@ -20,7 +20,7 @@ from models.ingest import (
     ParsedDocumentData,
 )
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
-from services.shipment_service import get_shipment_service
+from services.ingestion_service import get_ingestion_service, IngestAction
 from integrations.telegram import send_message
 
 logger = structlog.get_logger(__name__)
@@ -333,60 +333,45 @@ Subject: {data.subject}
             confidence=0.0
         )
 
-    # Try to auto-match to existing shipment
-    shipment_service = get_shipment_service()
-    existing_shipment = None
-    matched_by = None
-
-    # Try booking number first
+    # Extract parsed values for matching
     booking_number = _parsed_field_to_value(parsed_data.booking_number)
-    if booking_number:
-        existing_shipment = shipment_service.get_by_booking_number(booking_number)
-        if existing_shipment:
-            matched_by = "booking"
-
-    # Try SHP number
-    if not existing_shipment:
-        shp_number = _parsed_field_to_value(parsed_data.shp_number)
-        if shp_number:
-            existing_shipment = shipment_service.get_by_shp_number(shp_number)
-            if existing_shipment:
-                matched_by = "shp"
-
-    # Try containers
-    if not existing_shipment and parsed_data.containers:
-        existing_shipment = shipment_service.get_by_container_numbers(parsed_data.containers)
-        if existing_shipment:
-            matched_by = "container"
+    shp_number = _parsed_field_to_value(parsed_data.shp_number)
+    container_numbers = parsed_data.containers if parsed_data.containers else []
 
     # Get confidence for logging (NOT for gating decisions)
     confidence = parsed_data.overall_confidence
 
-    # DECISION GATE: Match-based, not confidence-based
-    # - Matched shipment = corroborating evidence = auto-update
-    # - No match = flying blind = needs human review
-    if not existing_shipment:
-        # No match found - needs review regardless of confidence or doc type
-        shp_number = _parsed_field_to_value(parsed_data.shp_number)
+    # Determine action based on document type and matching
+    # Uses shared ingestion service for consistent logic
+    decision = get_ingestion_service().determine_action(
+        document_type=parsed_data.document_type,
+        booking_number=booking_number,
+        shp_number=shp_number,
+        container_numbers=container_numbers,
+        match_order=["booking", "shp", "containers"]  # Email doesn't have target_id
+    )
+
+    # Handle NEEDS_REVIEW - alert and return
+    if decision.action == IngestAction.NEEDS_REVIEW:
         logger.info(
-            "email_no_match_found",
+            "email_needs_review",
             document_type=parsed_data.document_type,
+            reason=decision.reason,
             booking=booking_number,
             shp=shp_number,
-            containers_count=len(parsed_data.containers),
+            containers_count=len(container_numbers),
             confidence=confidence
         )
         _send_needs_review_telegram(
             data.sender,
             data.subject,
-            f"No matching shipment found",
+            decision.reason,
             parsed_data
         )
         return EmailIngestResponse(
             success=True,
             action="needs_review",
-            message=f"Parsed {parsed_data.document_type.upper()} but no matching shipment found. "
-                    f"Create shipment first or verify data.",
+            message=decision.reason,
             document_type=parsed_data.document_type,
             booking_number=booking_number,
             confidence=confidence,
@@ -394,17 +379,22 @@ Subject: {data.subject}
                 "booking": booking_number,
                 "shp": shp_number,
                 "vessel": _parsed_field_to_value(parsed_data.vessel),
-                "containers": parsed_data.containers[:5],  # First 5
+                "containers": container_numbers[:5],  # First 5
             }
         )
 
-    # We have a match! Log warning if confidence is low (diagnostic only)
+    # UPDATE or CREATE - proceed to confirm
+    existing_shipment = decision.shipment
+    matched_by = decision.matched_by
+
+    # Log warning if confidence is low but we're proceeding (diagnostic only)
     if confidence < LOW_CONFIDENCE_WARNING:
         logger.warning(
-            "email_low_confidence_but_matched",
+            "email_low_confidence_proceeding",
             confidence=confidence,
+            action=decision.action.value,
             matched_by=matched_by,
-            shipment_id=existing_shipment.id,
+            shipment_id=existing_shipment.id if existing_shipment else None,
             document_type=parsed_data.document_type
         )
 
