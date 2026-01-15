@@ -332,6 +332,84 @@ class ShipmentService:
         shipments, _ = self.get_all(page=1, page_size=1000, status=status)
         return shipments
 
+    def get_awaiting_hbl(self, limit: int = 10) -> list[ShipmentResponse]:
+        """
+        Get shipments that have booking but no HBL/SHP data yet.
+
+        These are candidates for manual HBL assignment from pending documents.
+
+        Args:
+            limit: Maximum number of results (default 10)
+
+        Returns:
+            List of shipments with booking_number but missing shp_number,
+            ordered by created_at DESC (most recent first)
+        """
+        logger.debug("getting_shipments_awaiting_hbl", limit=limit)
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .not_.is_("booking_number", "null")
+                .is_("shp_number", "null")
+                .eq("active", True)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+
+            shipments = [self._row_to_response(row) for row in result.data]
+
+            logger.info(
+                "shipments_awaiting_hbl_retrieved",
+                count=len(shipments)
+            )
+
+            return shipments
+
+        except Exception as e:
+            logger.error("get_shipments_awaiting_hbl_failed", error=str(e))
+            raise DatabaseError("select", str(e))
+
+    def get_recent(self, limit: int = 10) -> list[ShipmentResponse]:
+        """
+        Get most recent shipments.
+
+        Used as fallback for candidate selection when document type
+        doesn't have specific matching criteria.
+
+        Args:
+            limit: Maximum number of results (default 10)
+
+        Returns:
+            List of recent active shipments, ordered by created_at DESC
+        """
+        logger.debug("getting_recent_shipments", limit=limit)
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("active", True)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+
+            shipments = [self._row_to_response(row) for row in result.data]
+
+            logger.info(
+                "recent_shipments_retrieved",
+                count=len(shipments)
+            )
+
+            return shipments
+
+        except Exception as e:
+            logger.error("get_recent_shipments_failed", error=str(e))
+            raise DatabaseError("select", str(e))
+
     # ===================
     # WRITE OPERATIONS
     # ===================

@@ -21,6 +21,7 @@ from models.ingest import (
 )
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
 from services.ingestion_service import get_ingestion_service, IngestAction
+from services.pending_document_service import get_pending_document_service
 from integrations.telegram import send_message
 
 logger = structlog.get_logger(__name__)
@@ -178,7 +179,8 @@ def _send_needs_review_telegram(
     sender: str,
     subject: str,
     reason: str,
-    parsed_data: Optional[ParsedDocumentData] = None
+    parsed_data: Optional[ParsedDocumentData] = None,
+    pending_doc_id: Optional[str] = None
 ):
     """Send Telegram notification when email needs manual review."""
     details = ""
@@ -189,6 +191,11 @@ Booking: `{_parsed_field_to_value(parsed_data.booking_number) or 'N/A'}`
 Containers: {len(parsed_data.containers)}
 Confidence: {parsed_data.overall_confidence:.0%}"""
 
+    # Include pending doc link if available
+    pending_link = ""
+    if pending_doc_id:
+        pending_link = f"\n\n🔗 [Review in dashboard](/pending-documents/{pending_doc_id})"
+
     message = f"""⚠️ *Email needs review*
 
 From: `{sender}`
@@ -196,7 +203,7 @@ Subject: {subject}
 
 Reason: {reason}
 {details}
-
+{pending_link}
 Please review manually in the system."""
 
     try:
@@ -351,7 +358,7 @@ Subject: {data.subject}
         match_order=["booking", "shp", "containers"]  # Email doesn't have target_id
     )
 
-    # Handle NEEDS_REVIEW - alert and return
+    # Handle NEEDS_REVIEW - store pending doc, alert, and return
     if decision.action == IngestAction.NEEDS_REVIEW:
         logger.info(
             "email_needs_review",
@@ -362,11 +369,40 @@ Subject: {data.subject}
             containers_count=len(container_numbers),
             confidence=confidence
         )
+
+        # Store as pending document for manual resolution
+        pending_doc = None
+        try:
+            pending_service = get_pending_document_service()
+            pending_doc = pending_service.create(
+                document_type=parsed_data.document_type,
+                parsed_data=parsed_data,
+                pdf_bytes=pdf_bytes,
+                pdf_filename=filename,
+                source="email",
+                email_subject=data.subject,
+                email_from=data.sender,
+                attempted_booking=booking_number,
+                attempted_shp=shp_number,
+                attempted_containers=container_numbers
+            )
+            logger.info(
+                "pending_document_stored",
+                pending_id=pending_doc.id,
+                document_type=parsed_data.document_type
+            )
+        except Exception as e:
+            logger.error(
+                "pending_document_store_failed",
+                error=str(e)
+            )
+
         _send_needs_review_telegram(
             data.sender,
             data.subject,
             decision.reason,
-            parsed_data
+            parsed_data,
+            pending_doc_id=pending_doc.id if pending_doc else None
         )
         return EmailIngestResponse(
             success=True,
@@ -380,6 +416,7 @@ Subject: {data.subject}
                 "shp": shp_number,
                 "vessel": _parsed_field_to_value(parsed_data.vessel),
                 "containers": container_numbers[:5],  # First 5
+                "pending_doc_id": pending_doc.id if pending_doc else None,
             }
         )
 

@@ -146,7 +146,8 @@ async def root():
             "order_builder": "/api/order-builder",
             "boats": "/api/boats",
             "alerts": "/api/alerts",
-            "settings": "/api/settings"
+            "settings": "/api/settings",
+            "pending_documents": "/api/pending-documents"
         }
     }
 
@@ -203,6 +204,7 @@ from routes.alerts import router as alerts_router
 from routes.ingest import router as ingest_router
 from routes.email_ingest import router as email_ingest_router
 from routes.ports import router as ports_router
+from routes.pending_documents import router as pending_documents_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -220,6 +222,7 @@ app.include_router(alerts_router)  # Prefix already in router
 app.include_router(ingest_router)  # Prefix already in router
 app.include_router(email_ingest_router)  # Prefix already in router
 app.include_router(ports_router)  # Prefix already in router
+app.include_router(pending_documents_router)  # Prefix already in router
 
 
 if __name__ == "__main__":
