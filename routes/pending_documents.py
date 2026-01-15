@@ -182,24 +182,19 @@ async def get_candidates(
     """
     Get candidate shipments for assigning this pending document.
 
-    For HBL/MBL documents: Returns shipments with booking but no SHP yet.
-    For other document types: Returns recent shipments as fallback.
-
-    These are shipments that could potentially be the target for this document.
+    Returns all active shipments (matching manual upload flow behavior).
+    User selects the appropriate target shipment from the list.
     """
     try:
         pending_service = get_pending_document_service()
         shipment_service = get_shipment_service()
 
-        # Get the pending document to check its type
-        pending_doc = pending_service.get_by_id(document_id)
+        # Verify the pending document exists
+        pending_service.get_by_id(document_id)
 
-        # For HBL/MBL, find shipments waiting for this data
-        if pending_doc.document_type in ["hbl", "mbl"]:
-            return shipment_service.get_awaiting_hbl(limit=limit)
-
-        # For other doc types, return recent shipments as fallback
-        return shipment_service.get_recent(limit=limit)
+        # Match manual flow - show all active shipments, let user decide
+        shipments, _ = shipment_service.get_all(page=1, page_size=limit)
+        return shipments
 
     except NotFoundError as e:
         return JSONResponse(
@@ -229,7 +224,7 @@ async def resolve_pending_document(document_id: str, request: ResolvePendingRequ
     """
     try:
         service = get_pending_document_service()
-        return service.resolve(document_id, request)
+        return await service.resolve(document_id, request)
 
     except NotFoundError as e:
         return JSONResponse(

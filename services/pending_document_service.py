@@ -290,7 +290,7 @@ class PendingDocumentService:
             )
             raise DatabaseError(f"Failed to get pending documents: {e}")
 
-    def resolve(
+    async def resolve(
         self,
         document_id: str,
         request: ResolvePendingRequest
@@ -340,20 +340,16 @@ class PendingDocumentService:
             # Build confirm request from parsed data
             parsed = doc.parsed_data
             confirm_req = ConfirmIngestRequest(
-                shp_number=request.shp_number or parsed.get("shp_number", {}).get("value"),
-                booking_number=request.booking_number or parsed.get("booking_number", {}).get("value"),
+                shp_number=request.shp_number or (parsed.get("shp_number") or {}).get("value"),
+                booking_number=request.booking_number or (parsed.get("booking_number") or {}).get("value"),
                 document_type=doc.document_type,
-                containers=parsed.get("containers", []),
+                containers=parsed.get("containers") or [],
                 source="pending_resolution",
                 notes=f"Resolved from pending document queue",
                 target_shipment_id=request.target_shipment_id,
             )
 
-            # This is sync but we need to call async - handle it
-            import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
-                confirm_ingest(confirm_req)
-            )
+            result = await confirm_ingest(confirm_req)
 
             resolved_shipment_id = result.shipment_id
             resolved_action = ResolvedAction.ASSIGNED
@@ -363,19 +359,16 @@ class PendingDocumentService:
 
             parsed = doc.parsed_data
             confirm_req = ConfirmIngestRequest(
-                shp_number=request.shp_number or parsed.get("shp_number", {}).get("value"),
-                booking_number=request.booking_number or parsed.get("booking_number", {}).get("value"),
+                shp_number=request.shp_number or (parsed.get("shp_number") or {}).get("value"),
+                booking_number=request.booking_number or (parsed.get("booking_number") or {}).get("value"),
                 document_type=doc.document_type,
-                containers=parsed.get("containers", []),
+                containers=parsed.get("containers") or [],
                 source="pending_resolution",
                 notes=f"Created from pending document queue",
                 target_shipment_id=None,  # Force creation
             )
 
-            import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
-                confirm_ingest(confirm_req)
-            )
+            result = await confirm_ingest(confirm_req)
 
             resolved_shipment_id = result.shipment_id
             resolved_action = ResolvedAction.CREATED

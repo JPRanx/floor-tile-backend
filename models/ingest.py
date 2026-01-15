@@ -117,7 +117,7 @@ class ConfirmIngestRequest(BaseModel):
     voyage: Optional[str] = None
 
     # Metadata
-    source: Literal["pdf_upload", "email_forward", "manual"] = "pdf_upload"
+    source: Literal["pdf_upload", "email_forward", "manual", "pending_resolution"] = "pdf_upload"
     notes: Optional[str] = Field(None, description="User notes about this document")
 
     # Original parsed data (for audit trail)
