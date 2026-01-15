@@ -7,10 +7,12 @@ email ingestion and manual upload flows.
 
 from enum import Enum
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional, Literal
 import structlog
 
 from models.shipment import ShipmentResponse
+from models.ingest import ParsedDocumentData, ConfirmIngestRequest
 from services.shipment_service import get_shipment_service, ShipmentService
 from exceptions import ShipmentNotFoundError
 
@@ -220,7 +222,84 @@ class IngestionService:
         )
 
 
-# Singleton instance
+# =============================================================================
+# Unified ConfirmIngestRequest Builder
+# =============================================================================
+
+def _parsed_field_to_value(field) -> Optional[str]:
+    """Extract value from ParsedFieldConfidence."""
+    if field and hasattr(field, 'value'):
+        return field.value
+    return None
+
+
+def _parsed_date_to_date(field) -> Optional[date]:
+    """Convert ParsedFieldConfidence date string to date object."""
+    value = _parsed_field_to_value(field)
+    if value:
+        try:
+            # Claude returns YYYY-MM-DD format
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def build_confirm_request(
+    parsed_data: ParsedDocumentData,
+    target_shipment_id: Optional[str] = None,
+    source: Literal["pdf_upload", "email_forward", "manual", "pending_resolution"] = "email_forward",
+    notes: Optional[str] = None,
+    shp_override: Optional[str] = None,
+    booking_override: Optional[str] = None,
+) -> ConfirmIngestRequest:
+    """
+    Single source of truth for building ConfirmIngestRequest from ParsedDocumentData.
+
+    Used by:
+    - email_ingest.py (auto-confirm flow)
+    - pending_document_service.py (resolve assign/create actions)
+
+    This ensures all fields are consistently extracted, especially:
+    - original_parsed_data (critical for container_details)
+    - All date fields (etd, eta, atd, ata)
+    - All location fields (pol, pod, vessel, voyage)
+
+    Args:
+        parsed_data: ParsedDocumentData from parser
+        target_shipment_id: Optional shipment ID for manual assignment
+        source: Source of ingestion (email_forward, pending_resolution, etc.)
+        notes: Optional notes to attach to the request
+        shp_override: Override SHP number from user input
+        booking_override: Override booking number from user input
+
+    Returns:
+        ConfirmIngestRequest ready for confirm_ingest()
+    """
+    return ConfirmIngestRequest(
+        document_type=parsed_data.document_type,
+        shp_number=shp_override or _parsed_field_to_value(parsed_data.shp_number),
+        booking_number=booking_override or _parsed_field_to_value(parsed_data.booking_number),
+        containers=list(parsed_data.containers) if parsed_data.containers else [],
+        etd=_parsed_date_to_date(parsed_data.etd),
+        eta=_parsed_date_to_date(parsed_data.eta),
+        atd=_parsed_date_to_date(parsed_data.atd),
+        ata=_parsed_date_to_date(parsed_data.ata),
+        pol=_parsed_field_to_value(parsed_data.pol),
+        pod=_parsed_field_to_value(parsed_data.pod),
+        vessel=_parsed_field_to_value(parsed_data.vessel),
+        voyage=_parsed_field_to_value(parsed_data.voyage),
+        source=source,
+        notes=notes,
+        target_shipment_id=target_shipment_id,
+        original_parsed_data=parsed_data,  # Critical for container_details!
+    )
+
+
+# =============================================================================
+# Singleton
+# =============================================================================
+
 _ingestion_service: Optional[IngestionService] = None
 
 

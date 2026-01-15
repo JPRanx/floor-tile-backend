@@ -19,6 +19,7 @@ from models.pending_document import (
     ResolvedAction,
 )
 from models.ingest import ParsedDocumentData, ConfirmIngestRequest
+from services.ingestion_service import build_confirm_request
 from exceptions import NotFoundError, DatabaseError
 
 logger = structlog.get_logger(__name__)
@@ -337,33 +338,17 @@ class PendingDocumentService:
             shipment_service = get_shipment_service()
             shipment_service.get_by_id(request.target_shipment_id)
 
-            # Build confirm request from parsed data
-            parsed = doc.parsed_data
+            # Reconstruct ParsedDocumentData from stored dict
+            parsed_data = ParsedDocumentData(**doc.parsed_data)
 
-            # Reconstruct ParsedDocumentData to pass container_details through
-            original_parsed_data = None
-            try:
-                original_parsed_data = ParsedDocumentData(**parsed)
-            except Exception as e:
-                logger.warning("failed_to_reconstruct_parsed_data", error=str(e))
-
-            confirm_req = ConfirmIngestRequest(
-                shp_number=request.shp_number or (parsed.get("shp_number") or {}).get("value"),
-                booking_number=request.booking_number or (parsed.get("booking_number") or {}).get("value"),
-                document_type=doc.document_type,
-                containers=parsed.get("containers") or [],
-                vessel=(parsed.get("vessel") or {}).get("value"),
-                voyage=(parsed.get("voyage") or {}).get("value"),
-                pol=(parsed.get("pol") or {}).get("value"),
-                pod=(parsed.get("pod") or {}).get("value"),
-                etd=(parsed.get("etd") or {}).get("value"),
-                eta=(parsed.get("eta") or {}).get("value"),
-                atd=(parsed.get("atd") or {}).get("value"),
-                ata=(parsed.get("ata") or {}).get("value"),
-                source="pending_resolution",
-                notes=f"Resolved from pending document queue",
+            # Use unified builder - ensures all fields including original_parsed_data
+            confirm_req = build_confirm_request(
+                parsed_data=parsed_data,
                 target_shipment_id=request.target_shipment_id,
-                original_parsed_data=original_parsed_data,
+                source="pending_resolution",
+                notes="Resolved from pending document queue",
+                shp_override=request.shp_number,
+                booking_override=request.booking_number,
             )
 
             result = await confirm_ingest(confirm_req)
@@ -374,32 +359,17 @@ class PendingDocumentService:
         elif request.action == "create":
             from routes.ingest import confirm_ingest
 
-            parsed = doc.parsed_data
+            # Reconstruct ParsedDocumentData from stored dict
+            parsed_data = ParsedDocumentData(**doc.parsed_data)
 
-            # Reconstruct ParsedDocumentData to pass container_details through
-            original_parsed_data = None
-            try:
-                original_parsed_data = ParsedDocumentData(**parsed)
-            except Exception as e:
-                logger.warning("failed_to_reconstruct_parsed_data", error=str(e))
-
-            confirm_req = ConfirmIngestRequest(
-                shp_number=request.shp_number or (parsed.get("shp_number") or {}).get("value"),
-                booking_number=request.booking_number or (parsed.get("booking_number") or {}).get("value"),
-                document_type=doc.document_type,
-                containers=parsed.get("containers") or [],
-                vessel=(parsed.get("vessel") or {}).get("value"),
-                voyage=(parsed.get("voyage") or {}).get("value"),
-                pol=(parsed.get("pol") or {}).get("value"),
-                pod=(parsed.get("pod") or {}).get("value"),
-                etd=(parsed.get("etd") or {}).get("value"),
-                eta=(parsed.get("eta") or {}).get("value"),
-                atd=(parsed.get("atd") or {}).get("value"),
-                ata=(parsed.get("ata") or {}).get("value"),
-                source="pending_resolution",
-                notes=f"Created from pending document queue",
+            # Use unified builder - ensures all fields including original_parsed_data
+            confirm_req = build_confirm_request(
+                parsed_data=parsed_data,
                 target_shipment_id=None,  # Force creation
-                original_parsed_data=original_parsed_data,
+                source="pending_resolution",
+                notes="Created from pending document queue",
+                shp_override=request.shp_number,
+                booking_override=request.booking_number,
             )
 
             result = await confirm_ingest(confirm_req)

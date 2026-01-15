@@ -20,7 +20,7 @@ from models.ingest import (
     ParsedDocumentData,
 )
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
-from services.ingestion_service import get_ingestion_service, IngestAction
+from services.ingestion_service import get_ingestion_service, IngestAction, build_confirm_request
 from services.pending_document_service import get_pending_document_service
 from integrations.telegram import send_message
 
@@ -439,23 +439,12 @@ Subject: {data.subject}
     # Import here to avoid circular import
     from routes.ingest import confirm_ingest
 
-    confirm_request = ConfirmIngestRequest(
-        shp_number=_parsed_field_to_value(parsed_data.shp_number),
-        booking_number=booking_number,
-        document_type=parsed_data.document_type,
-        containers=parsed_data.containers,
-        etd=_parsed_date_to_date(parsed_data.etd),
-        eta=_parsed_date_to_date(parsed_data.eta),
-        atd=_parsed_date_to_date(parsed_data.atd),
-        ata=_parsed_date_to_date(parsed_data.ata),
-        pol=_parsed_field_to_value(parsed_data.pol),
-        pod=_parsed_field_to_value(parsed_data.pod),
-        vessel=_parsed_field_to_value(parsed_data.vessel),
-        voyage=_parsed_field_to_value(parsed_data.voyage),
+    # Use unified builder - ensures all fields including original_parsed_data
+    confirm_request = build_confirm_request(
+        parsed_data=parsed_data,
+        target_shipment_id=existing_shipment.id if existing_shipment else None,
         source="email_forward",
         notes=f"Auto-ingested from email: {data.subject}",
-        original_parsed_data=parsed_data,
-        target_shipment_id=existing_shipment.id if existing_shipment else None,
     )
 
     try:
