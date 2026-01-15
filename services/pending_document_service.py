@@ -339,6 +339,14 @@ class PendingDocumentService:
 
             # Build confirm request from parsed data
             parsed = doc.parsed_data
+
+            # Reconstruct ParsedDocumentData to pass container_details through
+            original_parsed_data = None
+            try:
+                original_parsed_data = ParsedDocumentData(**parsed)
+            except Exception as e:
+                logger.warning("failed_to_reconstruct_parsed_data", error=str(e))
+
             confirm_req = ConfirmIngestRequest(
                 shp_number=request.shp_number or (parsed.get("shp_number") or {}).get("value"),
                 booking_number=request.booking_number or (parsed.get("booking_number") or {}).get("value"),
@@ -355,6 +363,7 @@ class PendingDocumentService:
                 source="pending_resolution",
                 notes=f"Resolved from pending document queue",
                 target_shipment_id=request.target_shipment_id,
+                original_parsed_data=original_parsed_data,
             )
 
             result = await confirm_ingest(confirm_req)
@@ -366,6 +375,14 @@ class PendingDocumentService:
             from routes.ingest import confirm_ingest
 
             parsed = doc.parsed_data
+
+            # Reconstruct ParsedDocumentData to pass container_details through
+            original_parsed_data = None
+            try:
+                original_parsed_data = ParsedDocumentData(**parsed)
+            except Exception as e:
+                logger.warning("failed_to_reconstruct_parsed_data", error=str(e))
+
             confirm_req = ConfirmIngestRequest(
                 shp_number=request.shp_number or (parsed.get("shp_number") or {}).get("value"),
                 booking_number=request.booking_number or (parsed.get("booking_number") or {}).get("value"),
@@ -382,6 +399,7 @@ class PendingDocumentService:
                 source="pending_resolution",
                 notes=f"Created from pending document queue",
                 target_shipment_id=None,  # Force creation
+                original_parsed_data=original_parsed_data,
             )
 
             result = await confirm_ingest(confirm_req)
