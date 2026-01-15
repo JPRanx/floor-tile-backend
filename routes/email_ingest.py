@@ -26,8 +26,8 @@ from integrations.telegram import send_message
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/shipments/ingest", tags=["Email Ingestion"])
 
-# Confidence threshold for auto-confirmation
-AUTO_CONFIRM_THRESHOLD = 0.90
+# Low confidence warning threshold (for logging, not gating)
+LOW_CONFIDENCE_WARNING = 0.75
 
 
 def _normalize_attachment(att) -> dict | None:
@@ -231,8 +231,9 @@ async def ingest_email(request: Request) -> EmailIngestResponse:
     - Power Automate: {filename, content_type, content_base64}
     - Make.com Mailhook: stringified JSON with Buffer format
 
-    Extracts PDF from attachments, parses with Claude Vision using email
-    context, and auto-confirms if confidence is high enough.
+    Decision logic (match-based, not confidence-based):
+    - Matched existing shipment → Auto-update (any confidence)
+    - No match found → Telegram alert for manual review
 
     Returns:
         EmailIngestResponse with processing result
@@ -358,67 +359,56 @@ Subject: {data.subject}
         if existing_shipment:
             matched_by = "container"
 
-    # Check confidence and decide action
+    # Get confidence for logging (NOT for gating decisions)
     confidence = parsed_data.overall_confidence
-    can_auto_confirm = confidence >= AUTO_CONFIRM_THRESHOLD
 
-    # If we can't match and it's HBL/MBL, need review
-    if parsed_data.document_type in ["hbl", "mbl"] and not existing_shipment:
+    # DECISION GATE: Match-based, not confidence-based
+    # - Matched shipment = corroborating evidence = auto-update
+    # - No match = flying blind = needs human review
+    if not existing_shipment:
+        # No match found - needs review regardless of confidence or doc type
+        shp_number = _parsed_field_to_value(parsed_data.shp_number)
         logger.info(
-            "email_needs_manual_match",
+            "email_no_match_found",
             document_type=parsed_data.document_type,
-            booking=booking_number
+            booking=booking_number,
+            shp=shp_number,
+            containers_count=len(parsed_data.containers),
+            confidence=confidence
         )
         _send_needs_review_telegram(
             data.sender,
             data.subject,
-            f"No matching shipment found for {parsed_data.document_type.upper()}",
+            f"No matching shipment found",
             parsed_data
         )
         return EmailIngestResponse(
             success=True,
             action="needs_review",
-            message=f"Parsed {parsed_data.document_type.upper()} but no matching shipment found",
+            message=f"Parsed {parsed_data.document_type.upper()} but no matching shipment found. "
+                    f"Create shipment first or verify data.",
             document_type=parsed_data.document_type,
             booking_number=booking_number,
             confidence=confidence,
             parsed_fields={
                 "booking": booking_number,
-                "shp": _parsed_field_to_value(parsed_data.shp_number),
+                "shp": shp_number,
                 "vessel": _parsed_field_to_value(parsed_data.vessel),
                 "containers": parsed_data.containers[:5],  # First 5
             }
         )
 
-    # Low confidence - needs review
-    if not can_auto_confirm:
-        logger.info(
-            "email_low_confidence",
+    # We have a match! Log warning if confidence is low (diagnostic only)
+    if confidence < LOW_CONFIDENCE_WARNING:
+        logger.warning(
+            "email_low_confidence_but_matched",
             confidence=confidence,
-            threshold=AUTO_CONFIRM_THRESHOLD
-        )
-        _send_needs_review_telegram(
-            data.sender,
-            data.subject,
-            f"Low confidence ({confidence:.0%} < {AUTO_CONFIRM_THRESHOLD:.0%})",
-            parsed_data
-        )
-        return EmailIngestResponse(
-            success=True,
-            action="needs_review",
-            message=f"Confidence too low for auto-confirm ({confidence:.0%})",
-            document_type=parsed_data.document_type,
-            booking_number=booking_number,
-            confidence=confidence,
-            parsed_fields={
-                "booking": booking_number,
-                "shp": _parsed_field_to_value(parsed_data.shp_number),
-                "vessel": _parsed_field_to_value(parsed_data.vessel),
-                "containers": parsed_data.containers[:5],
-            }
+            matched_by=matched_by,
+            shipment_id=existing_shipment.id,
+            document_type=parsed_data.document_type
         )
 
-    # High confidence - auto-confirm
+    # Matched shipment - proceed to auto-confirm
     # Import here to avoid circular import
     from routes.ingest import confirm_ingest
 
