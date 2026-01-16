@@ -15,6 +15,7 @@ from models.shipment import (
     ShipmentCreate,
     ShipmentUpdate,
     ShipmentStatusUpdate,
+    ShipmentCostsUpdate,
     ShipmentResponse,
     ShipmentStatus,
     is_valid_shipment_status_transition,
@@ -777,6 +778,85 @@ class ShipmentService:
             logger.error("delete_shipment_failed", shipment_id=shipment_id, error=str(e))
             raise DatabaseError("update", str(e))
 
+    def update_costs(self, shipment_id: str, data: ShipmentCostsUpdate) -> ShipmentResponse:
+        """
+        Update shipment costs and auto-calculate total.
+
+        Args:
+            shipment_id: Shipment UUID
+            data: Cost fields to update
+
+        Returns:
+            Updated ShipmentResponse
+
+        Raises:
+            ShipmentNotFoundError: If shipment doesn't exist
+        """
+        logger.info("updating_shipment_costs", shipment_id=shipment_id)
+
+        # Check shipment exists
+        existing = self.get_by_id(shipment_id)
+
+        try:
+            # Build update dict (only include non-None fields)
+            update_data = {}
+
+            if data.freight_cost_usd is not None:
+                update_data["freight_cost_usd"] = float(data.freight_cost_usd)
+            if data.customs_cost_usd is not None:
+                update_data["customs_cost_usd"] = float(data.customs_cost_usd)
+            if data.duties_cost_usd is not None:
+                update_data["duties_cost_usd"] = float(data.duties_cost_usd)
+            if data.insurance_cost_usd is not None:
+                update_data["insurance_cost_usd"] = float(data.insurance_cost_usd)
+            if data.demurrage_cost_usd is not None:
+                update_data["demurrage_cost_usd"] = float(data.demurrage_cost_usd)
+            if data.other_costs_usd is not None:
+                update_data["other_costs_usd"] = float(data.other_costs_usd)
+
+            if not update_data:
+                return existing
+
+            # Execute cost field updates
+            self.db.table(self.table).update(update_data).eq("id", shipment_id).execute()
+
+            # Calculate total cost from all cost fields
+            # Fetch updated row to get all current costs
+            updated = self.get_by_id(shipment_id)
+            total = Decimal("0")
+            if updated.freight_cost_usd:
+                total += updated.freight_cost_usd
+            if updated.customs_cost_usd:
+                total += updated.customs_cost_usd
+            if updated.duties_cost_usd:
+                total += updated.duties_cost_usd
+            if updated.insurance_cost_usd:
+                total += updated.insurance_cost_usd
+            if updated.demurrage_cost_usd:
+                total += updated.demurrage_cost_usd
+            if updated.other_costs_usd:
+                total += updated.other_costs_usd
+
+            # Update total cost
+            self.db.table(self.table).update({
+                "total_cost_usd": float(total)
+            }).eq("id", shipment_id).execute()
+
+            logger.info(
+                "shipment_costs_updated",
+                shipment_id=shipment_id,
+                fields=list(update_data.keys()),
+                total_cost=float(total)
+            )
+
+            return self.get_by_id(shipment_id)
+
+        except ShipmentNotFoundError:
+            raise
+        except Exception as e:
+            logger.error("update_shipment_costs_failed", shipment_id=shipment_id, error=str(e))
+            raise DatabaseError("update", str(e))
+
     # ===================
     # UTILITY METHODS
     # ===================
@@ -826,6 +906,12 @@ class ShipmentService:
             free_days=row.get("free_days"),
             free_days_expiry=row.get("free_days_expiry"),
             freight_cost_usd=Decimal(str(row["freight_cost_usd"])) if row.get("freight_cost_usd") else None,
+            customs_cost_usd=Decimal(str(row["customs_cost_usd"])) if row.get("customs_cost_usd") else None,
+            duties_cost_usd=Decimal(str(row["duties_cost_usd"])) if row.get("duties_cost_usd") else None,
+            insurance_cost_usd=Decimal(str(row["insurance_cost_usd"])) if row.get("insurance_cost_usd") else None,
+            demurrage_cost_usd=Decimal(str(row["demurrage_cost_usd"])) if row.get("demurrage_cost_usd") else None,
+            other_costs_usd=Decimal(str(row["other_costs_usd"])) if row.get("other_costs_usd") else None,
+            total_cost_usd=Decimal(str(row["total_cost_usd"])) if row.get("total_cost_usd") else None,
             notes=row.get("notes"),
             created_at=row["created_at"],
             updated_at=row.get("updated_at"),

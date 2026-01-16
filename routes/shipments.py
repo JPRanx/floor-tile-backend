@@ -14,6 +14,7 @@ from models.shipment import (
     ShipmentCreate,
     ShipmentUpdate,
     ShipmentStatusUpdate,
+    ShipmentCostsUpdate,
     ShipmentResponse,
     ShipmentListResponse,
     ShipmentStatus,
@@ -238,6 +239,27 @@ async def update_shipment_status(shipment_id: str, data: ShipmentStatusUpdate):
         return service.update_status(shipment_id, data)
 
     except (ShipmentNotFoundError, InvalidStatusTransitionError) as e:
+        return handle_error(e)
+    except Exception as e:
+        return handle_error(e)
+
+
+@router.patch("/{shipment_id}/costs", response_model=ShipmentResponse)
+async def update_shipment_costs(shipment_id: str, data: ShipmentCostsUpdate):
+    """
+    Update shipment costs.
+
+    Automatically calculates total_cost_usd from all cost fields.
+
+    Raises:
+        404: Shipment not found
+        422: Validation error
+    """
+    try:
+        service = get_shipment_service()
+        return service.update_costs(shipment_id, data)
+
+    except ShipmentNotFoundError as e:
         return handle_error(e)
     except Exception as e:
         return handle_error(e)

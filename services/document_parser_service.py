@@ -110,6 +110,20 @@ class DocumentParserService:
     # Words that should NOT be extracted as ports (watermarks, labels, etc.)
     PORT_EXCLUDE_WORDS = {'FINAL', 'ORIGINAL', 'COPY', 'DRAFT', 'VOID', 'DESTINATION', 'DELIVERY'}
 
+    # Freight amount patterns (for MBL/HBL cost extraction)
+    FREIGHT_AMOUNT_PATTERNS = [
+        r'OCEAN\s+FREIGHT[:\s]+\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # OCEAN FREIGHT 3,600.00
+        r'FREIGHT\s*&\s*CHARGES[:\s\n]+.*?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # Freight & Charges section
+        r'TOTAL\s+FREIGHT[:\s]+USD?\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # TOTAL FREIGHT USD 3600.00
+        r'FLETE\s+MARITIMO[:\s]+\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # Spanish: FLETE MARITIMO
+    ]
+
+    # Freight terms patterns (PREPAID or COLLECT)
+    FREIGHT_TERMS_PATTERNS = [
+        r'FREIGHT\s+(PREPAID|COLLECT)',  # FREIGHT PREPAID or FREIGHT COLLECT
+        r'FLETE\s+(PREPAGO|POR\s+COBRAR)',  # Spanish
+    ]
+
     # Major ocean carriers (for MBL detection)
     OCEAN_CARRIERS = [
         'CMA CGM', 'MAERSK', 'MSC', 'HAPAG', 'EVERGREEN', 'COSCO', 'ONE',
@@ -911,6 +925,55 @@ class DocumentParserService:
                 except ValueError:
                     pass
 
+    def _extract_freight_amount(self, text: str) -> Optional[ParsedFieldConfidence]:
+        """
+        Extract freight amount from document text.
+
+        Args:
+            text: Document text to search
+
+        Returns:
+            ParsedFieldConfidence if found, None otherwise
+        """
+        for pattern in self.FREIGHT_AMOUNT_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                amount_str = match.group(1).replace(',', '')
+                logger.info("freight_amount_regex_match", pattern=pattern, amount=amount_str)
+                return ParsedFieldConfidence(
+                    value=amount_str,
+                    confidence=0.85,
+                    source_text=match.group(0)[:100]
+                )
+        return None
+
+    def _extract_freight_terms(self, text: str) -> Optional[ParsedFieldConfidence]:
+        """
+        Extract freight terms (PREPAID/COLLECT) from document text.
+
+        Args:
+            text: Document text to search
+
+        Returns:
+            ParsedFieldConfidence if found, None otherwise
+        """
+        for pattern in self.FREIGHT_TERMS_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                terms = match.group(1).upper()
+                # Normalize Spanish terms
+                if terms == "PREPAGO":
+                    terms = "PREPAID"
+                elif "POR COBRAR" in terms.upper():
+                    terms = "COLLECT"
+                logger.info("freight_terms_regex_match", pattern=pattern, terms=terms)
+                return ParsedFieldConfidence(
+                    value=terms,
+                    confidence=0.90,
+                    source_text=match.group(0)
+                )
+        return None
+
     def parse_pdf(self, pdf_bytes: bytes) -> ParsedDocumentData:
         """
         Parse PDF and extract all shipment data.
@@ -1007,6 +1070,17 @@ class DocumentParserService:
             voyage=voyage,
             raw_text=text[:5000],  # First 5000 chars
             overall_confidence=0.0  # Calculate below
+        )
+
+        # Extract freight information (MBL/HBL documents)
+        parsed_data.freight_amount_usd = self._extract_freight_amount(text)
+        parsed_data.freight_terms = self._extract_freight_terms(text)
+
+        # DEBUG: Log freight extraction result
+        logger.info(
+            "freight_pdfplumber_result",
+            amount=parsed_data.freight_amount_usd.value if parsed_data.freight_amount_usd else None,
+            terms=parsed_data.freight_terms.value if parsed_data.freight_terms else None
         )
 
         # Calculate overall confidence

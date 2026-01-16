@@ -72,6 +72,11 @@ Extract these fields (use null if not found):
   Look for: "Sailed Date", "On Board Date", "Shipped on Board", "Date of Shipment", "Departure Date", "Fecha de Zarpe"
 - ata: Actual Time of Arrival (format: YYYY-MM-DD)
   Look for: "Arrival Date", "Discharge Date", "Fecha de Llegada"
+- freight_amount_usd: Total freight charges in USD (number only, no currency symbol)
+  Look for: "OCEAN FREIGHT", "Freight & Charges", "Total Freight", "FLETE MARITIMO", "FLETE"
+  Example: 3600.00
+- freight_terms: Payment terms - "PREPAID" or "COLLECT"
+  Look for: "FREIGHT PREPAID", "FREIGHT COLLECT", "FLETE PREPAGO", "FLETE POR COBRAR"
 - overall_confidence: 0.0-1.0 overall parsing confidence
 - notes: Any discrepancies, issues, or important observations
 
@@ -117,6 +122,8 @@ Return JSON in this exact structure:
   "eta": "2025-01-22",
   "atd": null,
   "ata": null,
+  "freight_amount_usd": 3600.00,
+  "freight_terms": "PREPAID",
   "container_count": 5,
   "containers": [
     {
@@ -297,6 +304,12 @@ Return JSON in this exact structure:
             cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
             cleaned = re.sub(r'\s*```$', '', cleaned)
 
+        # DEBUG: Log raw Claude response BEFORE parsing
+        print(f"=== CLAUDE RAW RESPONSE (first 2000 chars) ===")
+        print(response_text[:2000])
+        print(f"=== END CLAUDE RAW RESPONSE ===")
+        logger.info("claude_raw_response_preview", response_preview=response_text[:1000])
+
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as e:
@@ -308,6 +321,19 @@ Return JSON in this exact structure:
                 raw_text=response_text[:5000],
                 overall_confidence=0.0
             )
+
+        # DEBUG: Log what Claude returned for freight fields
+        print(f"=== CLAUDE FREIGHT FIELDS ===")
+        print(f"  freight_amount_usd: {data.get('freight_amount_usd')}")
+        print(f"  freight_terms: {data.get('freight_terms')}")
+        print(f"  document_type: {data.get('document_type')}")
+        print(f"=== END FREIGHT FIELDS ===")
+        logger.info(
+            "claude_raw_freight_data",
+            freight_amount_usd=data.get("freight_amount_usd"),
+            freight_terms=data.get("freight_terms"),
+            document_type=data.get("document_type")
+        )
 
         # Build ParsedDocumentData from Claude's response
 
@@ -403,6 +429,34 @@ Return JSON in this exact structure:
             voyage=make_field(data.get("voyage_number")),
             raw_text=f"Parsed by Claude Vision. Notes: {data.get('notes', 'None')}",
             overall_confidence=float(data.get("overall_confidence", 0.5))
+        )
+
+        # Parse freight information (from MBL/HBL documents)
+        freight_amount = data.get("freight_amount_usd")
+        if freight_amount is not None:
+            parsed_data.freight_amount_usd = ParsedFieldConfidence(
+                value=str(freight_amount),
+                confidence=0.85,
+                source_text="Extracted by Claude Vision"
+            )
+            logger.info("freight_amount_extracted", amount=freight_amount)
+
+        freight_terms = data.get("freight_terms")
+        if freight_terms:
+            parsed_data.freight_terms = ParsedFieldConfidence(
+                value=freight_terms.upper(),
+                confidence=0.85,
+                source_text="Extracted by Claude Vision"
+            )
+            logger.info("freight_terms_extracted", terms=freight_terms)
+
+        # DEBUG: Log final parsed freight data
+        logger.info(
+            "parsed_freight_final",
+            has_freight_amount=parsed_data.freight_amount_usd is not None,
+            freight_amount_value=parsed_data.freight_amount_usd.value if parsed_data.freight_amount_usd else None,
+            has_freight_terms=parsed_data.freight_terms is not None,
+            freight_terms_value=parsed_data.freight_terms.value if parsed_data.freight_terms else None
         )
 
         return parsed_data

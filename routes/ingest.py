@@ -21,6 +21,7 @@ from models.shipment import (
     ShipmentUpdate,
     ShipmentStatus,
     ShipmentStatusUpdate,
+    ShipmentCostsUpdate,
 )
 from services.document_parser_service import get_parser_service
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
@@ -611,6 +612,41 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                     existing_shipment.id,
                     ShipmentStatusUpdate(status=new_status)
                 )
+
+            # Auto-populate freight cost from MBL/HBL if available
+            # DEBUG: Log all conditions for freight auto-populate
+            logger.info(
+                "freight_auto_populate_check",
+                document_type=data.document_type,
+                is_hbl_mbl=data.document_type in ["hbl", "mbl"],
+                has_original_parsed_data=data.original_parsed_data is not None,
+                has_freight_amount=data.original_parsed_data.freight_amount_usd is not None if data.original_parsed_data else False,
+                freight_amount_value=data.original_parsed_data.freight_amount_usd.value if data.original_parsed_data and data.original_parsed_data.freight_amount_usd else None,
+                existing_freight_cost=existing_shipment.freight_cost_usd
+            )
+            if (data.document_type in ["hbl", "mbl"] and
+                data.original_parsed_data and
+                data.original_parsed_data.freight_amount_usd and
+                not existing_shipment.freight_cost_usd):
+                try:
+                    from decimal import Decimal
+                    freight_amount = Decimal(data.original_parsed_data.freight_amount_usd.value)
+                    shipment_service.update_costs(
+                        existing_shipment.id,
+                        ShipmentCostsUpdate(freight_cost_usd=freight_amount)
+                    )
+                    logger.info(
+                        "freight_cost_auto_populated",
+                        shipment_id=existing_shipment.id,
+                        freight_amount_usd=str(freight_amount),
+                        source=f"{data.document_type}_document"
+                    )
+                except Exception as freight_error:
+                    logger.warning(
+                        "freight_cost_auto_populate_failed",
+                        shipment_id=existing_shipment.id,
+                        error=str(freight_error)
+                    )
 
             # Update origin port if provided
             # DEBUG: Log port processing

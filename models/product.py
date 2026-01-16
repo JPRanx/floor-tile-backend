@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
 from datetime import datetime
+from decimal import Decimal
 
 from models.base import BaseSchema, TimestampMixin
 
@@ -83,7 +84,12 @@ class ProductUpdate(BaseSchema):
         None,
         description="Whether product is active"
     )
-    
+    fob_cost_usd: Optional[Decimal] = Field(
+        None,
+        ge=0,
+        description="FOB cost per m² in USD"
+    )
+
     @field_validator("sku")
     @classmethod
     def sku_uppercase(cls, v: Optional[str]) -> Optional[str]:
@@ -91,6 +97,14 @@ class ProductUpdate(BaseSchema):
         if v is None:
             return v
         return v.upper().strip()
+
+    @field_validator("fob_cost_usd")
+    @classmethod
+    def round_cost(cls, v: Optional[Decimal]) -> Optional[Decimal]:
+        """Round to 2 decimal places."""
+        if v is None:
+            return v
+        return round(v, 2)
 
 
 class ProductResponse(BaseSchema, TimestampMixin):
@@ -106,6 +120,7 @@ class ProductResponse(BaseSchema, TimestampMixin):
     category: Category = Field(..., description="Product category")
     rotation: Optional[Rotation] = Field(None, description="Sales velocity")
     active: bool = Field(..., description="Whether product is active")
+    fob_cost_usd: Optional[Decimal] = Field(None, description="FOB cost per m² in USD")
 
 
 class ProductListResponse(BaseSchema):

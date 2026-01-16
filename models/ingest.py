@@ -73,6 +73,10 @@ class ParsedDocumentData(BaseModel):
     vessel: Optional[ParsedFieldConfidence] = None
     voyage: Optional[ParsedFieldConfidence] = None
 
+    # Freight information (from MBL/HBL)
+    freight_amount_usd: Optional[ParsedFieldConfidence] = None  # e.g., 3600.00
+    freight_terms: Optional[ParsedFieldConfidence] = None  # "PREPAID" or "COLLECT"
+
     # Raw data
     raw_text: str = Field(description="Complete extracted text from document")
 

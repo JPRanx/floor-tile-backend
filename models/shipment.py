@@ -200,6 +200,12 @@ class ShipmentUpdate(BaseSchema):
 
     # Costs
     freight_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Freight cost in USD")
+    customs_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Customs cost in USD")
+    duties_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Duties/tariffs cost in USD")
+    insurance_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Insurance cost in USD")
+    demurrage_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Demurrage cost in USD")
+    other_costs_usd: Optional[Decimal] = Field(None, ge=0, description="Other costs in USD")
+    total_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Total cost in USD")
 
     notes: Optional[str] = Field(None, max_length=1000, description="Notes")
 
@@ -211,7 +217,32 @@ class ShipmentUpdate(BaseSchema):
             return v
         return v.upper().strip()
 
-    @field_validator("freight_cost_usd")
+    @field_validator(
+        "freight_cost_usd", "customs_cost_usd", "duties_cost_usd",
+        "insurance_cost_usd", "demurrage_cost_usd", "other_costs_usd", "total_cost_usd"
+    )
+    @classmethod
+    def round_cost(cls, v: Optional[Decimal]) -> Optional[Decimal]:
+        """Round to 2 decimal places."""
+        if v is None:
+            return v
+        return round(v, 2)
+
+
+class ShipmentCostsUpdate(BaseSchema):
+    """Update only the costs of a shipment."""
+
+    freight_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Freight cost in USD")
+    customs_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Customs cost in USD")
+    duties_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Duties/tariffs cost in USD")
+    insurance_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Insurance cost in USD")
+    demurrage_cost_usd: Optional[Decimal] = Field(None, ge=0, description="Demurrage cost in USD")
+    other_costs_usd: Optional[Decimal] = Field(None, ge=0, description="Other costs in USD")
+
+    @field_validator(
+        "freight_cost_usd", "customs_cost_usd", "duties_cost_usd",
+        "insurance_cost_usd", "demurrage_cost_usd", "other_costs_usd"
+    )
     @classmethod
     def round_cost(cls, v: Optional[Decimal]) -> Optional[Decimal]:
         """Round to 2 decimal places."""
@@ -270,6 +301,12 @@ class ShipmentResponse(BaseSchema, TimestampMixin):
 
     # Costs
     freight_cost_usd: Optional[Decimal] = Field(None, description="Freight cost in USD")
+    customs_cost_usd: Optional[Decimal] = Field(None, description="Customs cost in USD")
+    duties_cost_usd: Optional[Decimal] = Field(None, description="Duties/tariffs cost in USD")
+    insurance_cost_usd: Optional[Decimal] = Field(None, description="Insurance cost in USD")
+    demurrage_cost_usd: Optional[Decimal] = Field(None, description="Demurrage cost in USD")
+    other_costs_usd: Optional[Decimal] = Field(None, description="Other costs in USD")
+    total_cost_usd: Optional[Decimal] = Field(None, description="Total cost in USD")
 
     notes: Optional[str] = Field(None, description="Notes")
 

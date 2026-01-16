@@ -20,6 +20,8 @@ class SalesRecordCreate(BaseSchema):
     quantity_m2: Decimal = Field(..., ge=0, description="Sales quantity in m²")
     customer: Optional[str] = Field(None, description="Original customer name (with accents)")
     customer_normalized: Optional[str] = Field(None, description="Normalized for grouping (uppercase ASCII)")
+    unit_price_usd: Optional[Decimal] = Field(None, ge=0, description="Unit price per m² in USD")
+    total_price_usd: Optional[Decimal] = Field(None, ge=0, description="Total sale price in USD")
 
     @field_validator("quantity_m2", mode="before")
     @classmethod
@@ -45,8 +47,10 @@ class SalesRecordUpdate(BaseSchema):
 
     week_start: Optional[date] = None
     quantity_m2: Optional[Decimal] = Field(None, ge=0)
+    unit_price_usd: Optional[Decimal] = Field(None, ge=0, description="Unit price per m² in USD")
+    total_price_usd: Optional[Decimal] = Field(None, ge=0, description="Total sale price in USD")
 
-    @field_validator("quantity_m2", mode="before")
+    @field_validator("quantity_m2", "unit_price_usd", "total_price_usd", mode="before")
     @classmethod
     def round_quantity(cls, v):
         """Round to 2 decimal places."""
@@ -64,8 +68,10 @@ class SalesRecordResponse(TimestampMixin, BaseSchema):
     quantity_m2: Decimal
     customer: Optional[str] = None
     customer_normalized: Optional[str] = None
+    unit_price_usd: Optional[Decimal] = None
+    total_price_usd: Optional[Decimal] = None
 
-    @field_validator("quantity_m2", mode="before")
+    @field_validator("quantity_m2", "unit_price_usd", "total_price_usd", mode="before")
     @classmethod
     def ensure_decimal(cls, v):
         """Ensure quantity is Decimal."""
