@@ -33,6 +33,7 @@ from services.ingestion_service import get_ingestion_service
 from models.alert import AlertType, AlertSeverity, AlertCreate
 from models.container import ContainerCreate
 from exceptions import NotFoundError, DatabaseError
+from integrations.telegram_messages import get_message
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/shipments/ingest", tags=["Shipment Ingestion"])
@@ -828,10 +829,13 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                     AlertCreate(
                         type=AlertType.CONTAINER_READY,
                         severity=AlertSeverity.INFO,
-                        title=f"Nuevo embarque: {new_shipment.shp_number}",
-                        message=f"📦 Nuevo embarque creado: {new_shipment.shp_number}\n\n"
-                                f"Booking: {new_shipment.booking_number or 'N/A'}\n"
-                                f"Buque: {new_shipment.vessel_name or 'N/A'}",
+                        title=get_message("title_new_shipment", shp_number=new_shipment.shp_number),
+                        message=get_message(
+                            "new_shipment_created",
+                            shp_number=new_shipment.shp_number,
+                            booking=new_shipment.booking_number or "N/A",
+                            vessel=new_shipment.vessel_name or "N/A"
+                        ),
                         shipment_id=new_shipment.id,
                     ),
                     send_telegram=True

@@ -23,6 +23,7 @@ from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVA
 from services.ingestion_service import get_ingestion_service, IngestAction, build_confirm_request
 from services.pending_document_service import get_pending_document_service
 from integrations.telegram import send_message
+from integrations.telegram_messages import get_message
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/shipments/ingest", tags=["Email Ingestion"])
@@ -161,13 +162,14 @@ def _send_success_telegram(
     confidence: float
 ):
     """Send Telegram notification for successful email processing."""
-    message = f"""✅ *Email processed*
-
-From: `{sender}`
-Document: {document_type.upper()}
-Booking: `{booking_number or 'N/A'}`
-Action: {action}
-Confidence: {confidence:.0%}"""
+    message = get_message(
+        "email_processed",
+        from_addr=sender,
+        doc_type=document_type.upper(),
+        booking=booking_number or "N/A",
+        action=action,
+        confidence=confidence
+    )
 
     try:
         send_message(message)
@@ -185,26 +187,27 @@ def _send_needs_review_telegram(
     """Send Telegram notification when email needs manual review."""
     details = ""
     if parsed_data:
-        details = f"""
-Document type: {parsed_data.document_type}
-Booking: `{_parsed_field_to_value(parsed_data.booking_number) or 'N/A'}`
-Containers: {len(parsed_data.containers)}
-Confidence: {parsed_data.overall_confidence:.0%}"""
+        details = get_message(
+            "email_review_details",
+            doc_type=parsed_data.document_type,
+            booking=_parsed_field_to_value(parsed_data.booking_number) or "N/A",
+            containers=len(parsed_data.containers),
+            confidence=parsed_data.overall_confidence
+        )
 
     # Include pending doc link if available
     pending_link = ""
     if pending_doc_id:
-        pending_link = f"\n\n🔗 [Review in dashboard](/pending-documents/{pending_doc_id})"
+        pending_link = get_message("email_pending_link", pending_id=pending_doc_id)
 
-    message = f"""⚠️ *Email needs review*
-
-From: `{sender}`
-Subject: {subject}
-
-Reason: {reason}
-{details}
-{pending_link}
-Please review manually in the system."""
+    message = get_message(
+        "email_needs_review",
+        from_addr=sender,
+        subject=subject,
+        reason=reason,
+        details=details,
+        pending_link=pending_link
+    )
 
     try:
         send_message(message)
@@ -214,14 +217,12 @@ Please review manually in the system."""
 
 def _send_error_telegram(sender: str, subject: str, error: str):
     """Send Telegram notification for processing errors."""
-    message = f"""❌ *Email processing failed*
-
-From: `{sender}`
-Subject: {subject}
-
-Error: {error}
-
-Please check the email manually."""
+    message = get_message(
+        "email_error",
+        from_addr=sender,
+        subject=subject,
+        error=error
+    )
 
     try:
         send_message(message)

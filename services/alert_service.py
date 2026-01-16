@@ -19,6 +19,7 @@ from models.alert import (
 from services.stockout_service import get_stockout_service
 from services.boat_schedule_service import get_boat_schedule_service
 from integrations.telegram import send_alert_to_telegram, TelegramError
+from integrations.telegram_messages import get_message
 from exceptions import NotFoundError, DatabaseError
 
 logger = structlog.get_logger(__name__)
@@ -325,13 +326,13 @@ class AlertService:
                 continue  # Not urgent enough
 
             # Build alert
-            title = f"Stockout warning: {product.sku}"
-            message = (
-                f"Low stock alert for {product.sku}\n\n"
-                f"Stockout in {days_to_stockout} days\n"
-                f"Current: {product.warehouse_qty} m2\n"
-                f"Daily demand: {product.avg_daily_sales} m2\n\n"
-                f"Action: Order on next boat"
+            title = get_message("title_stockout", sku=product.sku)
+            message = get_message(
+                "stockout_warning",
+                sku=product.sku,
+                days=days_to_stockout,
+                stock=product.warehouse_qty,
+                daily_usage=product.avg_daily_sales
             )
 
             # Check if similar alert exists in last 7 days
@@ -402,14 +403,12 @@ class AlertService:
 
             severity = AlertSeverity.CRITICAL
 
-            title = f"Booking deadline: {boat.vessel_name}"
-            message = (
-                f"Booking deadline approaching for {boat.vessel_name}\n\n"
-                f"Deadline: {boat.booking_deadline.strftime('%Y-%m-%d')} "
-                f"({days_until_deadline} days)\n"
-                f"Departure: {boat.departure_date.strftime('%Y-%m-%d')}\n"
-                f"Route: {boat.origin_port} -> {boat.destination_port}\n\n"
-                f"Action: Finalize orders now!"
+            title = get_message("title_booking_deadline", vessel=boat.vessel_name)
+            message = get_message(
+                "booking_deadline",
+                vessel=boat.vessel_name,
+                deadline=boat.booking_deadline.strftime('%Y-%m-%d'),
+                days=days_until_deadline
             )
 
             # Check if similar alert exists in last 3 days

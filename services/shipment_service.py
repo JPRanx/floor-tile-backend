@@ -25,6 +25,7 @@ from models.alert import AlertType, AlertSeverity, AlertCreate
 from services.shipment_event_service import get_shipment_event_service
 from services.factory_order_service import get_factory_order_service
 from services.alert_service import get_alert_service
+from integrations.telegram_messages import get_message
 from exceptions import (
     ShipmentNotFoundError,
     ShipmentBookingExistsError,
@@ -685,24 +686,32 @@ class ShipmentService:
                         AlertCreate(
                             type=AlertType.SHIPMENT_DEPARTED,
                             severity=AlertSeverity.INFO,
-                            title=f"Embarque zarpó: {shp_number}",
-                            message=f"🚢 Embarque {shp_number} ha zarpado\n\n"
-                                    f"Buque: {existing.vessel_name or 'N/A'}\n"
-                                    f"ETA: {existing.eta or 'N/A'}",
+                            title=get_message("title_shipment_departed", shp_number=shp_number),
+                            message=get_message(
+                                "shipment_departed",
+                                shp_number=shp_number,
+                                vessel=existing.vessel_name or "N/A",
+                                eta=str(existing.eta) if existing.eta else "N/A"
+                            ),
                             shipment_id=shipment_id,
                         ),
                         send_telegram=True
                     )
 
                 elif new_status == ShipmentStatus.AT_DESTINATION_PORT:
+                    # Get container count for the message
+                    container_count = len(existing.containers) if existing.containers else 0
                     alert_service.create(
                         AlertCreate(
                             type=AlertType.SHIPMENT_ARRIVED,
                             severity=AlertSeverity.INFO,
-                            title=f"Embarque llegó: {shp_number}",
-                            message=f"⚓ Embarque {shp_number} llegó a puerto\n\n"
-                                    f"Buque: {existing.vessel_name or 'N/A'}\n"
-                                    f"Siguiente paso: Despacho de aduana",
+                            title=get_message("title_shipment_at_port", shp_number=shp_number),
+                            message=get_message(
+                                "shipment_at_port",
+                                shp_number=shp_number,
+                                vessel=existing.vessel_name or "N/A",
+                                containers=container_count
+                            ),
                             shipment_id=shipment_id,
                         ),
                         send_telegram=True
@@ -713,10 +722,12 @@ class ShipmentService:
                         AlertCreate(
                             type=AlertType.SHIPMENT_ARRIVED,
                             severity=AlertSeverity.INFO,
-                            title=f"Embarque entregado: {shp_number}",
-                            message=f"✅ Embarque {shp_number} entregado a bodega\n\n"
-                                    f"Buque: {existing.vessel_name or 'N/A'}\n"
-                                    f"Estado: Completado",
+                            title=get_message("title_shipment_delivered", shp_number=shp_number),
+                            message=get_message(
+                                "shipment_delivered",
+                                shp_number=shp_number,
+                                vessel=existing.vessel_name or "N/A"
+                            ),
                             shipment_id=shipment_id,
                         ),
                         send_telegram=True
