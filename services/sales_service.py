@@ -329,6 +329,8 @@ class SalesService:
                     "quantity_m2": float(r.quantity_m2),
                     "customer": r.customer,
                     "customer_normalized": r.customer_normalized,
+                    "unit_price_usd": float(r.unit_price_usd) if r.unit_price_usd else None,
+                    "total_price_usd": float(r.total_price_usd) if r.total_price_usd else None,
                 }
                 for r in records
             ]
