@@ -183,7 +183,75 @@ class ProductService:
                 error=str(e)
             )
             raise DatabaseError("select", str(e))
-    
+
+    def get_by_factory_code(self, factory_code: str) -> Optional[ProductResponse]:
+        """
+        Get a product by factory code.
+
+        Args:
+            factory_code: Factory internal product code (e.g., '5495')
+
+        Returns:
+            ProductResponse or None if not found
+        """
+        logger.debug("getting_product_by_factory_code", factory_code=factory_code)
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("factory_code", factory_code)
+                .eq("active", True)
+                .execute()
+            )
+
+            if not result.data:
+                return None
+
+            return ProductResponse(**result.data[0])
+
+        except Exception as e:
+            logger.error(
+                "get_product_by_factory_code_failed",
+                factory_code=factory_code,
+                error=str(e)
+            )
+            raise DatabaseError("select", str(e))
+
+    def get_by_factory_codes(self, factory_codes: list[str]) -> list[ProductResponse]:
+        """
+        Get multiple products by their factory codes.
+
+        Args:
+            factory_codes: List of factory codes (e.g., ['5495', '5498'])
+
+        Returns:
+            List of ProductResponse objects (may be fewer than input if some not found)
+        """
+        if not factory_codes:
+            return []
+
+        logger.debug("getting_products_by_factory_codes", count=len(factory_codes))
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .in_("factory_code", factory_codes)
+                .eq("active", True)
+                .execute()
+            )
+
+            return [ProductResponse(**row) for row in result.data]
+
+        except Exception as e:
+            logger.error(
+                "get_products_by_factory_codes_failed",
+                count=len(factory_codes),
+                error=str(e)
+            )
+            raise DatabaseError("select", str(e))
+
     # ===================
     # WRITE OPERATIONS
     # ===================
@@ -278,7 +346,11 @@ class ProductService:
                 update_data["rotation"] = data.rotation.value
             if data.active is not None:
                 update_data["active"] = data.active
-            
+            if data.fob_cost_usd is not None:
+                update_data["fob_cost_usd"] = float(data.fob_cost_usd)
+            if data.factory_code is not None:
+                update_data["factory_code"] = data.factory_code
+
             if not update_data:
                 # Nothing to update, return existing
                 return existing

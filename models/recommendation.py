@@ -122,6 +122,12 @@ class ProductRecommendation(BaseSchema):
     recurring_customers: int = Field(default=0, description="Customers with 2+ orders")
     recurring_share: Optional[Decimal] = Field(None, description="Share of sales from recurring customers (0-1)")
 
+    # Production schedule integration
+    upcoming_production_m2: Optional[Decimal] = Field(None, description="Total m² scheduled in production (next 60 days)")
+    next_production_date: Optional[date] = Field(None, description="Next scheduled production date")
+    production_before_stockout: Optional[bool] = Field(None, description="Whether production is scheduled before stockout")
+    production_covers_gap: Optional[bool] = Field(None, description="Whether production will cover the coverage gap")
+
     # Priority and action
     priority: RecommendationPriority
     action_type: ActionType = Field(..., description="Action to take (ORDER_NOW, ORDER_SOON, etc.)")

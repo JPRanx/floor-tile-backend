@@ -62,10 +62,10 @@ class ProductCreate(BaseSchema):
 class ProductUpdate(BaseSchema):
     """
     Update existing product.
-    
+
     All fields optional - only provided fields are updated.
     """
-    
+
     sku: Optional[str] = Field(
         None,
         min_length=1,
@@ -88,6 +88,11 @@ class ProductUpdate(BaseSchema):
         None,
         ge=0,
         description="FOB cost per m² in USD"
+    )
+    factory_code: Optional[str] = Field(
+        None,
+        max_length=20,
+        description="Factory internal product code (e.g., 5495)"
     )
 
     @field_validator("sku")
@@ -117,6 +122,7 @@ class ProductResponse(BaseSchema, TimestampMixin):
     id: str = Field(..., description="Product UUID")
     sku: str = Field(..., description="Product SKU")
     owner_code: Optional[str] = Field(None, description="Owner's Excel SKU code (e.g., '0000102', '0000119')")
+    factory_code: Optional[str] = Field(None, description="Factory internal product code (e.g., 5495)")
     category: Category = Field(..., description="Product category")
     rotation: Optional[Rotation] = Field(None, description="Sales velocity")
     active: bool = Field(..., description="Whether product is active")

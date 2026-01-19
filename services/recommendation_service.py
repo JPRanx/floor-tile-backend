@@ -30,6 +30,7 @@ from models.recommendation import (
     ConfidenceLevel,
 )
 from services.boat_schedule_service import get_boat_schedule_service
+from services.production_schedule_service import get_production_schedule_service
 
 logger = structlog.get_logger(__name__)
 
@@ -55,6 +56,7 @@ class RecommendationService:
         self.sales_service = get_sales_service()
         self.stockout_service = get_stockout_service()
         self.boat_service = get_boat_schedule_service()
+        self.production_service = get_production_schedule_service()
 
         # Settings (from environment config, not database)
         self.lead_time = settings.lead_time_days  # 45 days
@@ -230,6 +232,9 @@ class RecommendationService:
             weeks=self.sales_weeks
         )
 
+        # Step 7: Get upcoming production schedule (next 60 days)
+        production_map = self._get_production_map(days_ahead=60)
+
         recommendations = []
         warnings = []
         order_arrives = today + timedelta(days=self.lead_time)
@@ -255,6 +260,15 @@ class RecommendationService:
                 inventory = inventory_map.get(alloc.product_id)
                 warehouse_m2 = Decimal(str(inventory.warehouse_qty)) if inventory else Decimal("0")
                 in_transit_m2 = Decimal(str(inventory.in_transit_qty)) if inventory else Decimal("0")
+
+                # Get production schedule info (even for no-sales products)
+                prod_m2, prod_date, _, _ = self._get_production_for_product(
+                    product_id=alloc.product_id,
+                    production_map=production_map,
+                    stockout_date=None,
+                    coverage_gap_m2=Decimal("0"),
+                )
+
                 recommendations.append(ProductRecommendation(
                     product_id=alloc.product_id,
                     sku=alloc.sku,
@@ -288,6 +302,11 @@ class RecommendationService:
                     top_customer_share=None,
                     recurring_customers=0,
                     recurring_share=None,
+                    # Production schedule fields
+                    upcoming_production_m2=prod_m2,
+                    next_production_date=prod_date,
+                    production_before_stockout=None,
+                    production_covers_gap=None,
                     priority=RecommendationPriority.YOUR_CALL,
                     action_type=ActionType.REVIEW,
                     action="Needs manual review — no sales history",
@@ -393,6 +412,15 @@ class RecommendationService:
                     days_to_cover=days_to_cover,
                 )
                 weeks_of_stock = int(days_until_empty / 7) if days_until_empty else 0
+
+                # Get production schedule info
+                prod_m2, prod_date, prod_before_stockout, prod_covers_gap = self._get_production_for_product(
+                    product_id=alloc.product_id,
+                    production_map=production_map,
+                    stockout_date=stockout_date,
+                    coverage_gap_m2=coverage_gap_m2,
+                )
+
                 recommendations.append(ProductRecommendation(
                     product_id=alloc.product_id,
                     sku=alloc.sku,
@@ -426,6 +454,11 @@ class RecommendationService:
                     top_customer_share=customer_metrics.get("top_customer_share"),
                     recurring_customers=customer_metrics.get("recurring_customers", 0),
                     recurring_share=customer_metrics.get("recurring_share"),
+                    # Production schedule fields
+                    upcoming_production_m2=prod_m2,
+                    next_production_date=prod_date,
+                    production_before_stockout=prod_before_stockout,
+                    production_covers_gap=prod_covers_gap,
                     priority=RecommendationPriority.WELL_COVERED,
                     action_type=ActionType.WELL_STOCKED,
                     action=f"{weeks_of_stock} weeks of inventory — no action needed",
@@ -459,6 +492,14 @@ class RecommendationService:
                 weekly_sales=weekly_quantities,
                 weeks_of_data=alloc.weeks_of_data,
                 customer_analysis=customer_analysis,
+            )
+
+            # Get production schedule info
+            prod_m2, prod_date, prod_before_stockout, prod_covers_gap = self._get_production_for_product(
+                product_id=alloc.product_id,
+                production_map=production_map,
+                stockout_date=stockout_date,
+                coverage_gap_m2=coverage_gap_m2,
             )
 
             recommendations.append(ProductRecommendation(
@@ -498,6 +539,11 @@ class RecommendationService:
                 top_customer_share=customer_metrics.get("top_customer_share"),
                 recurring_customers=customer_metrics.get("recurring_customers", 0),
                 recurring_share=customer_metrics.get("recurring_share"),
+                # Production schedule fields
+                upcoming_production_m2=prod_m2,
+                next_production_date=prod_date,
+                production_before_stockout=prod_before_stockout,
+                production_covers_gap=prod_covers_gap,
                 # Priority and action
                 priority=priority,
                 action_type=action_type,
@@ -898,6 +944,93 @@ class RecommendationService:
 
         # Default: MEDIUM with data quality note
         return ConfidenceLevel.MEDIUM, f"{weeks_of_data} weeks history", round(cv, 2), customer_metrics
+
+    def _get_production_map(self, days_ahead: int = 60) -> dict:
+        """
+        Get upcoming production schedule grouped by product_id.
+
+        Args:
+            days_ahead: How many days ahead to look for production
+
+        Returns:
+            Dict mapping product_id to production info:
+            {
+                "product_id": {
+                    "total_m2": Decimal,
+                    "next_production_date": date,
+                    "production_items": list
+                }
+            }
+        """
+        try:
+            items = self.production_service.get_upcoming_production(days_ahead=days_ahead)
+
+            production_map = {}
+            for item in items:
+                if not item.product_id:
+                    continue
+
+                if item.product_id not in production_map:
+                    production_map[item.product_id] = {
+                        "total_m2": Decimal("0"),
+                        "next_production_date": item.production_date,
+                        "production_items": []
+                    }
+
+                # Add this production's m² to total
+                if item.m2_export_first:
+                    production_map[item.product_id]["total_m2"] += item.m2_export_first
+
+                production_map[item.product_id]["production_items"].append(item)
+
+            logger.info(
+                "production_schedule_loaded",
+                products_with_production=len(production_map),
+                days_ahead=days_ahead
+            )
+            return production_map
+
+        except Exception as e:
+            logger.warning("production_schedule_load_failed", error=str(e))
+            return {}
+
+    def _get_production_for_product(
+        self,
+        product_id: str,
+        production_map: dict,
+        stockout_date: Optional[date],
+        coverage_gap_m2: Decimal,
+    ) -> tuple[Optional[Decimal], Optional[date], Optional[bool], Optional[bool]]:
+        """
+        Get production schedule info for a specific product.
+
+        Args:
+            product_id: Product UUID
+            production_map: Pre-fetched production data
+            stockout_date: Projected stockout date
+            coverage_gap_m2: Gap in m² that needs to be covered
+
+        Returns:
+            Tuple of (upcoming_production_m2, next_production_date, production_before_stockout, production_covers_gap)
+        """
+        prod_info = production_map.get(product_id)
+        if not prod_info:
+            return None, None, None, None
+
+        total_m2 = prod_info["total_m2"]
+        next_date = prod_info["next_production_date"]
+
+        # Check if production is before stockout
+        production_before_stockout = None
+        if stockout_date and next_date:
+            production_before_stockout = next_date < stockout_date
+
+        # Check if production covers the gap
+        production_covers_gap = None
+        if total_m2 > 0 and coverage_gap_m2 is not None:
+            production_covers_gap = total_m2 >= coverage_gap_m2
+
+        return total_m2, next_date, production_before_stockout, production_covers_gap
 
     def get_allocation_details(self) -> list[ProductAllocation]:
         """Get detailed allocation breakdown for all products."""
