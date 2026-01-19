@@ -15,6 +15,12 @@ from models.ingest import (
     StructuredIngestRequest,
     IngestResponse,
     CandidateShipment,
+    # Packing list models
+    PackingListLineItem,
+    PackingListTotals,
+    ParsedPackingListResponse,
+    PackingListIngestResponse,
+    ConfirmPackingListRequest,
 )
 from models.shipment import (
     ShipmentCreate,
@@ -25,12 +31,14 @@ from models.shipment import (
 )
 from services.document_parser_service import get_parser_service
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
+from services.packing_list_parser_service import get_packing_list_parser_service
 from exceptions.errors import PDFParseError
 from services.shipment_service import get_shipment_service
 from services.port_service import get_port_service
 from services.alert_service import get_alert_service
 from services.container_service import get_container_service
 from services.ingestion_service import get_ingestion_service
+from services.factory_order_service import get_factory_order_service
 from models.alert import AlertType, AlertSeverity, AlertCreate
 from models.container import ContainerCreate
 from exceptions import NotFoundError, DatabaseError
@@ -836,6 +844,7 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                 eta=data.eta or data.ata,
                 origin_port_id=origin_port_id,
                 destination_port_id=destination_port_id,
+                factory_order_id=data.factory_order_id,
             )
 
             new_shipment = shipment_service.create(create_data)
@@ -951,3 +960,232 @@ async def ingest_structured(data: StructuredIngestRequest) -> IngestResponse:
     )
 
     return await confirm_ingest(confirm_data)
+
+
+# ===================
+# PACKING LIST ENDPOINTS
+# ===================
+
+@router.post("/packing-list", response_model=PackingListIngestResponse)
+async def ingest_packing_list(
+    file: UploadFile = File(..., description="Excel packing list file (.xlsx)")
+) -> PackingListIngestResponse:
+    """
+    Upload and parse a factory packing list (Excel).
+
+    Extracts PV number, line items, container assignments, and totals.
+    Auto-links to matching FactoryOrder if PV number is found.
+
+    Args:
+        file: Excel file upload (.xlsx)
+
+    Returns:
+        PackingListIngestResponse with parsed data and factory order match
+
+    Raises:
+        400: Invalid file or parsing failed
+    """
+    logger.info(
+        "packing_list_ingest_started",
+        filename=file.filename,
+        content_type=file.content_type
+    )
+
+    # Validate file type
+    if not file.filename or not file.filename.lower().endswith('.xlsx'):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be an Excel file (.xlsx)"
+        )
+
+    try:
+        # Read file contents
+        file_bytes = await file.read()
+
+        if len(file_bytes) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file is empty"
+            )
+
+        # Parse packing list
+        parser = get_packing_list_parser_service()
+        parsed = parser.parse(file_bytes, file.filename)
+
+        # Convert to response model
+        parsed_response = ParsedPackingListResponse(
+            pv_number=parsed.pv_number,
+            pv_number_confidence=parsed.pv_number_confidence,
+            customer_name=parsed.customer_name,
+            line_items=[
+                PackingListLineItem(
+                    product_code=item.product_code,
+                    product_name=item.product_name,
+                    pallets=item.pallets,
+                    cartons=item.cartons,
+                    m2_total=str(item.m2_total),
+                    net_weight_kg=str(item.net_weight_kg),
+                    gross_weight_kg=str(item.gross_weight_kg),
+                    volume_m3=str(item.volume_m3),
+                    container_number=item.container_number,
+                    seal_number=item.seal_number,
+                )
+                for item in parsed.line_items
+            ],
+            totals=PackingListTotals(
+                total_pallets=parsed.totals.total_pallets,
+                total_cartons=parsed.totals.total_cartons,
+                total_m2=str(parsed.totals.total_m2),
+                total_net_weight_kg=str(parsed.totals.total_net_weight_kg),
+                total_gross_weight_kg=str(parsed.totals.total_gross_weight_kg),
+                total_volume_m3=str(parsed.totals.total_volume_m3),
+            ),
+            containers=parsed.containers,
+            overall_confidence=parsed.overall_confidence,
+            parsing_errors=parsed.parsing_errors,
+        )
+
+        # Try to find matching factory order
+        factory_order_id = None
+        factory_order_pv = None
+        action = "parsed_pending_confirmation"
+
+        if parsed.pv_number:
+            try:
+                factory_order_service = get_factory_order_service()
+                factory_order = factory_order_service.get_by_pv_number(parsed.pv_number)
+
+                if factory_order:
+                    factory_order_id = factory_order.id
+                    factory_order_pv = factory_order.pv_number
+                    action = "linked_to_factory_order"
+                    logger.info(
+                        "packing_list_matched_factory_order",
+                        pv_number=parsed.pv_number,
+                        factory_order_id=factory_order_id
+                    )
+                else:
+                    action = "needs_factory_order"
+                    logger.info(
+                        "packing_list_no_factory_order_match",
+                        pv_number=parsed.pv_number
+                    )
+            except Exception as e:
+                logger.warning(
+                    "factory_order_lookup_failed",
+                    pv_number=parsed.pv_number,
+                    error=str(e)
+                )
+                action = "needs_factory_order"
+
+        logger.info(
+            "packing_list_parsed_successfully",
+            filename=file.filename,
+            pv_number=parsed.pv_number,
+            line_items=len(parsed.line_items),
+            containers=len(parsed.containers),
+            total_m2=str(parsed.totals.total_m2),
+            factory_order_matched=factory_order_id is not None,
+            confidence=parsed.overall_confidence
+        )
+
+        message = f"Packing list parsed successfully. "
+        if factory_order_id:
+            message += f"Matched to factory order {factory_order_pv}."
+        elif parsed.pv_number:
+            message += f"PV number {parsed.pv_number} found but no matching factory order."
+        else:
+            message += "No PV number found in document."
+
+        return PackingListIngestResponse(
+            success=True,
+            message=message,
+            action=action,
+            parsed_data=parsed_response,
+            factory_order_id=factory_order_id,
+            factory_order_pv=factory_order_pv,
+            confidence=parsed.overall_confidence
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("packing_list_ingest_error", filename=file.filename, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing packing list: {str(e)}"
+        )
+
+
+@router.post("/packing-list/confirm", response_model=PackingListIngestResponse)
+async def confirm_packing_list(data: ConfirmPackingListRequest) -> PackingListIngestResponse:
+    """
+    Confirm packing list data and link to factory order.
+
+    After user reviews parsed packing list, submit confirmed data
+    to link container/product info to the factory order.
+
+    Args:
+        data: Confirmed packing list data
+
+    Returns:
+        PackingListIngestResponse with link status
+
+    Raises:
+        400: Invalid data or factory order not found
+        500: Database error
+    """
+    logger.info(
+        "packing_list_confirm_started",
+        pv_number=data.pv_number,
+        containers=len(data.containers)
+    )
+
+    if not data.pv_number:
+        raise HTTPException(
+            status_code=400,
+            detail="PV number is required"
+        )
+
+    try:
+        factory_order_service = get_factory_order_service()
+
+        # Find factory order by PV number
+        factory_order = factory_order_service.get_by_pv_number(data.pv_number)
+
+        if not factory_order:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Factory order not found for PV number: {data.pv_number}"
+            )
+
+        # Log the link (future: could update factory order with packing list data)
+        logger.info(
+            "packing_list_linked_to_factory_order",
+            pv_number=data.pv_number,
+            factory_order_id=factory_order.id,
+            containers=data.containers,
+            notes=data.notes
+        )
+
+        # Future enhancement: Update factory order with container assignments
+        # For now, just confirm the link
+        # factory_order_service.add_containers(factory_order.id, data.containers)
+
+        return PackingListIngestResponse(
+            success=True,
+            message=f"Packing list linked to factory order {data.pv_number}",
+            action="linked_to_factory_order",
+            factory_order_id=factory_order.id,
+            factory_order_pv=factory_order.pv_number,
+            confidence=1.0
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("packing_list_confirm_error", pv_number=data.pv_number, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error confirming packing list: {str(e)}"
+        )

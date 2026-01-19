@@ -9,7 +9,7 @@ See BUILDER_BLUEPRINT.md for algorithm details.
 
 from typing import Optional
 from decimal import Decimal
-from datetime import date
+from datetime import date, timedelta
 import math
 import structlog
 
@@ -77,10 +77,26 @@ class OrderBuilderService:
         # Step 1: Get boat info
         boat, next_boat = self._get_boats(boat_id)
 
+        # Default lead time for "no boat" mode (45 days)
+        DEFAULT_LEAD_TIME_DAYS = 45
+
         if not boat:
-            # No boats available - return empty response
-            logger.warning("no_boats_available")
-            return self._empty_response(mode)
+            # No boats available - use default lead time and create dummy boat
+            logger.info("no_boats_available_using_default_lead_time", days=DEFAULT_LEAD_TIME_DAYS)
+            today = date.today()
+            default_departure = today + timedelta(days=DEFAULT_LEAD_TIME_DAYS)
+            default_arrival = default_departure + timedelta(days=25)  # ~25 days transit
+
+            boat = OrderBuilderBoat(
+                boat_id="",
+                name="",
+                departure_date=default_departure,
+                arrival_date=default_arrival,
+                days_until_departure=DEFAULT_LEAD_TIME_DAYS,
+                booking_deadline=today,
+                days_until_deadline=0,
+                max_containers=5,
+            )
 
         # Step 2: Get recommendations (has coverage gap, confidence, priority)
         recommendations = self.recommendation_service.get_recommendations()

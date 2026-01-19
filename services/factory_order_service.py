@@ -263,6 +263,23 @@ class FactoryOrderService:
     # WRITE OPERATIONS
     # ===================
 
+    def _generate_pv_number(self, order_date: date) -> str:
+        """
+        Generate a sequential PV number for a given date.
+
+        Format: PV-YYYYMMDD-NNN (e.g., PV-20260119-001)
+
+        Args:
+            order_date: Date to generate PV number for
+
+        Returns:
+            Generated PV number string
+        """
+        count = self.count_by_date(order_date)
+        sequence = count + 1
+        date_str = order_date.strftime("%Y%m%d")
+        return f"PV-{date_str}-{sequence:03d}"
+
     def create(self, data: FactoryOrderCreate) -> FactoryOrderWithItemsResponse:
         """
         Create a new factory order with items.
@@ -276,18 +293,24 @@ class FactoryOrderService:
         Raises:
             FactoryOrderPVExistsError: If PV number already exists
         """
-        logger.info("creating_factory_order", pv_number=data.pv_number)
+        # Auto-generate PV number if not provided
+        pv_number = data.pv_number
+        if not pv_number:
+            pv_number = self._generate_pv_number(data.order_date)
+            logger.info("auto_generated_pv_number", pv_number=pv_number)
+
+        logger.info("creating_factory_order", pv_number=pv_number)
 
         # Check for duplicate PV number
-        if data.pv_number:
-            existing = self.get_by_pv_number(data.pv_number)
+        if pv_number:
+            existing = self.get_by_pv_number(pv_number)
             if existing:
-                raise FactoryOrderPVExistsError(data.pv_number)
+                raise FactoryOrderPVExistsError(pv_number)
 
         try:
             # Create order
             order_data = {
-                "pv_number": data.pv_number,
+                "pv_number": pv_number,
                 "order_date": data.order_date.isoformat(),
                 "status": OrderStatus.PENDING.value,
                 "notes": data.notes,
@@ -501,6 +524,89 @@ class FactoryOrderService:
     def pv_exists(self, pv_number: str) -> bool:
         """Check if a PV number already exists."""
         return self.get_by_pv_number(pv_number) is not None
+
+    def search_by_pv(
+        self,
+        query: str,
+        limit: int = 10,
+        exclude_shipped: bool = True
+    ) -> list[FactoryOrderResponse]:
+        """
+        Search factory orders by PV number (fuzzy prefix match).
+
+        Used for typeahead/autocomplete in shipment linking UI.
+
+        Args:
+            query: Search string (e.g., "PV-2026" or "001")
+            limit: Maximum results to return
+            exclude_shipped: Exclude orders already shipped
+
+        Returns:
+            List of matching factory orders
+        """
+        logger.debug("searching_factory_orders_by_pv", query=query, limit=limit)
+
+        if not query or len(query) < 2:
+            return []
+
+        try:
+            # Use ilike for case-insensitive prefix match
+            search_pattern = f"%{query.upper()}%"
+
+            query_builder = (
+                self.db.table(self.table)
+                .select("*")
+                .ilike("pv_number", search_pattern)
+                .eq("active", True)
+            )
+
+            if exclude_shipped:
+                query_builder = query_builder.neq("status", "SHIPPED")
+
+            query_builder = query_builder.order("order_date", desc=True).limit(limit)
+
+            result = query_builder.execute()
+
+            orders = []
+            for row in result.data:
+                # Get item count and total for each order
+                items_result = (
+                    self.db.table(self.items_table)
+                    .select("quantity_ordered")
+                    .eq("factory_order_id", row["id"])
+                    .execute()
+                )
+
+                item_count = len(items_result.data)
+                total_m2 = sum(
+                    Decimal(str(item["quantity_ordered"]))
+                    for item in items_result.data
+                )
+
+                orders.append(FactoryOrderResponse(
+                    id=row["id"],
+                    pv_number=row.get("pv_number"),
+                    order_date=row["order_date"],
+                    status=row["status"],
+                    notes=row.get("notes"),
+                    active=row.get("active", True),
+                    created_at=row["created_at"],
+                    updated_at=row.get("updated_at"),
+                    total_m2=total_m2,
+                    item_count=item_count,
+                ))
+
+            logger.debug(
+                "factory_orders_search_complete",
+                query=query,
+                results=len(orders)
+            )
+
+            return orders
+
+        except Exception as e:
+            logger.error("search_factory_orders_failed", query=query, error=str(e))
+            raise DatabaseError("select", str(e))
 
     def count(self, status: Optional[OrderStatus] = None, active_only: bool = True) -> int:
         """Count total factory orders."""

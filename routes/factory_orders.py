@@ -97,6 +97,30 @@ async def list_factory_orders(
         return handle_error(e)
 
 
+@router.get("/search", response_model=list[FactoryOrderResponse])
+async def search_factory_orders(
+    q: str = Query(..., min_length=2, description="Search query for PV number"),
+    limit: int = Query(10, ge=1, le=50, description="Maximum results"),
+    exclude_shipped: bool = Query(True, description="Exclude already shipped orders")
+):
+    """
+    Search factory orders by PV number.
+
+    Used for typeahead/autocomplete in shipment linking UI.
+    Returns orders matching the search query (e.g., "PV-2026" or "001").
+    """
+    try:
+        service = get_factory_order_service()
+        return service.search_by_pv(
+            query=q,
+            limit=limit,
+            exclude_shipped=exclude_shipped
+        )
+
+    except Exception as e:
+        return handle_error(e)
+
+
 @router.get("/status/{status}", response_model=list[FactoryOrderResponse])
 async def get_orders_by_status(status: OrderStatus):
     """

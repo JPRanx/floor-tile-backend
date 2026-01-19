@@ -133,6 +133,12 @@ class ConfirmIngestRequest(BaseModel):
         description="UUID of shipment to update (for manual assignment when auto-match fails)"
     )
 
+    # Factory order linking - link shipment to factory order
+    factory_order_id: Optional[str] = Field(
+        None,
+        description="UUID of factory order to link this shipment to"
+    )
+
 
 class StructuredIngestRequest(BaseModel):
     """
@@ -245,3 +251,74 @@ class EmailIngestResponse(BaseModel):
 
     # For debugging/audit
     parsed_fields: Optional[dict] = Field(None, description="Key fields extracted")
+
+
+# ===================
+# PACKING LIST MODELS
+# ===================
+
+class PackingListLineItem(BaseModel):
+    """Single line item from packing list."""
+
+    product_code: Optional[str] = None
+    product_name: Optional[str] = None
+    pallets: int = 0
+    cartons: int = 0
+    m2_total: str = "0"
+    net_weight_kg: str = "0"
+    gross_weight_kg: str = "0"
+    volume_m3: str = "0"
+    container_number: Optional[str] = None
+    seal_number: Optional[str] = None
+
+
+class PackingListTotals(BaseModel):
+    """Aggregated totals from packing list."""
+
+    total_pallets: int = 0
+    total_cartons: int = 0
+    total_m2: str = "0"
+    total_net_weight_kg: str = "0"
+    total_gross_weight_kg: str = "0"
+    total_volume_m3: str = "0"
+
+
+class ParsedPackingListResponse(BaseModel):
+    """Response from packing list parsing."""
+
+    pv_number: Optional[str] = Field(None, description="Factory order PV number")
+    pv_number_confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    customer_name: Optional[str] = None
+    line_items: list[PackingListLineItem] = Field(default_factory=list)
+    totals: PackingListTotals = Field(default_factory=PackingListTotals)
+    containers: list[str] = Field(default_factory=list, description="Unique container numbers")
+    overall_confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    parsing_errors: list[str] = Field(default_factory=list)
+
+
+class PackingListIngestResponse(BaseModel):
+    """Response after packing list ingestion."""
+
+    success: bool
+    message: str
+    action: Literal[
+        "parsed_pending_confirmation",
+        "linked_to_factory_order",
+        "needs_factory_order",
+        "error"
+    ] = "parsed_pending_confirmation"
+    parsed_data: Optional[ParsedPackingListResponse] = None
+    factory_order_id: Optional[str] = Field(None, description="Matched factory order ID")
+    factory_order_pv: Optional[str] = Field(None, description="Matched factory order PV number")
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+
+
+class ConfirmPackingListRequest(BaseModel):
+    """User-confirmed packing list data."""
+
+    pv_number: str = Field(description="Factory order PV number to link")
+    containers: list[str] = Field(default_factory=list, description="Container numbers")
+    totals: Optional[PackingListTotals] = None
+    notes: Optional[str] = Field(None, description="User notes")
+    # Original parsed data (for audit trail)
+    original_parsed_data: Optional[ParsedPackingListResponse] = None
