@@ -310,6 +310,8 @@ class PackingListIngestResponse(BaseModel):
     parsed_data: Optional[ParsedPackingListResponse] = None
     factory_order_id: Optional[str] = Field(None, description="Matched factory order ID")
     factory_order_pv: Optional[str] = Field(None, description="Matched factory order PV number")
+    shipment_id: Optional[str] = Field(None, description="Linked shipment ID")
+    shipment_shp: Optional[str] = Field(None, description="Linked shipment SHP/booking number")
     confidence: float = Field(ge=0.0, le=1.0, default=0.0)
 
 

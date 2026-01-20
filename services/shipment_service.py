@@ -412,6 +412,46 @@ class ShipmentService:
             logger.error("get_recent_shipments_failed", error=str(e))
             raise DatabaseError("select", str(e))
 
+    def get_unlinked_shipments(self, limit: int = 5) -> list[ShipmentResponse]:
+        """
+        Get shipments without a linked factory order.
+
+        These are candidates for linking to a factory order.
+        Excludes delivered and cancelled shipments.
+
+        Args:
+            limit: Maximum number of results (default 5)
+
+        Returns:
+            List of unlinked shipments
+        """
+        logger.debug("getting_unlinked_shipments", limit=limit)
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .is_("factory_order_id", "null")
+                .eq("active", True)
+                .not_.in_("status", [ShipmentStatus.DELIVERED.value, ShipmentStatus.CANCELLED.value])
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+
+            shipments = [self._row_to_response(row) for row in result.data]
+
+            logger.info(
+                "unlinked_shipments_found",
+                count=len(shipments)
+            )
+
+            return shipments
+
+        except Exception as e:
+            logger.error("get_unlinked_shipments_failed", error=str(e))
+            return []
+
     # ===================
     # WRITE OPERATIONS
     # ===================
@@ -682,7 +722,30 @@ class ShipmentService:
                 alert_service = get_alert_service()
                 shp_number = existing.shp_number or existing.booking_number or shipment_id[:8]
 
-                if new_status == ShipmentStatus.IN_TRANSIT:
+                if new_status == ShipmentStatus.AT_ORIGIN_PORT:
+                    container_count = len(existing.containers) if existing.containers else 0
+                    total_m2 = sum(
+                        sum(item.get("quantity_m2", 0) for item in c.get("items", []))
+                        for c in (existing.containers or [])
+                    ) if existing.containers else 0
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.SHIPMENT_AT_ORIGIN,
+                            severity=AlertSeverity.INFO,
+                            title=get_message("title_shipment_at_origin", shp_number=shp_number),
+                            message=get_message(
+                                "shipment_at_origin",
+                                shp_number=shp_number,
+                                booking=existing.booking_number or "N/A",
+                                containers=container_count,
+                                total_m2=f"{total_m2:,.0f}"
+                            ),
+                            shipment_id=shipment_id,
+                        ),
+                        send_telegram=True
+                    )
+
+                elif new_status == ShipmentStatus.IN_TRANSIT:
                     alert_service.create(
                         AlertCreate(
                             type=AlertType.SHIPMENT_DEPARTED,

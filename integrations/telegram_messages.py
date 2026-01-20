@@ -104,6 +104,26 @@ Days remaining: {days}
 
 Book containers now to avoid missing this shipment.""",
 
+        # Factory order messages
+        "factory_order_confirmed": """✅ *Factory confirmed order*
+
+PV: `{pv_number}`
+Products: {item_count}
+Total: {total_m2} m²""",
+
+        "factory_order_ready": """📦 *Order ready for shipment*
+
+PV: `{pv_number}`
+Products: {item_count}
+Total: {total_m2} m²""",
+
+        "shipment_at_origin": """📍 *Shipment at origin port*
+
+SHP: `{shp_number}`
+Booking: `{booking}`
+Containers: {containers}
+Total: {total_m2} m²""",
+
         # Titles for alerts
         "title_stockout": "Stockout warning: {sku}",
         "title_booking_deadline": "Booking deadline: {vessel}",
@@ -111,6 +131,87 @@ Book containers now to avoid missing this shipment.""",
         "title_shipment_at_port": "Shipment at port: {shp_number}",
         "title_shipment_delivered": "Shipment delivered: {shp_number}",
         "title_new_shipment": "New shipment: {shp_number}",
+        "title_factory_order_confirmed": "Factory order confirmed: {pv_number}",
+        "title_factory_order_ready": "Order ready: {pv_number}",
+        "title_shipment_at_origin": "Shipment at origin: {shp_number}",
+
+        # Packing list messages
+        "packing_list_processed": """📦 *Packing list processed*
+
+PV: `{pv_number}`
+Shipment: `{shp_number}`
+Containers: {container_count}
+Total: {total_m2} m²
+
+Containers at origin port.""",
+
+        "packing_list_pending": """⚠️ *Packing list needs linking*
+
+PV: `{pv_number}`
+Containers: {container_count}
+Total: {total_m2} m²
+
+Reason: {reason}
+Link to shipment in dashboard.""",
+
+        "title_packing_list_processed": "Packing list: {pv_number}",
+        "title_packing_list_pending": "Packing list needs review: {pv_number}",
+
+        # Auto-link messages
+        "booking_auto_linked": """🔗 *Booking auto-linked*
+
+SHP: `{shp_number}`
+Booking: `{booking}`
+PV: `{pv_number}`
+
+Factory order automatically linked.""",
+
+        "hbl_processed": """✅ *HBL processed*
+
+SHP: `{shp_number}`
+Booking: `{booking}`
+Vessel: {vessel}
+Containers: {container_count}
+
+Shipment updated successfully.""",
+
+        "hbl_pending": """⚠️ *HBL needs linking*
+
+SHP: `{shp_number}`
+Booking: `{booking}`
+Containers: {container_count}
+
+No matching shipment found.
+Please assign manually in dashboard.""",
+
+        "title_booking_auto_linked": "Booking linked: {shp_number}",
+        "title_hbl_processed": "HBL processed: {shp_number}",
+        "title_hbl_pending": "HBL needs review: {shp_number}",
+
+        # Linking suggestion messages
+        "link_shipment_to_order": """🔗 *New shipment ready to link*
+
+SHP: `{shp_number}`
+Vessel: {vessel}
+ETD: {etd}
+
+Available orders:
+{available_orders}
+
+Link at: {link}""",
+
+        "link_order_to_shipment": """🔗 *Order ready to link*
+
+PV: `{pv_number}`
+m²: {total_m2}
+
+Available shipments:
+{available_shipments}
+
+Link at: {link}""",
+
+        "title_link_shipment_to_order": "Shipment needs order: {shp_number}",
+        "title_link_order_to_shipment": "Order needs shipment: {pv_number}",
     },
 
     "es": {
@@ -198,6 +299,26 @@ Días restantes: {days}
 
 Reserve contenedores ahora para no perder este embarque.""",
 
+        # Factory order messages
+        "factory_order_confirmed": """✅ *Fábrica confirmó pedido*
+
+PV: `{pv_number}`
+Productos: {item_count}
+Total: {total_m2} m²""",
+
+        "factory_order_ready": """📦 *Pedido listo para embarque*
+
+PV: `{pv_number}`
+Productos: {item_count}
+Total: {total_m2} m²""",
+
+        "shipment_at_origin": """📍 *Embarque en puerto de origen*
+
+SHP: `{shp_number}`
+Reserva: `{booking}`
+Contenedores: {containers}
+Total: {total_m2} m²""",
+
         # Titles for alerts
         "title_stockout": "Alerta de desabasto: {sku}",
         "title_booking_deadline": "Fecha límite de reserva: {vessel}",
@@ -205,6 +326,87 @@ Reserve contenedores ahora para no perder este embarque.""",
         "title_shipment_at_port": "Embarque en puerto: {shp_number}",
         "title_shipment_delivered": "Embarque entregado: {shp_number}",
         "title_new_shipment": "Nuevo embarque: {shp_number}",
+        "title_factory_order_confirmed": "Pedido confirmado: {pv_number}",
+        "title_factory_order_ready": "Pedido listo: {pv_number}",
+        "title_shipment_at_origin": "Embarque en origen: {shp_number}",
+
+        # Packing list messages
+        "packing_list_processed": """📦 *Lista de empaque procesada*
+
+PV: `{pv_number}`
+Embarque: `{shp_number}`
+Contenedores: {container_count}
+Total: {total_m2} m²
+
+Contenedores en puerto de origen.""",
+
+        "packing_list_pending": """⚠️ *Lista de empaque requiere vinculación*
+
+PV: `{pv_number}`
+Contenedores: {container_count}
+Total: {total_m2} m²
+
+Razón: {reason}
+Vincular a embarque en dashboard.""",
+
+        "title_packing_list_processed": "Lista de empaque: {pv_number}",
+        "title_packing_list_pending": "Lista requiere revisión: {pv_number}",
+
+        # Auto-link messages
+        "booking_auto_linked": """🔗 *Reserva vinculada automáticamente*
+
+SHP: `{shp_number}`
+Reserva: `{booking}`
+PV: `{pv_number}`
+
+Pedido de fábrica vinculado automáticamente.""",
+
+        "hbl_processed": """✅ *HBL procesado*
+
+SHP: `{shp_number}`
+Reserva: `{booking}`
+Buque: {vessel}
+Contenedores: {container_count}
+
+Embarque actualizado correctamente.""",
+
+        "hbl_pending": """⚠️ *HBL requiere vinculación*
+
+SHP: `{shp_number}`
+Reserva: `{booking}`
+Contenedores: {container_count}
+
+No se encontró embarque coincidente.
+Por favor asignar manualmente en dashboard.""",
+
+        "title_booking_auto_linked": "Reserva vinculada: {shp_number}",
+        "title_hbl_processed": "HBL procesado: {shp_number}",
+        "title_hbl_pending": "HBL requiere revisión: {shp_number}",
+
+        # Linking suggestion messages
+        "link_shipment_to_order": """🔗 *Nuevo embarque listo para vincular*
+
+SHP: `{shp_number}`
+Barco: {vessel}
+ETD: {etd}
+
+Pedidos disponibles:
+{available_orders}
+
+Vincular en: {link}""",
+
+        "link_order_to_shipment": """🔗 *Pedido listo para vincular*
+
+PV: `{pv_number}`
+m²: {total_m2}
+
+Embarques disponibles:
+{available_shipments}
+
+Vincular en: {link}""",
+
+        "title_link_shipment_to_order": "Embarque sin pedido: {shp_number}",
+        "title_link_order_to_shipment": "Pedido sin embarque: {pv_number}",
     },
 }
 

@@ -27,6 +27,9 @@ from exceptions import (
     InvalidStatusTransitionError,
     DatabaseError,
 )
+from models.alert import AlertType, AlertSeverity, AlertCreate
+from services.alert_service import get_alert_service
+from integrations.telegram_messages import get_message
 
 logger = structlog.get_logger(__name__)
 
@@ -259,6 +262,61 @@ class FactoryOrderService:
         orders, _ = self.get_all(page=1, page_size=1000, status=status)
         return orders
 
+    def get_unlinked_orders(self, limit: int = 5) -> list[FactoryOrderWithItemsResponse]:
+        """
+        Get factory orders with status READY or CONFIRMED that have no linked shipment.
+
+        These are candidates for linking to a new shipment.
+
+        Args:
+            limit: Maximum number of results (default 5)
+
+        Returns:
+            List of unlinked factory orders
+        """
+        logger.debug("getting_unlinked_orders", limit=limit)
+
+        try:
+            # Get IDs of FOs that have shipments linked
+            shipments_result = (
+                self.db.table("shipments")
+                .select("factory_order_id")
+                .not_.is_("factory_order_id", "null")
+                .eq("active", True)
+                .execute()
+            )
+            linked_fo_ids = {
+                row["factory_order_id"]
+                for row in shipments_result.data
+                if row.get("factory_order_id")
+            }
+
+            # Query FOs with status READY or CONFIRMED
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .in_("status", [OrderStatus.READY.value, OrderStatus.CONFIRMED.value])
+                .eq("active", True)
+                .order("created_at", desc=True)
+                .limit(limit * 2)  # Fetch extra to filter out linked ones
+                .execute()
+            )
+
+            # Filter out FOs that have linked shipments
+            unlinked = []
+            for row in result.data:
+                if row["id"] not in linked_fo_ids:
+                    unlinked.append(self.get_by_id(row["id"]))
+                    if len(unlinked) >= limit:
+                        break
+
+            logger.info("unlinked_orders_found", count=len(unlinked))
+            return unlinked
+
+        except Exception as e:
+            logger.error("get_unlinked_orders_failed", error=str(e))
+            return []
+
     # ===================
     # WRITE OPERATIONS
     # ===================
@@ -458,7 +516,94 @@ class FactoryOrderService:
                 to_status=new_status.value
             )
 
-            return self.get_by_id(order_id)
+            # Get updated order with items for alert data
+            updated_order = self.get_by_id(order_id)
+
+            # Send Telegram alerts for key status changes
+            try:
+                alert_service = get_alert_service()
+                pv_number = updated_order.pv_number or order_id[:8]
+                total_m2 = str(updated_order.total_m2) if updated_order.total_m2 else "0"
+                item_count = updated_order.item_count or 0
+
+                if new_status == OrderStatus.CONFIRMED:
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.FACTORY_ORDER_CONFIRMED,
+                            severity=AlertSeverity.INFO,
+                            title=get_message("title_factory_order_confirmed", pv_number=pv_number),
+                            message=get_message(
+                                "factory_order_confirmed",
+                                pv_number=pv_number,
+                                item_count=item_count,
+                                total_m2=total_m2
+                            ),
+                        ),
+                        send_telegram=True
+                    )
+
+                elif new_status == OrderStatus.READY:
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.FACTORY_ORDER_READY,
+                            severity=AlertSeverity.INFO,
+                            title=get_message("title_factory_order_ready", pv_number=pv_number),
+                            message=get_message(
+                                "factory_order_ready",
+                                pv_number=pv_number,
+                                item_count=item_count,
+                                total_m2=total_m2
+                            ),
+                        ),
+                        send_telegram=True
+                    )
+
+                    # Suggestion: Check if there's a shipment linked, if not suggest available ones
+                    try:
+                        from services.shipment_service import get_shipment_service
+                        import os
+
+                        shipment_service = get_shipment_service()
+                        linked_shipments = shipment_service.get_by_factory_order_id(order_id)
+
+                        if not linked_shipments:
+                            # No shipment linked, find available ones
+                            unlinked_shipments = shipment_service.get_unlinked_shipments(limit=5)
+
+                            if unlinked_shipments:
+                                frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+                                shipment_list = "\n".join([
+                                    f"• {s.shp_number or 'N/A'} ({s.vessel_name or 'N/A'})"
+                                    for s in unlinked_shipments
+                                ])
+
+                                alert_service.create(
+                                    AlertCreate(
+                                        type=AlertType.LINK_ORDER_TO_SHIPMENT,
+                                        severity=AlertSeverity.INFO,
+                                        title=get_message("title_link_order_to_shipment", pv_number=pv_number),
+                                        message=get_message(
+                                            "link_order_to_shipment",
+                                            pv_number=pv_number,
+                                            total_m2=total_m2,
+                                            available_shipments=shipment_list,
+                                            link=f"{frontend_url}/pipeline"
+                                        ),
+                                    ),
+                                    send_telegram=True
+                                )
+                                logger.info(
+                                    "link_order_suggestion_sent",
+                                    order_id=order_id,
+                                    available_shipments=len(unlinked_shipments)
+                                )
+                    except Exception as suggestion_error:
+                        logger.warning("link_order_suggestion_failed", error=str(suggestion_error))
+
+            except Exception as alert_error:
+                logger.warning("factory_order_status_alert_failed", error=str(alert_error))
+
+            return updated_order
 
         except (FactoryOrderNotFoundError, InvalidStatusTransitionError):
             raise

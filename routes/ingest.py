@@ -28,6 +28,7 @@ from models.shipment import (
     ShipmentStatus,
     ShipmentStatusUpdate,
     ShipmentCostsUpdate,
+    is_valid_shipment_status_transition,
 )
 from services.document_parser_service import get_parser_service
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
@@ -237,6 +238,90 @@ def _create_containers_with_details_for_shipment(
             logger.warning("container_creation_failed", container_number=container_num, error=str(e))
 
     return created_count
+
+
+def _create_containers_from_packing_list(
+    shipment_id: str,
+    parsed_data: ParsedPackingListResponse
+) -> int:
+    """
+    Create containers from packing list line items, aggregated by container_number.
+
+    Args:
+        shipment_id: UUID of the shipment
+        parsed_data: Parsed packing list response with line items
+
+    Returns:
+        Number of containers created
+    """
+    from decimal import Decimal
+    from collections import defaultdict
+
+    if not parsed_data.line_items:
+        return 0
+
+    container_service = get_container_service()
+
+    # Get existing containers
+    existing = container_service.get_by_shipment(shipment_id)
+    existing_numbers = {c.container_number.upper() for c in existing if c.container_number}
+    existing_list = list(existing_numbers)
+
+    # Aggregate line items by container
+    container_data = defaultdict(lambda: {
+        'seal_number': None,
+        'total_pallets': 0,
+        'total_m2': Decimal('0'),
+        'total_weight_kg': Decimal('0'),
+    })
+
+    for item in parsed_data.line_items:
+        if not item.container_number:
+            continue
+        num = item.container_number.upper()
+        d = container_data[num]
+        if item.seal_number and not d['seal_number']:
+            d['seal_number'] = item.seal_number
+        d['total_pallets'] += item.pallets or 0
+        d['total_m2'] += Decimal(str(item.m2_total or 0))
+        d['total_weight_kg'] += Decimal(str(item.gross_weight_kg or 0))
+
+    created = 0
+    for num, d in container_data.items():
+        # Skip if already exists
+        if num in existing_numbers:
+            logger.debug("packing_list_container_exists", container_number=num)
+            continue
+
+        # Check fuzzy match
+        if _find_similar_container(num, existing_list):
+            logger.info("packing_list_container_skipped_fuzzy", container_number=num)
+            continue
+
+        try:
+            container_service.create(ContainerCreate(
+                shipment_id=shipment_id,
+                container_number=num,
+                seal_number=d['seal_number'],
+                total_pallets=d['total_pallets'],
+                total_weight_kg=d['total_weight_kg'],
+                total_m2=d['total_m2'],
+            ))
+            created += 1
+            existing_numbers.add(num)
+            existing_list.append(num)
+            logger.info(
+                "packing_list_container_created",
+                shipment_id=shipment_id,
+                container_number=num,
+                pallets=d['total_pallets'],
+                m2=str(d['total_m2']),
+                weight_kg=str(d['total_weight_kg'])
+            )
+        except Exception as e:
+            logger.warning("packing_list_container_failed", container_number=num, error=str(e))
+
+    return created
 
 
 def _check_cross_reference_discrepancies(
@@ -616,10 +701,23 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
             # HBL/MBL documents should NOT change status
             # Note: existing_shipment.status is a string value, new_status is ShipmentStatus enum
             if should_update_status and new_status.value != existing_shipment.status:
-                updated_shipment = shipment_service.update_status(
-                    existing_shipment.id,
-                    ShipmentStatusUpdate(status=new_status)
-                )
+                # Pre-check: Only allow forward status progression
+                # Prevents regression when documents arrive out of order
+                current_status = ShipmentStatus(existing_shipment.status)
+                if is_valid_shipment_status_transition(current_status, new_status):
+                    updated_shipment = shipment_service.update_status(
+                        existing_shipment.id,
+                        ShipmentStatusUpdate(status=new_status)
+                    )
+                else:
+                    logger.info(
+                        "status_update_skipped_regression",
+                        shipment_id=existing_shipment.id,
+                        current_status=current_status.value,
+                        proposed_status=new_status.value,
+                        document_type=data.document_type,
+                        reason="Document arrived but shipment already past this status"
+                    )
 
             # Auto-populate freight cost from MBL/HBL if available
             # DEBUG: Log all conditions for freight auto-populate
@@ -755,6 +853,38 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                 shp_number=updated_shipment.shp_number
             )
 
+            # Send HBL_PROCESSED alert when HBL successfully updates shipment
+            if data.document_type in ["hbl", "mbl"]:
+                try:
+                    alert_service = get_alert_service()
+                    container_service = get_container_service()
+                    containers = container_service.get_by_shipment(updated_shipment.id)
+                    container_count = len(containers)
+
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.HBL_PROCESSED,
+                            severity=AlertSeverity.INFO,
+                            title=get_message("title_hbl_processed", shp_number=updated_shipment.shp_number or "N/A"),
+                            message=get_message(
+                                "hbl_processed",
+                                shp_number=updated_shipment.shp_number or "N/A",
+                                booking=updated_shipment.booking_number or "N/A",
+                                vessel=updated_shipment.vessel_name or "N/A",
+                                container_count=container_count
+                            ),
+                            shipment_id=updated_shipment.id,
+                        ),
+                        send_telegram=True
+                    )
+                    logger.info(
+                        "hbl_processed_alert_sent",
+                        shipment_id=updated_shipment.id,
+                        matched_by=matched_by
+                    )
+                except Exception as alert_error:
+                    logger.warning("hbl_processed_alert_failed", error=str(alert_error))
+
             return IngestResponse(
                 success=True,
                 message=f"Shipment {updated_shipment.shp_number} updated successfully",
@@ -792,6 +922,32 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
                     )
                     for s in shipments_list
                 ]
+
+                # Send HBL_PENDING alert for manual assignment
+                try:
+                    alert_service = get_alert_service()
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.HBL_PENDING,
+                            severity=AlertSeverity.WARNING,
+                            title=get_message("title_hbl_pending", shp_number=data.shp_number or "N/A"),
+                            message=get_message(
+                                "hbl_pending",
+                                shp_number=data.shp_number or "N/A",
+                                booking=data.booking_number or "N/A",
+                                container_count=len(data.containers) if data.containers else 0
+                            ),
+                        ),
+                        send_telegram=True
+                    )
+                    logger.info(
+                        "hbl_pending_alert_sent",
+                        document_type=data.document_type,
+                        shp_number=data.shp_number,
+                        candidates_count=len(candidates)
+                    )
+                except Exception as alert_error:
+                    logger.warning("hbl_pending_alert_failed", error=str(alert_error))
 
                 return IngestResponse(
                     success=False,
@@ -870,21 +1026,92 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
             # Send Telegram alert for new shipment
             try:
                 alert_service = get_alert_service()
-                alert_service.create(
-                    AlertCreate(
-                        type=AlertType.CONTAINER_READY,
-                        severity=AlertSeverity.INFO,
-                        title=get_message("title_new_shipment", shp_number=new_shipment.shp_number),
-                        message=get_message(
-                            "new_shipment_created",
-                            shp_number=new_shipment.shp_number,
-                            booking=new_shipment.booking_number or "N/A",
-                            vessel=new_shipment.vessel_name or "N/A"
+
+                # If factory order was linked, send BOOKING_AUTO_LINKED alert
+                if data.factory_order_id:
+                    # Get factory order PV number
+                    try:
+                        factory_order = get_factory_order_service().get_by_id(data.factory_order_id)
+                        pv_number = factory_order.pv_number if factory_order else "N/A"
+                    except Exception:
+                        pv_number = "N/A"
+
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.BOOKING_AUTO_LINKED,
+                            severity=AlertSeverity.INFO,
+                            title=get_message("title_booking_auto_linked", shp_number=new_shipment.shp_number),
+                            message=get_message(
+                                "booking_auto_linked",
+                                shp_number=new_shipment.shp_number,
+                                booking=new_shipment.booking_number or "N/A",
+                                pv_number=pv_number
+                            ),
+                            shipment_id=new_shipment.id,
                         ),
+                        send_telegram=True
+                    )
+                    logger.info(
+                        "booking_auto_linked_alert_sent",
                         shipment_id=new_shipment.id,
-                    ),
-                    send_telegram=True
-                )
+                        factory_order_id=data.factory_order_id
+                    )
+                else:
+                    # Standard new shipment alert
+                    alert_service.create(
+                        AlertCreate(
+                            type=AlertType.CONTAINER_READY,
+                            severity=AlertSeverity.INFO,
+                            title=get_message("title_new_shipment", shp_number=new_shipment.shp_number),
+                            message=get_message(
+                                "new_shipment_created",
+                                shp_number=new_shipment.shp_number,
+                                booking=new_shipment.booking_number or "N/A",
+                                vessel=new_shipment.vessel_name or "N/A"
+                            ),
+                            shipment_id=new_shipment.id,
+                        ),
+                        send_telegram=True
+                    )
+
+                    # Suggestion: Find unlinked factory orders
+                    try:
+                        factory_order_service = get_factory_order_service()
+                        unlinked_orders = factory_order_service.get_unlinked_orders(limit=5)
+
+                        if unlinked_orders:
+                            import os
+                            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+                            order_list = "\n".join([
+                                f"• {fo.pv_number} ({fo.total_m2 or 0} m²)"
+                                for fo in unlinked_orders
+                            ])
+
+                            alert_service.create(
+                                AlertCreate(
+                                    type=AlertType.LINK_SHIPMENT_TO_ORDER,
+                                    severity=AlertSeverity.INFO,
+                                    title=get_message("title_link_shipment_to_order", shp_number=new_shipment.shp_number),
+                                    message=get_message(
+                                        "link_shipment_to_order",
+                                        shp_number=new_shipment.shp_number,
+                                        vessel=new_shipment.vessel_name or "N/A",
+                                        etd=str(new_shipment.etd) if new_shipment.etd else "N/A",
+                                        available_orders=order_list,
+                                        link=f"{frontend_url}/shipments/{new_shipment.id}"
+                                    ),
+                                    shipment_id=new_shipment.id,
+                                ),
+                                send_telegram=True
+                            )
+                            logger.info(
+                                "link_shipment_suggestion_sent",
+                                shipment_id=new_shipment.id,
+                                available_orders=len(unlinked_orders)
+                            )
+                    except Exception as suggestion_error:
+                        logger.warning("link_shipment_suggestion_failed", error=str(suggestion_error))
+
             except Exception as alert_error:
                 logger.warning("shipment_alert_failed", error=str(alert_error))
 
@@ -1120,20 +1347,16 @@ async def ingest_packing_list(
 @router.post("/packing-list/confirm", response_model=PackingListIngestResponse)
 async def confirm_packing_list(data: ConfirmPackingListRequest) -> PackingListIngestResponse:
     """
-    Confirm packing list data and link to factory order.
+    Confirm packing list data and wire to shipment.
 
-    After user reviews parsed packing list, submit confirmed data
-    to link container/product info to the factory order.
+    Flow:
+    1. Find FactoryOrder by PV number
+    2. Find Shipment linked to FactoryOrder
+    3. Create containers from packing list data
+    4. Update shipment status to AT_ORIGIN_PORT
+    5. Send appropriate alert
 
-    Args:
-        data: Confirmed packing list data
-
-    Returns:
-        PackingListIngestResponse with link status
-
-    Raises:
-        400: Invalid data or factory order not found
-        500: Database error
+    If no shipment found, sends pending alert for manual linking.
     """
     logger.info(
         "packing_list_confirm_started",
@@ -1142,42 +1365,192 @@ async def confirm_packing_list(data: ConfirmPackingListRequest) -> PackingListIn
     )
 
     if not data.pv_number:
-        raise HTTPException(
-            status_code=400,
-            detail="PV number is required"
-        )
+        raise HTTPException(status_code=400, detail="PV number is required")
 
     try:
         factory_order_service = get_factory_order_service()
+        shipment_service = get_shipment_service()
+        alert_service = get_alert_service()
 
-        # Find factory order by PV number
+        # Step 1: Find factory order by PV number
         factory_order = factory_order_service.get_by_pv_number(data.pv_number)
 
+        total_m2 = data.totals.total_m2 if data.totals else "0"
+        container_count = len(data.containers)
+
         if not factory_order:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Factory order not found for PV number: {data.pv_number}"
+            # No factory order - send pending alert
+            logger.info("packing_list_no_factory_order", pv_number=data.pv_number)
+
+            try:
+                alert_service.create(
+                    AlertCreate(
+                        type=AlertType.PACKING_LIST_PENDING,
+                        severity=AlertSeverity.WARNING,
+                        title=get_message("title_packing_list_pending", pv_number=data.pv_number),
+                        message=get_message(
+                            "packing_list_pending",
+                            pv_number=data.pv_number,
+                            container_count=container_count,
+                            total_m2=total_m2,
+                            reason="Factory order not found"
+                        ),
+                    ),
+                    send_telegram=True
+                )
+            except Exception as alert_error:
+                logger.warning("packing_list_pending_alert_failed", error=str(alert_error))
+
+            return PackingListIngestResponse(
+                success=False,
+                message=f"Factory order not found for PV: {data.pv_number}",
+                action="needs_factory_order",
+                confidence=0.0
             )
 
-        # Log the link (future: could update factory order with packing list data)
+        # Step 2: Find shipment(s) linked to factory order
+        shipments = shipment_service.get_by_factory_order_id(factory_order.id)
+
+        target_shipment = None
+        reason = ""
+
+        if len(shipments) == 0:
+            reason = "No shipment linked to factory order"
+        elif len(shipments) == 1:
+            target_shipment = shipments[0]
+        else:
+            # Multiple shipments - find one at AT_FACTORY status
+            at_factory = [
+                s for s in shipments
+                if s.status == ShipmentStatus.AT_FACTORY.value
+            ]
+            if len(at_factory) == 1:
+                target_shipment = at_factory[0]
+            elif len(at_factory) == 0:
+                reason = "Multiple shipments but none at AT_FACTORY"
+            else:
+                reason = "Multiple shipments at AT_FACTORY - manual selection required"
+
+        if not target_shipment:
+            # No clear shipment target - send pending alert
+            logger.info(
+                "packing_list_no_shipment",
+                pv_number=data.pv_number,
+                factory_order_id=factory_order.id,
+                shipment_count=len(shipments),
+                reason=reason
+            )
+
+            try:
+                alert_service.create(
+                    AlertCreate(
+                        type=AlertType.PACKING_LIST_PENDING,
+                        severity=AlertSeverity.WARNING,
+                        title=get_message("title_packing_list_pending", pv_number=data.pv_number),
+                        message=get_message(
+                            "packing_list_pending",
+                            pv_number=data.pv_number,
+                            container_count=container_count,
+                            total_m2=total_m2,
+                            reason=reason
+                        ),
+                    ),
+                    send_telegram=True
+                )
+            except Exception as alert_error:
+                logger.warning("packing_list_pending_alert_failed", error=str(alert_error))
+
+            return PackingListIngestResponse(
+                success=False,
+                message=f"Packing list needs manual linking: {reason}",
+                action="needs_factory_order",
+                factory_order_id=factory_order.id,
+                factory_order_pv=factory_order.pv_number,
+                confidence=0.5
+            )
+
+        # Step 3: Create containers from packing list
+        containers_created = 0
+        if data.original_parsed_data:
+            containers_created = _create_containers_from_packing_list(
+                target_shipment.id,
+                data.original_parsed_data
+            )
+        elif data.containers:
+            # Fallback: create basic containers from list
+            containers_created = _create_containers_for_shipment(
+                target_shipment.id,
+                data.containers
+            )
+
         logger.info(
-            "packing_list_linked_to_factory_order",
-            pv_number=data.pv_number,
-            factory_order_id=factory_order.id,
-            containers=data.containers,
-            notes=data.notes
+            "packing_list_containers_created",
+            shipment_id=target_shipment.id,
+            containers_created=containers_created
         )
 
-        # Future enhancement: Update factory order with container assignments
-        # For now, just confirm the link
-        # factory_order_service.add_containers(factory_order.id, data.containers)
+        # Step 4: Update shipment status to AT_ORIGIN_PORT (with guard)
+        current_status = ShipmentStatus(target_shipment.status)
+        new_status = ShipmentStatus.AT_ORIGIN_PORT
+
+        if is_valid_shipment_status_transition(current_status, new_status):
+            shipment_service.update_status(
+                target_shipment.id,
+                ShipmentStatusUpdate(status=new_status)
+            )
+            logger.info(
+                "packing_list_status_updated",
+                shipment_id=target_shipment.id,
+                from_status=current_status.value,
+                to_status=new_status.value
+            )
+        else:
+            logger.info(
+                "packing_list_status_skipped",
+                shipment_id=target_shipment.id,
+                current_status=current_status.value,
+                reason="Shipment already past AT_ORIGIN_PORT"
+            )
+
+        # Step 5: Send success alert
+        shp_number = target_shipment.shp_number or target_shipment.booking_number or target_shipment.id[:8]
+
+        try:
+            alert_service.create(
+                AlertCreate(
+                    type=AlertType.PACKING_LIST_PROCESSED,
+                    severity=AlertSeverity.INFO,
+                    title=get_message("title_packing_list_processed", pv_number=data.pv_number),
+                    message=get_message(
+                        "packing_list_processed",
+                        pv_number=data.pv_number,
+                        shp_number=shp_number,
+                        container_count=containers_created,
+                        total_m2=total_m2
+                    ),
+                    shipment_id=target_shipment.id,
+                ),
+                send_telegram=True
+            )
+        except Exception as alert_error:
+            logger.warning("packing_list_processed_alert_failed", error=str(alert_error))
+
+        logger.info(
+            "packing_list_confirmed_successfully",
+            pv_number=data.pv_number,
+            factory_order_id=factory_order.id,
+            shipment_id=target_shipment.id,
+            containers_created=containers_created
+        )
 
         return PackingListIngestResponse(
             success=True,
-            message=f"Packing list linked to factory order {data.pv_number}",
+            message=f"Linked to {shp_number}. {containers_created} containers created.",
             action="linked_to_factory_order",
             factory_order_id=factory_order.id,
             factory_order_pv=factory_order.pv_number,
+            shipment_id=target_shipment.id,
+            shipment_shp=shp_number,
             confidence=1.0
         )
 
