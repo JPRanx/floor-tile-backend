@@ -127,27 +127,27 @@ STAGE_CONTEXT = {
         "check": 'Shipment status → AT_ORIGIN_PORT. Containers appear in shipment detail.',
     },
     7: {
+        "title": "HBL/MBL Received",
+        "real_world": "TIBA sends House Bill of Lading and/or Master Bill of Lading. These contain freight costs and container details. Issued before ship departs.",
+        "trigger": "TIBA sends HBL/MBL PDF (email)",
+        "action": "System updates shipment with SHP number, freight cost, container details",
+        "document": "HBL PDF, MBL PDF",
+        "pages": ["Shipments", "Email Inbox"],
+        "fo_status": "SHIPPED",
+        "shp_status": "AT_ORIGIN_PORT",
+        "note": "HBL has SHP number but no booking. MBL has booking but no SHP. System links via containers.",
+        "check": "Shipment details updated. Telegram confirms HBL processed or pending.",
+    },
+    8: {
         "title": "Ship Departs",
-        "real_world": "Vessel departs origin port. Forwarder may send departure confirmation.",
-        "trigger": "Vessel ETD passes OR forwarder sends Departure Notice",
+        "real_world": "Ship has departed from origin port. TIBA sends Departure Notice after HBL/MBL are issued.",
+        "trigger": "TIBA sends Departure Notice PDF (email)",
         "action": "Update shipment status: AT_ORIGIN_PORT → IN_TRANSIT",
-        "document": "Departure Notice PDF (optional)",
-        "pages": ["Shipments"],
+        "document": "Departure Notice PDF",
+        "pages": ["Shipments", "Pipeline"],
         "fo_status": "SHIPPED",
         "shp_status": "IN_TRANSIT",
         "check": 'Shipment status → IN_TRANSIT. Pipeline shows "In Transit".',
-    },
-    8: {
-        "title": "HBL/MBL Received",
-        "real_world": "Forwarder sends House Bill of Lading / Master Bill of Lading via email. Contains final vessel/voyage/container details.",
-        "trigger": "Freight forwarder emails HBL/MBL PDF",
-        "action": "Forward email to ingest@domain.com OR manual upload",
-        "document": "HBL or MBL PDF",
-        "pages": ["Shipments", "Email Inbox"],
-        "fo_status": "SHIPPED",
-        "shp_status": "IN_TRANSIT",
-        "note": "Updates vessel/voyage/container info. May confirm IN_TRANSIT.",
-        "check": "Shipment details updated. Telegram confirms HBL processed.",
     },
     9: {
         "title": "Ship Arrives at Destination",
@@ -234,13 +234,13 @@ STAGE_UI_HINTS = {
     },
     7: {
         "before": "Shipment at AT_ORIGIN_PORT",
-        "after": "Shipment status → IN_TRANSIT. Pipeline 'In Transit' column.",
-        "urls": ["/shipments", "/pipeline"],
-    },
-    8: {
-        "before": "Shipment is IN_TRANSIT",
         "after": "Shipment details updated with HBL info. Check Telegram alert.",
         "urls": ["/shipments"],
+    },
+    8: {
+        "before": "Shipment still AT_ORIGIN_PORT (HBL received)",
+        "after": "Shipment status → IN_TRANSIT. Pipeline 'In Transit' column.",
+        "urls": ["/shipments", "/pipeline"],
     },
     9: {
         "before": "Shipment IN_TRANSIT",
@@ -450,8 +450,8 @@ class OrderFlowSimulation:
                 (4, "Ready to Ship", self.stage_4_ready),
                 (5, "Book Shipment", self.stage_5_create_shipment),
                 (6, "At Origin Port", self.stage_6_at_origin_port),
-                (7, "Ship Departs", self.stage_7_in_transit),
-                (8, "HBL/MBL Received", self.stage_8_hbl_received),
+                (7, "HBL/MBL Received", self.stage_7_hbl_received),
+                (8, "Ship Departs", self.stage_8_in_transit),
                 (9, "Ship Arrives", self.stage_9_at_destination),
                 (10, "Customs Clearance", self.stage_10_customs),
                 (11, "Delivered", self.stage_11_delivered),
@@ -827,11 +827,32 @@ class OrderFlowSimulation:
         log_success(f"Shipment status: {old_status} -> AT_ORIGIN_PORT")
 
     # ─────────────────────────────────────────────────
-    # STAGE 7: Ship Departs
+    # STAGE 7: HBL/MBL Received (before departure)
     # ─────────────────────────────────────────────────
-    def stage_7_in_transit(self):
-        """Update shipment status to IN_TRANSIT."""
-        log_header("Stage 7: Ship Departs")
+    def stage_7_hbl_received(self):
+        """HBL/MBL received - updates shipment details, status stays AT_ORIGIN_PORT."""
+        log_header("Stage 7: HBL/MBL Received")
+
+        # In real life, HBL would be emailed and auto-ingested
+        # HBL/MBL are issued BEFORE the ship departs
+        log_info("HBL/MBL received from TIBA (before departure)")
+        log_info("Would update vessel, voyage, container details, freight cost")
+
+        # Verify shipment is still AT_ORIGIN_PORT (HBL comes before departure)
+        response = self.api.get(f"/api/shipments/{self.shipment_id}")
+        self.shipment_status = response.get("status", "")
+
+        if self.shipment_status != "AT_ORIGIN_PORT":
+            log_warning(f"Expected AT_ORIGIN_PORT status, got {self.shipment_status}")
+
+        log_success(f"Shipment {self.shipment_shp} details updated (status: {self.shipment_status})")
+
+    # ─────────────────────────────────────────────────
+    # STAGE 8: Ship Departs (after HBL/MBL)
+    # ─────────────────────────────────────────────────
+    def stage_8_in_transit(self):
+        """Update shipment status to IN_TRANSIT after HBL received."""
+        log_header("Stage 8: Ship Departs")
 
         old_status = self.shipment_status
         response = self.api.patch(
@@ -844,27 +865,6 @@ class OrderFlowSimulation:
             raise APIError(f"Expected IN_TRANSIT status, got {self.shipment_status}")
 
         log_success(f"Shipment status: {old_status} -> IN_TRANSIT")
-
-    # ─────────────────────────────────────────────────
-    # STAGE 8: HBL/MBL Received
-    # ─────────────────────────────────────────────────
-    def stage_8_hbl_received(self):
-        """HBL/MBL received - updates shipment details but status stays IN_TRANSIT."""
-        log_header("Stage 8: HBL/MBL Received")
-
-        # In real life, HBL would be emailed and auto-ingested
-        # This stage updates vessel/voyage/container info
-        log_info("HBL/MBL received from freight forwarder")
-        log_info("Would update vessel, voyage, container details")
-
-        # Verify shipment is IN_TRANSIT
-        response = self.api.get(f"/api/shipments/{self.shipment_id}")
-        self.shipment_status = response.get("status", "")
-
-        if self.shipment_status != "IN_TRANSIT":
-            log_warning(f"Expected IN_TRANSIT status, got {self.shipment_status}")
-
-        log_success(f"Shipment {self.shipment_shp} details updated (status: {self.shipment_status})")
 
     # ─────────────────────────────────────────────────
     # STAGE 9: Ship Arrives at Destination

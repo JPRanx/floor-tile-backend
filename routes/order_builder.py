@@ -30,7 +30,7 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/order-builder", tags=["Order Builder"])
 
-# Factory constant for pallet conversion
+# Factory constant for pallet conversion (actual factory pallet dimensions)
 M2_PER_PALLET_FACTORY = Decimal("134.4")
 
 

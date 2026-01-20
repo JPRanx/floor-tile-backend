@@ -30,8 +30,8 @@ from models.recommendation import RecommendationPriority
 
 logger = structlog.get_logger(__name__)
 
-# Constants
-M2_PER_PALLET = Decimal("135")
+# Constants (actual factory pallet dimensions)
+M2_PER_PALLET = Decimal("134.4")
 PALLETS_PER_CONTAINER = 14
 WAREHOUSE_CAPACITY = 740  # pallets
 

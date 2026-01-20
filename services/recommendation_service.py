@@ -35,8 +35,8 @@ from services.production_schedule_service import get_production_schedule_service
 logger = structlog.get_logger(__name__)
 
 
-# Constants
-M2_PER_PALLET = Decimal("135")
+# Constants (actual factory pallet dimensions)
+M2_PER_PALLET = Decimal("134.4")
 Z_SCORE = Decimal("1.645")  # 95% service level
 OVER_STOCK_THRESHOLD = Decimal("-5")  # Pallets over target to warn
 

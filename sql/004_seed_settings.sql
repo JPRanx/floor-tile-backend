@@ -11,7 +11,7 @@ INSERT INTO settings (key, value) VALUES
 ('container_max_pallets', '14'),
 ('container_max_weight_kg', '28000'),
 ('container_max_m2', '1881'),
-('m2_per_pallet', '135'),
+('m2_per_pallet', '134.4'),
 
 -- Boat constraints
 ('boat_min_containers', '3'),

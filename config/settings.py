@@ -99,11 +99,11 @@ class Settings(BaseSettings):
         le=3000,
         description="Maximum m² per container"
     )
-    m2_per_pallet: int = Field(
-        default=135,
+    m2_per_pallet: float = Field(
+        default=134.4,
         ge=50,
         le=200,
-        description="Average m² per pallet"
+        description="Average m² per pallet (factory standard)"
     )
     
     # ===================
