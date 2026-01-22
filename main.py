@@ -150,7 +150,8 @@ async def root():
             "pending_documents": "/api/pending-documents",
             "analytics": "/api/analytics",
             "production_schedule": "/api/production-schedule",
-            "pipeline": "/api/pipeline"
+            "pipeline": "/api/pipeline",
+            "intelligence": "/api/intelligence"
         }
     }
 
@@ -212,6 +213,7 @@ from routes.analytics import router as analytics_router
 from routes.production_schedule import router as production_schedule_router
 from routes.pipeline import router as pipeline_router
 from routes.data_freshness import router as data_freshness_router
+from routes.intelligence import router as intelligence_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -234,6 +236,7 @@ app.include_router(analytics_router, prefix="/api/analytics", tags=["Analytics"]
 app.include_router(production_schedule_router, prefix="/api/production-schedule", tags=["Production Schedule"])
 app.include_router(pipeline_router)  # Prefix already in router
 app.include_router(data_freshness_router)  # Prefix already in router
+app.include_router(intelligence_router)  # Prefix already in router
 
 
 if __name__ == "__main__":

@@ -139,17 +139,25 @@ SAC_OPTIONAL_COLUMNS = {
     "invoice": ["numero de factura", "factura", "no factura", "invoice", "numero factura"],
 }
 
-# Non-tile products to filter out
-NON_TILE_KEYWORDS = [
-    "mueble",
-    "lavamanos",
-    "recargo",
-    "inodoro",
-    "sanitario",
-    "grifo",
-    "llave",
-    "accesorio",
-]
+# Product category keywords for classification (no longer used for filtering)
+CATEGORY_KEYWORDS = {
+    "FURNITURE": ["mueble", "gabinete"],
+    "SINK": ["lavamanos"],
+    "TOILET": ["inodoro", "sanitario"],
+    "FAUCET": ["grifo", "llave"],
+    "ACCESSORY": ["accesorio"],
+    "SURCHARGE": ["recargo"],
+}
+
+
+def _detect_product_category(description: str) -> str:
+    """Detect product category from description."""
+    desc_lower = description.lower()
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        if any(kw in desc_lower for kw in keywords):
+            return category
+    # Default to TILE for baldosas/ceramica or unknown
+    return "TILE"
 
 
 # ===================
@@ -255,13 +263,8 @@ def parse_sac_csv(
         # Get product description
         description = str(row.get(desc_col, "")).strip() if pd.notna(row.get(desc_col)) else ""
 
-        # Filter out non-tile products
-        description_lower = description.lower()
-        is_non_tile = any(keyword in description_lower for keyword in NON_TILE_KEYWORDS)
-        if is_non_tile:
-            result.skipped_non_tile += 1
-            result.skipped_products.add(description[:50])
-            continue
+        # Detect product category (no longer filtering - include all products)
+        product_category = _detect_product_category(description)
 
         # Try to match product
         product_id = None

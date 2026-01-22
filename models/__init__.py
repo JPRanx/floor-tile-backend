@@ -64,6 +64,21 @@ from models.ingest import (
     ConfirmIngestRequest,
     IngestResponse,
 )
+from models.trends import (
+    TrendDirection,
+    TrendStrength,
+    ConfidenceLevel,
+    CustomerTier,
+    CustomerStatus,
+    SparklinePoint,
+    ProductTrend,
+    CountryBreakdown,
+    CountryTrend,
+    ProductPurchase,
+    ProductMixChange,
+    CustomerTrend,
+    IntelligenceDashboard,
+)
 
 __all__ = [
     # Base
@@ -125,4 +140,19 @@ __all__ = [
     "ParsedDocumentData",
     "ConfirmIngestRequest",
     "IngestResponse",
+
+    # Trends / Intelligence
+    "TrendDirection",
+    "TrendStrength",
+    "ConfidenceLevel",
+    "CustomerTier",
+    "CustomerStatus",
+    "SparklinePoint",
+    "ProductTrend",
+    "CountryBreakdown",
+    "CountryTrend",
+    "ProductPurchase",
+    "ProductMixChange",
+    "CustomerTrend",
+    "IntelligenceDashboard",
 ]
