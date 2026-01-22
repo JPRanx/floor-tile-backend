@@ -94,6 +94,16 @@ class ProductUpdate(BaseSchema):
         max_length=20,
         description="Factory internal product code (e.g., 5495)"
     )
+    sac_sku: Optional[int] = Field(
+        None,
+        ge=1,
+        description="SAC (Guatemala) ERP integer SKU code"
+    )
+    siesa_item: Optional[int] = Field(
+        None,
+        ge=1,
+        description="SIESA (Factory Colombia) ERP item code"
+    )
 
     @field_validator("sku")
     @classmethod
@@ -123,6 +133,8 @@ class ProductResponse(BaseSchema, TimestampMixin):
     sku: str = Field(..., description="Product SKU")
     owner_code: Optional[str] = Field(None, description="Owner's Excel SKU code (e.g., '0000102', '0000119')")
     factory_code: Optional[str] = Field(None, description="Factory internal product code (e.g., 5495)")
+    sac_sku: Optional[int] = Field(None, description="SAC (Guatemala) ERP integer SKU code")
+    siesa_item: Optional[int] = Field(None, description="SIESA (Factory Colombia) ERP item code")
     category: Category = Field(..., description="Product category")
     rotation: Optional[Rotation] = Field(None, description="Sales velocity")
     active: bool = Field(..., description="Whether product is active")
