@@ -119,3 +119,28 @@ class BulkSalesCreate(BaseSchema):
     """Schema for bulk sales creation."""
 
     records: list[SalesRecordCreate]
+
+
+class SACUploadResponse(BaseSchema):
+    """Response from SAC sales CSV upload."""
+
+    created: int
+    deleted: int = 0
+    total_rows: int
+    matched_by_sac_sku: int
+    matched_by_name: int
+    unmatched_count: int
+    match_rate_pct: float
+    date_range_start: Optional[date] = None
+    date_range_end: Optional[date] = None
+
+    # Summary statistics
+    total_m2_sold: float = 0.0
+    unique_customers: int = 0
+    unique_products: int = 0
+    top_product: Optional[str] = None
+    skipped_non_tile: int = 0
+    skipped_products: list[str] = []
+
+    unmatched_products: list[str] = []
+    errors: list[dict] = []

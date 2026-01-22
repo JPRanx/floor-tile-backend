@@ -493,3 +493,65 @@ class DocumentTypeDetectionError(ValidationError):
             message="Could not determine document type",
             details=details
         )
+
+
+# ===================
+# SAC PARSER ERRORS
+# ===================
+
+class SACParseError(ValidationError):
+    """SAC CSV parsing failed."""
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "SAC_PARSE_ERROR",
+        details: Optional[dict] = None
+    ):
+        super().__init__(
+            code=code,
+            message=message,
+            details=details
+        )
+
+
+class SACMissingColumnsError(SACParseError):
+    """SAC CSV missing required columns."""
+
+    def __init__(self, missing: list[str]):
+        super().__init__(
+            code="SAC_MISSING_COLUMNS",
+            message=f"Missing required columns: {', '.join(missing)}",
+            details={"missing_columns": missing}
+        )
+
+
+# ===================
+# SIESA PARSER ERRORS
+# ===================
+
+class SIESAParseError(ValidationError):
+    """SIESA XLS parsing failed."""
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "SIESA_PARSE_ERROR",
+        details: Optional[dict] = None
+    ):
+        super().__init__(
+            code=code,
+            message=message,
+            details=details
+        )
+
+
+class SIESAMissingColumnsError(SIESAParseError):
+    """SIESA XLS missing required columns."""
+
+    def __init__(self, missing: list[str]):
+        super().__init__(
+            code="SIESA_MISSING_COLUMNS",
+            message=f"Missing required columns: {', '.join(missing)}",
+            details={"missing_columns": missing}
+        )

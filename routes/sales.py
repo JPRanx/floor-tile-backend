@@ -10,21 +10,27 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 import structlog
 
+from decimal import Decimal
+
 from models.sales import (
     SalesRecordCreate,
     SalesRecordUpdate,
     SalesRecordResponse,
     SalesListResponse,
     SalesUploadResponse,
+    SACUploadResponse,
 )
 from services.sales_service import get_sales_service
 from services.product_service import get_product_service
 from parsers.excel_parser import parse_owner_excel
-from utils.text_utils import normalize_customer_name, clean_customer_name
+from parsers.sac_parser import parse_sac_csv
+from utils.text_utils import normalize_customer_name, clean_customer_name, normalize_product_name
 from exceptions import (
     AppError,
     SalesNotFoundError,
     ExcelParseError,
+    SACParseError,
+    SACMissingColumnsError,
 )
 
 logger = structlog.get_logger(__name__)
@@ -160,6 +166,116 @@ async def upload_sales(file: UploadFile = File(...)):
         return handle_error(e)
     except Exception as e:
         logger.error("sales_upload_failed", error=str(e))
+        return handle_error(e)
+
+
+@router.post("/upload-sac", response_model=SACUploadResponse)
+async def upload_sac_sales(file: UploadFile = File(...)):
+    """
+    Upload daily sales data from SAC CSV export.
+
+    Parses SAC (Guatemala ERP) CSV and creates sales records.
+    Products are matched by sac_sku first, then by normalized name.
+
+    Features:
+    - Idempotent: Deletes existing records in the uploaded date range
+    - Partial success: Creates records for matched products, logs unmatched
+    - Statistics: Returns match rates and unmatched product list
+
+    Returns:
+        SACUploadResponse with created count and statistics
+    """
+    try:
+        # Get products with sac_sku and name mappings
+        product_service = get_product_service()
+        products, _ = product_service.get_all(page=1, page_size=1000, active_only=False)
+
+        # Build lookup: sac_sku (int) -> product_id
+        known_sac_skus = {
+            p.sac_sku: p.id
+            for p in products
+            if p.sac_sku is not None
+        }
+
+        # Build lookup: normalized product name -> product_id
+        known_product_names = {
+            normalize_product_name(p.sku): p.id
+            for p in products
+            if p.sku
+        }
+
+        # Parse CSV file
+        contents = await file.read()
+        parse_result = parse_sac_csv(contents, known_sac_skus, known_product_names)
+
+        # Log unmatched products
+        if parse_result.unmatched_products:
+            logger.warning(
+                "sac_upload_unmatched_products",
+                count=len(parse_result.unmatched_products),
+                sample=list(parse_result.unmatched_products)[:10]
+            )
+
+        # Convert parsed records to SalesRecordCreate
+        sales_records = [
+            SalesRecordCreate(
+                product_id=record.product_id,
+                week_start=record.sale_date,
+                quantity_m2=record.quantity_m2,
+                customer=record.customer,
+                customer_normalized=record.customer_normalized,
+                unit_price_usd=record.unit_price_usd,
+                total_price_usd=record.total_price_usd,
+            )
+            for record in parse_result.sales
+        ]
+
+        sales_service = get_sales_service()
+        deleted = 0
+
+        if sales_records:
+            # Make upload idempotent: delete existing records in date range
+            min_date, max_date = parse_result.date_range
+            if min_date and max_date:
+                deleted = sales_service.delete_by_date_range(min_date, max_date)
+                if deleted > 0:
+                    logger.info("sac_sales_deleted_before_upload", count=deleted)
+
+        # Bulk create
+        created = sales_service.bulk_create(sales_records)
+
+        logger.info(
+            "sac_upload_complete",
+            records_created=len(created),
+            records_deleted=deleted,
+            match_rate=f"{parse_result.match_rate:.1f}%"
+        )
+
+        return SACUploadResponse(
+            created=len(created),
+            deleted=deleted,
+            total_rows=parse_result.total_rows,
+            matched_by_sac_sku=parse_result.matched_by_sac_sku,
+            matched_by_name=parse_result.matched_by_name,
+            unmatched_count=len(parse_result.unmatched_products),
+            match_rate_pct=round(parse_result.match_rate, 1),
+            date_range_start=parse_result.date_range[0],
+            date_range_end=parse_result.date_range[1],
+            # Summary statistics
+            total_m2_sold=float(parse_result.total_m2_sold),
+            unique_customers=len(parse_result.unique_customers),
+            unique_products=len(parse_result.unique_products),
+            top_product=parse_result.top_product,
+            skipped_non_tile=parse_result.skipped_non_tile,
+            skipped_products=list(parse_result.skipped_products)[:10],
+            unmatched_products=list(parse_result.unmatched_products)[:20],
+            errors=[e.__dict__ for e in parse_result.errors[:20]],
+        )
+
+    except (SACParseError, SACMissingColumnsError, AppError) as e:
+        return handle_error(e)
+    except Exception as e:
+        logger.error("sac_upload_failed", error=str(e))
         return handle_error(e)
 
 

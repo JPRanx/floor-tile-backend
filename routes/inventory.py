@@ -28,7 +28,26 @@ from exceptions import (
     AppError,
     InventoryNotFoundError,
     InventoryUploadError,
+    SIESAParseError,
+    SIESAMissingColumnsError,
 )
+from models.inventory_lot import (
+    SIESAUploadResponse,
+    InventoryLotResponse,
+    InventoryLotsListResponse,
+    WarehouseSummary,
+    RowError,
+    ProductLotSummary,
+    ContainerEstimateResponse,
+)
+from parsers.siesa_parser import parse_siesa_bytes
+from config.shipping import (
+    calculate_containers_needed,
+    calculate_utilization_breakdown,
+    CONTAINER_WEIGHT_LIMIT_KG,
+)
+from utils.text_utils import normalize_product_name
+from config import get_supabase_client
 
 logger = structlog.get_logger(__name__)
 
@@ -238,6 +257,307 @@ async def upload_inventory(file: UploadFile = File(...)):
         raise
     except Exception as e:
         logger.error("inventory_upload_failed", error=str(e))
+        return handle_error(e)
+
+
+# ===================
+# SIESA INVENTORY (LOT-LEVEL)
+# ===================
+
+@router.post("/siesa/upload", response_model=SIESAUploadResponse)
+async def upload_siesa_inventory(
+    file: UploadFile = File(...),
+    snapshot_date: Optional[date] = Query(None, description="Snapshot date (defaults to today)")
+):
+    """
+    Upload lot-level inventory from SIESA factory XLS export.
+
+    Parses the SIESA inventory report and stores each row as a separate lot.
+    Upload is idempotent: existing lots for the snapshot_date are deleted before insert.
+
+    Products are matched by:
+    1. siesa_item code (exact match to products.siesa_item)
+    2. Normalized name fallback (using normalize_product_name)
+
+    Returns detailed statistics including match rates, warehouse breakdown,
+    and container weight estimates.
+    """
+    actual_date = snapshot_date or date.today()
+
+    logger.info(
+        "siesa_upload_started",
+        filename=file.filename,
+        snapshot_date=actual_date,
+    )
+
+    try:
+        # Read file content
+        content = await file.read()
+
+        # Build product lookup dictionaries
+        product_service = get_product_service()
+        products, _ = product_service.get_all(page=1, page_size=10000, active_only=False)
+
+        # siesa_item -> (product_id, sku)
+        products_by_siesa_item: dict[int, tuple[str, str]] = {}
+        # normalized_name -> (product_id, sku)
+        products_by_normalized_name: dict[str, tuple[str, str]] = {}
+
+        for p in products:
+            if p.siesa_item:
+                products_by_siesa_item[p.siesa_item] = (p.id, p.sku)
+            # Also build name lookup
+            normalized = normalize_product_name(p.sku)
+            if normalized:
+                products_by_normalized_name[normalized] = (p.id, p.sku)
+
+        # Parse the file
+        parse_result = parse_siesa_bytes(
+            file_content=content,
+            filename=file.filename or "siesa.xls",
+            snapshot_date=actual_date,
+            products_by_siesa_item=products_by_siesa_item,
+            products_by_normalized_name=products_by_normalized_name,
+        )
+
+        # Get database client
+        db = get_supabase_client()
+
+        # Delete existing lots for this snapshot_date (idempotent)
+        delete_result = db.table("inventory_lots").delete().eq(
+            "snapshot_date", actual_date.isoformat()
+        ).execute()
+        deleted_count = len(delete_result.data) if delete_result.data else 0
+        if deleted_count > 0:
+            logger.info("siesa_deleted_existing_lots", count=deleted_count, date=actual_date)
+
+        # Insert matched lots (batch insert for performance)
+        lots_to_insert = []
+        for match in parse_result.matched_lots:
+            lot = match.lot
+            lots_to_insert.append({
+                "product_id": match.product_id,
+                "lot_number": lot.lot_number,
+                "quantity_m2": float(lot.quantity_m2),
+                "weight_kg": float(lot.weight_kg) if lot.weight_kg else None,
+                "quality": lot.quality,
+                "warehouse_code": lot.warehouse_code,
+                "warehouse_name": lot.warehouse_name,
+                "snapshot_date": actual_date.isoformat(),
+                "siesa_item": lot.siesa_item,
+                "siesa_description": lot.siesa_description,
+            })
+
+        lots_created = 0
+        if lots_to_insert:
+            # Batch insert in chunks of 100 for better performance
+            chunk_size = 100
+            for i in range(0, len(lots_to_insert), chunk_size):
+                chunk = lots_to_insert[i:i + chunk_size]
+                db.table("inventory_lots").insert(chunk).execute()
+                lots_created += len(chunk)
+
+        # Calculate container statistics
+        total_weight = float(parse_result.total_weight_kg)
+        containers_needed = calculate_containers_needed(total_weight, CONTAINER_WEIGHT_LIMIT_KG)
+        utilization = 0.0
+        if containers_needed > 0:
+            utilization = (total_weight / (containers_needed * CONTAINER_WEIGHT_LIMIT_KG)) * 100
+
+        # Build warehouse summaries
+        warehouse_summaries = [
+            WarehouseSummary(
+                code=wh.code,
+                name=wh.name,
+                total_m2=float(wh.total_m2),
+                total_weight_kg=float(wh.total_weight_kg),
+                lot_count=wh.lot_count,
+            )
+            for wh in parse_result.warehouses.values()
+        ]
+
+        # Build error list
+        errors = [
+            RowError(
+                row=e.row,
+                field=e.field,
+                error=e.error,
+                value=e.value,
+            )
+            for e in parse_result.errors
+        ]
+
+        # Calculate match rate
+        total_matched = parse_result.matched_by_siesa_item + parse_result.matched_by_name
+        total_processed = total_matched + parse_result.unmatched_count
+        match_rate = (total_matched / total_processed * 100) if total_processed > 0 else 0.0
+
+        # Get unmatched product descriptions
+        unmatched_products = list(set(
+            m.lot.siesa_description or f"Item {m.lot.siesa_item}"
+            for m in parse_result.unmatched_lots
+        ))[:20]  # Limit to 20
+
+        logger.info(
+            "siesa_upload_complete",
+            lots_created=lots_created,
+            matched_by_siesa_item=parse_result.matched_by_siesa_item,
+            matched_by_name=parse_result.matched_by_name,
+            unmatched=parse_result.unmatched_count,
+            match_rate_pct=round(match_rate, 1),
+            total_m2=float(parse_result.total_m2),
+            containers_needed=containers_needed,
+        )
+
+        return SIESAUploadResponse(
+            success=parse_result.success,
+            snapshot_date=actual_date,
+            total_rows=parse_result.total_rows,
+            processed_rows=parse_result.processed_rows,
+            skipped_errors=parse_result.skipped_errors,
+            errors=errors,
+            lots_created=lots_created,
+            unique_products=parse_result.unique_siesa_items,
+            total_m2_available=float(parse_result.total_m2),
+            total_weight_kg=float(parse_result.total_weight_kg),
+            container_limit_kg=CONTAINER_WEIGHT_LIMIT_KG,
+            containers_needed=containers_needed,
+            container_utilization_pct=round(utilization, 1),
+            matched_by_siesa_item=parse_result.matched_by_siesa_item,
+            matched_by_name=parse_result.matched_by_name,
+            unmatched_count=parse_result.unmatched_count,
+            match_rate_pct=round(match_rate, 1),
+            unmatched_products=unmatched_products,
+            warehouses=warehouse_summaries,
+        )
+
+    except SIESAMissingColumnsError as e:
+        logger.error("siesa_missing_columns", missing=e.details.get("missing_columns"))
+        return handle_error(e)
+    except SIESAParseError as e:
+        logger.error("siesa_parse_error", error=str(e))
+        return handle_error(e)
+    except Exception as e:
+        logger.error("siesa_upload_failed", error=str(e), type=type(e).__name__)
+        return handle_error(e)
+
+
+@router.get("/siesa/lots", response_model=InventoryLotsListResponse)
+async def list_inventory_lots(
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    product_id: Optional[str] = Query(None, description="Filter by product"),
+    snapshot_date: Optional[date] = Query(None, description="Filter by snapshot date"),
+    warehouse_code: Optional[str] = Query(None, description="Filter by warehouse"),
+):
+    """
+    List inventory lots with optional filters.
+
+    Returns paginated list ordered by snapshot_date descending.
+    """
+    try:
+        db = get_supabase_client()
+
+        # Build query
+        query = db.table("inventory_lots").select("*", count="exact")
+
+        if product_id:
+            query = query.eq("product_id", product_id)
+        if snapshot_date:
+            query = query.eq("snapshot_date", snapshot_date.isoformat())
+        if warehouse_code:
+            query = query.eq("warehouse_code", warehouse_code)
+
+        # Order and paginate
+        query = query.order("snapshot_date", desc=True).order("created_at", desc=True)
+        offset = (page - 1) * page_size
+        query = query.range(offset, offset + page_size - 1)
+
+        result = query.execute()
+        total = result.count or 0
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+
+        lots = [
+            InventoryLotResponse(
+                id=row["id"],
+                product_id=row["product_id"],
+                lot_number=row["lot_number"],
+                quantity_m2=row["quantity_m2"],
+                weight_kg=row.get("weight_kg"),
+                quality=row.get("quality"),
+                warehouse_code=row.get("warehouse_code"),
+                warehouse_name=row.get("warehouse_name"),
+                snapshot_date=row["snapshot_date"],
+                siesa_item=row.get("siesa_item"),
+                siesa_description=row.get("siesa_description"),
+                created_at=row.get("created_at"),
+                updated_at=row.get("updated_at"),
+            )
+            for row in result.data
+        ]
+
+        return InventoryLotsListResponse(
+            data=lots,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+        )
+
+    except Exception as e:
+        logger.error("list_lots_failed", error=str(e))
+        return handle_error(e)
+
+
+@router.get("/siesa/containers", response_model=ContainerEstimateResponse)
+async def estimate_containers(
+    snapshot_date: Optional[date] = Query(None, description="Snapshot date (defaults to latest)")
+):
+    """
+    Calculate container requirements based on current inventory weight.
+
+    Returns breakdown of weight distribution across containers.
+    """
+    try:
+        db = get_supabase_client()
+
+        # Get snapshot date
+        if snapshot_date is None:
+            # Get most recent date
+            result = db.table("inventory_lots").select("snapshot_date").order(
+                "snapshot_date", desc=True
+            ).limit(1).execute()
+            if not result.data:
+                return ContainerEstimateResponse(
+                    weight_kg=0,
+                    container_limit_kg=CONTAINER_WEIGHT_LIMIT_KG,
+                    containers_needed=0,
+                    utilization_breakdown=[],
+                )
+            snapshot_date = result.data[0]["snapshot_date"]
+
+        # Sum weights for date
+        result = db.table("inventory_lots").select("weight_kg").eq(
+            "snapshot_date", snapshot_date if isinstance(snapshot_date, str) else snapshot_date.isoformat()
+        ).execute()
+
+        total_weight = sum(
+            float(row["weight_kg"] or 0)
+            for row in result.data
+        )
+
+        containers_needed = calculate_containers_needed(total_weight, CONTAINER_WEIGHT_LIMIT_KG)
+        breakdown = calculate_utilization_breakdown(total_weight, CONTAINER_WEIGHT_LIMIT_KG)
+
+        return ContainerEstimateResponse(
+            weight_kg=round(total_weight, 2),
+            container_limit_kg=CONTAINER_WEIGHT_LIMIT_KG,
+            containers_needed=containers_needed,
+            utilization_breakdown=breakdown,
+        )
+
+    except Exception as e:
+        logger.error("container_estimate_failed", error=str(e))
         return handle_error(e)
 
 

@@ -54,6 +54,14 @@ from exceptions.errors import (
     # Containers
     ContainerNotFoundError,
     ContainerItemNotFoundError,
+
+    # SAC Parser
+    SACParseError,
+    SACMissingColumnsError,
+
+    # SIESA Parser
+    SIESAParseError,
+    SIESAMissingColumnsError,
 )
 
 __all__ = [
@@ -106,4 +114,12 @@ __all__ = [
     # Containers
     "ContainerNotFoundError",
     "ContainerItemNotFoundError",
+
+    # SAC Parser
+    "SACParseError",
+    "SACMissingColumnsError",
+
+    # SIESA Parser
+    "SIESAParseError",
+    "SIESAMissingColumnsError",
 ]
