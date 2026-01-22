@@ -14,6 +14,48 @@ from enum import Enum
 from models.base import BaseSchema
 
 
+class Urgency(str, Enum):
+    """Urgency classification based on days of stock."""
+    CRITICAL = "critical"  # <7 days
+    URGENT = "urgent"      # 7-14 days
+    SOON = "soon"          # 14-30 days
+    OK = "ok"              # 30+ days
+
+
+class TrendDirection(str, Enum):
+    """Direction of product demand trend."""
+    UP = "up"
+    DOWN = "down"
+    STABLE = "stable"
+
+
+class TrendStrength(str, Enum):
+    """Strength of trend movement."""
+    STRONG = "strong"      # >20% change
+    MODERATE = "moderate"  # 5-20% change
+    WEAK = "weak"          # <5% change
+
+
+class CalculationBreakdown(BaseSchema):
+    """Breakdown of how suggested quantity was calculated."""
+
+    # Time parameters
+    lead_time_days: int = Field(..., description="Days until boat arrives")
+    safety_stock_days: int = Field(default=14, description="Safety buffer days")
+
+    # Velocity
+    daily_velocity_m2: Decimal = Field(..., description="Average daily demand in m²")
+
+    # Calculation steps
+    base_quantity_m2: Decimal = Field(..., description="(lead_time + safety) × velocity")
+    trend_adjustment_m2: Decimal = Field(default=Decimal("0"), description="Adjustment for trend")
+    trend_adjustment_pct: Decimal = Field(default=Decimal("0"), description="Trend adjustment percentage")
+    minus_current_stock_m2: Decimal = Field(..., description="Subtract warehouse stock")
+    minus_incoming_m2: Decimal = Field(default=Decimal("0"), description="Subtract in-transit stock")
+    final_suggestion_m2: Decimal = Field(..., description="Final recommended quantity")
+    final_suggestion_pallets: int = Field(..., description="Final recommendation in pallets")
+
+
 class OrderBuilderMode(str, Enum):
     """Order builder optimization modes."""
     MINIMAL = "minimal"    # 3 containers - only HIGH_PRIORITY
@@ -59,6 +101,19 @@ class OrderBuilderProduct(BaseSchema):
     # Factory (MVP: placeholder)
     factory_available: Optional[int] = Field(None, description="Pallets available at factory")
     factory_status: str = Field(default="unknown", description="available, partial, blocked, unknown")
+
+    # Trend data (from Intelligence system)
+    urgency: str = Field(default="ok", description="critical, urgent, soon, ok")
+    days_of_stock: Optional[int] = Field(None, description="Days of stock at current velocity")
+    trend_direction: str = Field(default="stable", description="up, down, stable")
+    trend_strength: str = Field(default="weak", description="strong, moderate, weak")
+    velocity_change_pct: Decimal = Field(default=Decimal("0"), description="Percent change in velocity")
+    daily_velocity_m2: Decimal = Field(default=Decimal("0"), description="Current daily velocity in m²")
+
+    # Calculation breakdown (transparency)
+    calculation_breakdown: Optional[CalculationBreakdown] = Field(
+        None, description="How the suggestion was calculated"
+    )
 
     # Selection state (editable by user)
     is_selected: bool = Field(default=False, description="Whether product is in order")

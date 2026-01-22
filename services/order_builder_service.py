@@ -17,6 +17,7 @@ from config import settings
 from services.boat_schedule_service import get_boat_schedule_service
 from services.recommendation_service import get_recommendation_service
 from services.inventory_service import get_inventory_service
+from services.trend_service import get_trend_service
 from models.order_builder import (
     OrderBuilderMode,
     OrderBuilderProduct,
@@ -25,6 +26,8 @@ from models.order_builder import (
     OrderBuilderAlertType,
     OrderBuilderSummary,
     OrderBuilderResponse,
+    CalculationBreakdown,
+    Urgency,
 )
 from models.recommendation import RecommendationPriority
 
@@ -52,6 +55,7 @@ class OrderBuilderService:
         self.boat_service = get_boat_schedule_service()
         self.recommendation_service = get_recommendation_service()
         self.inventory_service = get_inventory_service()
+        self.trend_service = get_trend_service()
 
     def get_order_builder(
         self,
@@ -101,10 +105,14 @@ class OrderBuilderService:
         # Step 2: Get recommendations (has coverage gap, confidence, priority)
         recommendations = self.recommendation_service.get_recommendations()
 
+        # Step 2b: Get trend data for products
+        trend_data = self._get_product_trends()
+
         # Step 3: Convert to OrderBuilderProducts grouped by priority
         products_by_priority = self._group_products_by_priority(
             recommendations.recommendations,
-            boat.days_until_departure
+            boat.days_until_departure,
+            trend_data
         )
 
         # Step 4: Apply mode logic (pre-select products)
@@ -199,10 +207,78 @@ class OrderBuilderService:
             max_containers=5,  # Default, could be configurable per boat
         )
 
+    def _get_product_trends(self) -> dict[str, dict]:
+        """
+        Fetch trend data from Intelligence system.
+
+        Returns dict keyed by SKU with trend metrics.
+        """
+        try:
+            trends = self.trend_service.get_product_trends(
+                period_days=90,
+                comparison_period_days=90,
+                limit=200  # Get all products
+            )
+
+            return {
+                t.sku: {
+                    "direction": t.direction.value if hasattr(t.direction, 'value') else str(t.direction),
+                    "strength": t.strength.value if hasattr(t.strength, 'value') else str(t.strength),
+                    "velocity_change_pct": t.velocity_change_pct,
+                    "daily_velocity_m2": t.current_velocity_m2_day,
+                    "days_of_stock": t.days_of_stock,
+                    "confidence": t.confidence.value if hasattr(t.confidence, 'value') else str(t.confidence),
+                }
+                for t in trends
+            }
+        except Exception as e:
+            logger.warning("trend_fetch_failed", error=str(e))
+            return {}
+
+    def _calculate_urgency(self, days_of_stock: Optional[int]) -> str:
+        """Classify urgency based on days of stock."""
+        if days_of_stock is None:
+            return Urgency.OK.value
+        if days_of_stock < 7:
+            return Urgency.CRITICAL.value
+        if days_of_stock < 14:
+            return Urgency.URGENT.value
+        if days_of_stock < 30:
+            return Urgency.SOON.value
+        return Urgency.OK.value
+
+    def _calculate_trend_adjustment(
+        self,
+        direction: str,
+        strength: str,
+        base_quantity_m2: Decimal
+    ) -> tuple[Decimal, Decimal]:
+        """
+        Calculate trend-based adjustment to order quantity.
+
+        Returns (adjustment_m2, adjustment_pct)
+        """
+        # Only adjust for upward trends (increase order)
+        if direction != "up":
+            return Decimal("0"), Decimal("0")
+
+        # Adjustment percentages based on strength
+        pct_by_strength = {
+            "strong": Decimal("0.20"),   # +20% for strong uptrend
+            "moderate": Decimal("0.10"), # +10% for moderate uptrend
+            "weak": Decimal("0.05"),     # +5% for weak uptrend
+        }
+
+        adjustment_pct = pct_by_strength.get(strength, Decimal("0"))
+        adjustment_m2 = base_quantity_m2 * adjustment_pct
+
+        return adjustment_m2, adjustment_pct * 100  # Return as percentage
+
     def _group_products_by_priority(
         self,
         recommendations: list,
-        days_to_cover: int
+        days_to_cover: int,
+        trend_data: dict[str, dict]
     ) -> dict[str, list[OrderBuilderProduct]]:
         """Convert recommendations to OrderBuilderProducts grouped by priority."""
         groups = {
@@ -212,14 +288,66 @@ class OrderBuilderService:
             "YOUR_CALL": [],
         }
 
+        SAFETY_STOCK_DAYS = 14
+
         for rec in recommendations:
-            # Calculate coverage gap pallets (ensure non-negative)
+            # Get trend data for this product
+            trend = trend_data.get(rec.sku, {})
+            direction = trend.get("direction", "stable")
+            strength = trend.get("strength", "weak")
+            velocity_change_pct = Decimal(str(trend.get("velocity_change_pct", 0)))
+            daily_velocity_m2 = Decimal(str(trend.get("daily_velocity_m2", 0)))
+            days_of_stock = trend.get("days_of_stock")
+
+            # Calculate urgency based on days of stock
+            urgency = self._calculate_urgency(days_of_stock)
+
+            # Calculate base quantity (lead time + safety stock) × velocity
+            total_coverage_days = days_to_cover + SAFETY_STOCK_DAYS
+            base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
+
+            # Calculate trend adjustment
+            trend_adjustment_m2, trend_adjustment_pct = self._calculate_trend_adjustment(
+                direction, strength, base_quantity_m2
+            )
+
+            # Calculate adjusted requirement
+            adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
+
+            # Subtract current stock and incoming
+            minus_current = rec.warehouse_m2 or Decimal("0")
+            minus_incoming = rec.in_transit_m2 or Decimal("0")
+
+            final_suggestion_m2 = max(
+                Decimal("0"),
+                adjusted_quantity_m2 - minus_current - minus_incoming
+            )
+
+            # Convert to pallets
+            final_suggestion_pallets = max(0, math.ceil(float(final_suggestion_m2 / M2_PER_PALLET)))
+
+            # Build calculation breakdown
+            breakdown = CalculationBreakdown(
+                lead_time_days=days_to_cover,
+                safety_stock_days=SAFETY_STOCK_DAYS,
+                daily_velocity_m2=daily_velocity_m2,
+                base_quantity_m2=round(base_quantity_m2, 2),
+                trend_adjustment_m2=round(trend_adjustment_m2, 2),
+                trend_adjustment_pct=round(trend_adjustment_pct, 1),
+                minus_current_stock_m2=minus_current,
+                minus_incoming_m2=minus_incoming,
+                final_suggestion_m2=round(final_suggestion_m2, 2),
+                final_suggestion_pallets=final_suggestion_pallets,
+            )
+
+            # Use the calculated suggestion if we have trend data, otherwise fall back to original
             coverage_gap_pallets = max(0, rec.coverage_gap_pallets or 0)
+            suggested = final_suggestion_pallets if daily_velocity_m2 > 0 else coverage_gap_pallets
 
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
-                description=None,  # Could add from product service if needed
+                description=None,
                 priority=rec.priority.value,
                 action_type=rec.action_type.value,
                 current_stock_m2=rec.warehouse_m2,
@@ -228,7 +356,7 @@ class OrderBuilderService:
                 total_demand_m2=rec.total_demand_m2 or Decimal("0"),
                 coverage_gap_m2=rec.coverage_gap_m2 or Decimal("0"),
                 coverage_gap_pallets=coverage_gap_pallets,
-                suggested_pallets=coverage_gap_pallets,
+                suggested_pallets=suggested,
                 confidence=rec.confidence.value,
                 confidence_reason=rec.confidence_reason,
                 unique_customers=rec.unique_customers,
@@ -236,6 +364,15 @@ class OrderBuilderService:
                 top_customer_share=rec.top_customer_share,
                 factory_available=None,
                 factory_status="unknown",
+                # Trend fields
+                urgency=urgency,
+                days_of_stock=days_of_stock,
+                trend_direction=direction,
+                trend_strength=strength,
+                velocity_change_pct=velocity_change_pct,
+                daily_velocity_m2=daily_velocity_m2,
+                calculation_breakdown=breakdown if daily_velocity_m2 > 0 else None,
+                # Selection
                 is_selected=False,
                 selected_pallets=0,
             )
