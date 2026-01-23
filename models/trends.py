@@ -126,6 +126,26 @@ class CountryBreakdown(BaseSchema):
     order_count: int = Field(..., description="Number of orders")
     revenue_share_pct: Decimal = Field(..., description="Percent of total revenue")
 
+    # Per-country trend data
+    velocity_change_pct: Decimal = Field(
+        default=Decimal("0"), description="Volume change vs previous period (%)"
+    )
+    direction: TrendDirection = Field(
+        default=TrendDirection.STABLE, description="Per-country trend direction"
+    )
+    strength: TrendStrength = Field(
+        default=TrendStrength.WEAK, description="Per-country trend strength"
+    )
+    confidence: ConfidenceLevel = Field(
+        default=ConfidenceLevel.LOW, description="Data confidence level"
+    )
+    top_customers: List[str] = Field(
+        default_factory=list, description="Top customer names (by revenue)"
+    )
+    sparkline: List[SparklinePoint] = Field(
+        default_factory=list, description="Weekly volume time series"
+    )
+
 
 class CountryTrend(BaseSchema):
     """Trend data aggregated by country."""

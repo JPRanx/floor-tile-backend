@@ -388,6 +388,7 @@ class TrendService:
         Calculate revenue trends by country.
 
         Infers country from customer name patterns.
+        Returns sparkline data, top customers, and trend metrics per country.
         """
         today = date.today()
         current_start = today - timedelta(days=period_days)
@@ -403,13 +404,16 @@ class TrendService:
             "customer_normalized, week_start, quantity_m2, total_price_usd"
         ).gte("week_start", previous_start.isoformat()).execute()
 
-        # Aggregate by country
+        # Aggregate by country with enhanced tracking
         country_data: Dict[str, Dict] = defaultdict(lambda: {
             "current_revenue": Decimal("0"),
             "current_volume": Decimal("0"),
             "previous_revenue": Decimal("0"),
+            "previous_volume": Decimal("0"),
             "customers": set(),
             "orders": 0,
+            "sales_by_date": [],  # For sparkline: List[Tuple[date, Decimal]]
+            "customer_revenues": defaultdict(Decimal),  # For top_customers
         })
 
         for sale in sales_result.data:
@@ -434,23 +438,66 @@ class TrendService:
             if not country_code:
                 country_code = "OTHER"
 
+            # Track data for sparkline (all periods)
+            country_data[country_code]["sales_by_date"].append((week_start, qty))
+
             if week_start >= current_start:
                 country_data[country_code]["current_revenue"] += revenue
                 country_data[country_code]["current_volume"] += qty
                 country_data[country_code]["customers"].add(customer)
                 country_data[country_code]["orders"] += 1
+                # Track customer revenues for top_customers
+                country_data[country_code]["customer_revenues"][customer] += revenue
             elif week_start >= previous_start:
                 country_data[country_code]["previous_revenue"] += revenue
+                country_data[country_code]["previous_volume"] += qty
 
         # Calculate total revenue for share calculation
         total_revenue = sum(d["current_revenue"] for d in country_data.values())
         total_previous = sum(d["previous_revenue"] for d in country_data.values())
 
-        # Build country breakdowns
+        # Build country breakdowns with enhanced trend data
         countries = []
         for code, data in country_data.items():
-            if data["current_revenue"] > 0:
+            if data["current_volume"] > 0 or data["current_revenue"] > 0:
                 share = (data["current_revenue"] / total_revenue * 100) if total_revenue > 0 else Decimal("0")
+
+                # Calculate velocity change (volume-based)
+                current_vol = data["current_volume"]
+                previous_vol = data["previous_volume"]
+                if previous_vol > 0:
+                    velocity_change_pct = ((current_vol - previous_vol) / previous_vol) * 100
+                elif current_vol > 0:
+                    velocity_change_pct = Decimal("100")
+                else:
+                    velocity_change_pct = Decimal("0")
+
+                # Classify trend direction and strength
+                direction, strength = classify_trend(velocity_change_pct)
+
+                # Calculate confidence from data consistency
+                volumes = [v for _, v in data["sales_by_date"] if v > 0]
+                if len(volumes) >= 3:
+                    cv = calculate_coefficient_of_variation(volumes)
+                    confidence = determine_confidence_level(len(volumes), cv)
+                else:
+                    confidence = ConfidenceLevel.LOW
+
+                # Generate sparkline (12 buckets over the full period)
+                sparkline = generate_sparkline(
+                    data["sales_by_date"],
+                    num_buckets=12,
+                    period_days=period_days + comparison_period_days
+                )
+
+                # Get top customers (sorted by revenue, top 5)
+                sorted_customers = sorted(
+                    data["customer_revenues"].items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:5]
+                top_customer_names = [name for name, _ in sorted_customers]
+
                 countries.append(CountryBreakdown(
                     country_code=code,
                     country_name=COUNTRY_NAMES.get(code, code),
@@ -459,6 +506,12 @@ class TrendService:
                     customer_count=len(data["customers"]),
                     order_count=data["orders"],
                     revenue_share_pct=round(share, 2),
+                    velocity_change_pct=round(velocity_change_pct, 2),
+                    direction=direction,
+                    strength=strength,
+                    confidence=confidence,
+                    top_customers=top_customer_names,
+                    sparkline=sparkline,
                 ))
 
         # Sort by revenue
