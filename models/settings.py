@@ -9,7 +9,7 @@ from pydantic import Field
 from typing import Optional
 from enum import Enum
 
-from models.base import BaseSchema, TimestampMixin
+from models.base import BaseSchema
 
 
 class SettingCategory(str, Enum):
@@ -36,7 +36,7 @@ class SettingUpdate(BaseSchema):
     )
 
 
-class SettingResponse(BaseSchema, TimestampMixin):
+class SettingResponse(BaseSchema):
     """
     Setting response with all fields.
 
