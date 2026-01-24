@@ -309,7 +309,7 @@ def get_demand_forecast(
     customer_trends = trend_service.get_customer_trends(period_days=90, comparison_period_days=90, limit=100)
 
     # Get overdue customers
-    overdue_customers = pattern_service.get_overdue_customers(min_days=1, limit=50)
+    overdue_customers = pattern_service.get_overdue_customers(min_days_overdue=1, limit=50)
 
     # Build customers due soon list (overdue 0-60 days or due within 14 days)
     customers_due_soon: list[CustomerDue] = []
@@ -324,12 +324,12 @@ def get_demand_forecast(
 
     for customer in customer_trends:
         # Skip if no pattern data
-        if not customer.avg_gap_days or customer.order_count < 2:
+        if not customer.avg_days_between_orders or customer.order_count < 2:
             continue
 
         days_overdue = customer.days_overdue
-        avg_order_m2 = customer.avg_order_m2
-        avg_order_usd = customer.avg_order_revenue_usd
+        avg_order_m2 = customer.total_volume_m2 / customer.order_count if customer.order_count > 0 else Decimal("0")
+        avg_order_usd = customer.avg_order_value_usd
 
         # Determine if customer is due soon (within lead time window)
         is_due_soon = days_overdue >= -14  # Due within 14 days OR overdue
@@ -356,16 +356,18 @@ def get_demand_forecast(
                     product_pattern_demand[prod.sku]["customers"].append(customer.customer_normalized)
 
             # Add customer to due soon list
+            expected_date_str = customer.expected_next_date.isoformat() if customer.expected_next_date else None
+            last_order_str = customer.last_purchase.isoformat() if customer.last_purchase else None
             customers_due_soon.append(CustomerDue(
                 customer_normalized=customer.customer_normalized,
                 tier=customer.tier.value,
                 days_overdue=days_overdue,
-                expected_date=customer.expected_next_date,
-                predictability=customer.predictability.value if customer.predictability else None,
+                expected_date=expected_date_str,
+                predictability=customer.predictability if customer.predictability else None,
                 avg_order_m2=round(avg_order_m2, 2),
                 avg_order_usd=round(avg_order_usd, 2),
-                last_order_date=customer.last_order_date,
-                trend_direction=customer.trend_direction.value.lower(),
+                last_order_date=last_order_str,
+                trend_direction=customer.direction.value.lower(),
                 top_products=top_prods,
             ))
 
@@ -382,13 +384,14 @@ def get_demand_forecast(
             else:
                 message = f"Atrasado {days_overdue} días. Verificar disponibilidad antes de incluir en pedido."
 
+            alert_last_order = customer.last_purchase.isoformat() if customer.last_purchase else None
             overdue_alerts.append(OverdueAlert(
                 customer_normalized=customer.customer_normalized,
                 tier=customer.tier.value,
                 days_overdue=days_overdue,
                 severity=severity,
                 avg_order_usd=round(avg_order_usd, 2),
-                last_order_date=customer.last_order_date,
+                last_order_date=alert_last_order,
                 message=message,
             ))
 
