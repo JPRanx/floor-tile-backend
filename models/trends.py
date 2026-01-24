@@ -55,6 +55,15 @@ class CustomerStatus(str, Enum):
     DORMANT = "dormant"  # No purchase in 90+ days
 
 
+class Predictability(str, Enum):
+    """Customer ordering predictability based on coefficient of variation."""
+
+    CLOCKWORK = "CLOCKWORK"      # CV < 0.3 - Very consistent ordering
+    PREDICTABLE = "PREDICTABLE"  # CV < 0.5 - Reasonably predictable
+    MODERATE = "MODERATE"        # CV < 1.0 - Some variability
+    ERRATIC = "ERRATIC"          # CV >= 1.0 - Unpredictable
+
+
 class SparklinePoint(BaseSchema):
     """Single point in a sparkline."""
 
@@ -223,6 +232,23 @@ class CustomerTrend(BaseSchema):
     avg_days_between_orders: Optional[Decimal] = Field(
         None, description="Average days between orders"
     )
+    gap_std_days: Optional[Decimal] = Field(
+        None, description="Standard deviation of days between orders"
+    )
+    coefficient_of_variation: Optional[Decimal] = Field(
+        None, description="CV = std/avg (lower = more predictable)"
+    )
+
+    # Pattern-based predictions
+    expected_next_date: Optional[date] = Field(
+        None, description="Expected next order date based on pattern"
+    )
+    days_overdue: int = Field(
+        default=0, description="Days past expected order date (0 if not overdue)"
+    )
+    predictability: Optional[str] = Field(
+        None, description="CLOCKWORK, PREDICTABLE, MODERATE, or ERRATIC"
+    )
 
     # Product preferences
     top_products: List[ProductPurchase] = Field(
@@ -262,6 +288,17 @@ class IntelligenceDashboard(BaseSchema):
     customers_active: int = Field(..., description="Active customers (30 days)")
     customers_cooling: int = Field(..., description="Cooling customers (31-90 days)")
     customers_dormant: int = Field(..., description="Dormant customers (90+ days)")
+
+    # Pattern-based overdue metrics
+    customers_overdue: int = Field(
+        default=0, description="Customers past their expected order date"
+    )
+    tier_a_overdue: int = Field(
+        default=0, description="Tier A customers overdue"
+    )
+    value_at_risk_usd: Decimal = Field(
+        default=Decimal("0"), description="Sum of avg order value for overdue customers"
+    )
 
     # Top movers
     top_growing_products: List[ProductTrend] = Field(

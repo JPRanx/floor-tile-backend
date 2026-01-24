@@ -14,6 +14,12 @@ import math
 import structlog
 
 from config import settings
+from config.shipping import (
+    CONTAINER_MAX_WEIGHT_KG,
+    CONTAINER_MAX_PALLETS,
+    DEFAULT_WEIGHT_PER_M2_KG,
+    M2_PER_PALLET as SHIPPING_M2_PER_PALLET,
+)
 from services.boat_schedule_service import get_boat_schedule_service
 from services.recommendation_service import get_recommendation_service
 from services.inventory_service import get_inventory_service
@@ -478,7 +484,7 @@ class OrderBuilderService:
         products: list[OrderBuilderProduct],
         boat_max_containers: int
     ) -> OrderBuilderSummary:
-        """Calculate order summary from selected products."""
+        """Calculate order summary from selected products with weight-based container limits."""
         # Get current warehouse level
         inventory_snapshots = self.inventory_service.get_latest()
         warehouse_current_m2 = sum(
@@ -491,7 +497,28 @@ class OrderBuilderService:
         selected = [p for p in products if p.is_selected]
         total_pallets = sum(p.selected_pallets for p in selected)
         total_m2 = Decimal(total_pallets) * M2_PER_PALLET
-        total_containers = math.ceil(total_pallets / PALLETS_PER_CONTAINER) if total_pallets > 0 else 0
+
+        # Calculate weight-based container requirements
+        # Each product may have different weight per m² (future support)
+        total_weight_kg = Decimal("0")
+        for p in selected:
+            product_m2 = Decimal(p.selected_pallets) * M2_PER_PALLET
+            weight_per_m2 = p.weight_per_m2_kg or DEFAULT_WEIGHT_PER_M2_KG
+            product_weight = product_m2 * weight_per_m2
+            total_weight_kg += product_weight
+            # Update product's total_weight_kg for UI display
+            p.total_weight_kg = product_weight
+
+        # Containers by pallet count (physical limit)
+        containers_by_pallets = math.ceil(total_pallets / PALLETS_PER_CONTAINER) if total_pallets > 0 else 0
+
+        # Containers by weight (27,500 kg limit per container)
+        containers_by_weight = math.ceil(float(total_weight_kg) / CONTAINER_MAX_WEIGHT_KG) if total_weight_kg > 0 else 0
+
+        # Total containers = max of both (weight is typically the constraint)
+        # With standard tiles: 14 pallets × 134.4 m² × 14.90 kg/m² = 28,036 kg > 27,500 kg
+        total_containers = max(containers_by_pallets, containers_by_weight)
+        weight_is_limiting = containers_by_weight > containers_by_pallets
 
         # Warehouse after delivery
         warehouse_after = warehouse_current_pallets + total_pallets
@@ -501,6 +528,12 @@ class OrderBuilderService:
             total_pallets=total_pallets,
             total_containers=total_containers,
             total_m2=total_m2,
+            # Weight-based calculations
+            total_weight_kg=round(total_weight_kg, 2),
+            containers_by_pallets=containers_by_pallets,
+            containers_by_weight=containers_by_weight,
+            weight_is_limiting=weight_is_limiting,
+            # Capacity
             boat_max_containers=boat_max_containers,
             boat_remaining_containers=max(0, boat_max_containers - total_containers),
             warehouse_current_pallets=warehouse_current_pallets,
@@ -544,7 +577,16 @@ class OrderBuilderService:
                 message=f"Exceeds boat capacity ({summary.total_containers}/{boat.max_containers} containers)"
             ))
 
-        # 4. Room for more
+        # 4. Weight is limiting factor
+        if summary.weight_is_limiting and summary.containers_by_weight > summary.containers_by_pallets:
+            extra = summary.containers_by_weight - summary.containers_by_pallets
+            alerts.append(OrderBuilderAlert(
+                type=OrderBuilderAlertType.WARNING,
+                icon="⚖️",
+                message=f"Weight adds {extra} container(s) ({summary.total_weight_kg:,.0f} kg exceeds {CONTAINER_MAX_WEIGHT_KG:,} kg limit)"
+            ))
+
+        # 5. Room for more
         if (summary.boat_remaining_containers > 0 and
             summary.warehouse_utilization_after < Decimal("90")):
             alerts.append(OrderBuilderAlert(

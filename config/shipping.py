@@ -8,9 +8,33 @@ import math
 from decimal import Decimal
 from typing import Optional
 
-# Default container weight limit in kg
-# This value should be verified with logistics and can be overridden from database
-CONTAINER_WEIGHT_LIMIT_KG = 1881
+# =============================================================================
+# CONTAINER CONSTANTS (20ft Container)
+# =============================================================================
+
+# Maximum weight per 20ft container in kg
+# This is the true constraint - weight limits before pallet count
+CONTAINER_MAX_WEIGHT_KG = 27500
+
+# Physical pallet limit per 20ft container
+CONTAINER_MAX_PALLETS = 14
+
+# Standard tile weight for 51x51 format (kg per m²)
+# From SIESA data: All products show 14.90 kg/m² uniformly
+DEFAULT_WEIGHT_PER_M2_KG = Decimal("14.90")
+
+# Standard m² per pallet
+M2_PER_PALLET = Decimal("134.4")
+
+# Weight per pallet at standard density: 134.4 m² × 14.90 kg/m² = 2002.56 kg
+WEIGHT_PER_PALLET_KG = float(M2_PER_PALLET * DEFAULT_WEIGHT_PER_M2_KG)
+
+# Maximum pallets by weight: 27500 / 2002.56 = 13.73 pallets
+# Weight is the limiting factor, not physical pallet count!
+MAX_PALLETS_BY_WEIGHT = CONTAINER_MAX_WEIGHT_KG / WEIGHT_PER_PALLET_KG
+
+# Legacy constant (deprecated - use CONTAINER_MAX_WEIGHT_KG)
+CONTAINER_WEIGHT_LIMIT_KG = CONTAINER_MAX_WEIGHT_KG
 
 
 def get_container_weight_limit(db_value: Optional[Decimal] = None) -> float:

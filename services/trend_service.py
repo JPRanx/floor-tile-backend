@@ -21,6 +21,7 @@ from models.trends import (
     CustomerTier,
     CustomerTrend,
     IntelligenceDashboard,
+    Predictability,
     ProductMixChange,
     ProductPurchase,
     ProductTrend,
@@ -707,12 +708,52 @@ class TrendService:
             order_count = len(orders)
             avg_order_value = data["total_revenue"] / order_count if order_count > 0 else Decimal("0")
 
-            # Calculate average days between orders
+            # Calculate average days between orders and pattern metrics
+            avg_days_between = None
+            gap_std_days = None
+            cv = None
+            expected_next = None
+            days_overdue_val = 0
+            predictability_val = None
+
             if order_count > 1:
-                total_days = (orders[-1] - orders[0]).days
-                avg_days_between = Decimal(str(total_days / (order_count - 1)))
-            else:
-                avg_days_between = None
+                # Calculate gaps between consecutive orders
+                gaps = []
+                for i in range(1, len(orders)):
+                    gap = (orders[i] - orders[i-1]).days
+                    gaps.append(Decimal(str(gap)))
+
+                if gaps:
+                    avg_days_between = sum(gaps) / len(gaps)
+
+                    # Calculate standard deviation
+                    if len(gaps) >= 2:
+                        variance = sum((g - avg_days_between) ** 2 for g in gaps) / len(gaps)
+                        gap_std_days = Decimal(str(math.sqrt(float(variance))))
+                    else:
+                        gap_std_days = Decimal("0")
+
+                    # Calculate coefficient of variation
+                    if avg_days_between > 0:
+                        cv = round(gap_std_days / avg_days_between, 3)
+
+                    # Calculate expected next order date
+                    expected_next = last_purchase + timedelta(days=int(avg_days_between))
+
+                    # Calculate days overdue
+                    if today > expected_next:
+                        days_overdue_val = (today - expected_next).days
+
+                    # Classify predictability
+                    if cv is not None:
+                        if cv < Decimal("0.3"):
+                            predictability_val = Predictability.CLOCKWORK.value
+                        elif cv < Decimal("0.5"):
+                            predictability_val = Predictability.PREDICTABLE.value
+                        elif cv < Decimal("1.0"):
+                            predictability_val = Predictability.MODERATE.value
+                        else:
+                            predictability_val = Predictability.ERRATIC.value
 
             # Build top products
             top_products = []
@@ -788,6 +829,11 @@ class TrendService:
                 last_purchase=last_purchase,
                 days_since_last_purchase=days_since_last,
                 avg_days_between_orders=round(avg_days_between, 2) if avg_days_between else None,
+                gap_std_days=round(gap_std_days, 2) if gap_std_days else None,
+                coefficient_of_variation=cv,
+                expected_next_date=expected_next,
+                days_overdue=days_overdue_val,
+                predictability=predictability_val,
                 top_products=top_products[:5],
                 product_mix_changes=product_mix_changes[:5],
                 direction=direction,
@@ -840,6 +886,12 @@ class TrendService:
         customers_cooling = len([t for t in customer_trends if t.status == CustomerStatus.COOLING])
         customers_dormant = len([t for t in customer_trends if t.status == CustomerStatus.DORMANT])
 
+        # Count overdue customers (pattern-based: past expected_next_date)
+        overdue_customers = [t for t in customer_trends if t.days_overdue > 0]
+        customers_overdue = len(overdue_customers)
+        tier_a_overdue = len([t for t in overdue_customers if t.tier == CustomerTier.A])
+        value_at_risk = sum(t.avg_order_value_usd for t in overdue_customers)
+
         # Top movers
         growing = sorted([t for t in product_trends if t.direction == TrendDirection.UP],
                          key=lambda t: t.velocity_change_pct, reverse=True)[:5]
@@ -859,6 +911,9 @@ class TrendService:
             customers_active=customers_active,    # Status-based: last order <= 30 days
             customers_cooling=customers_cooling,  # Status-based: last order 31-90 days
             customers_dormant=customers_dormant,  # Status-based: last order > 90 days
+            customers_overdue=customers_overdue,  # Pattern-based: past expected order date
+            tier_a_overdue=tier_a_overdue,        # High-value customers overdue
+            value_at_risk_usd=round(value_at_risk, 2),  # Sum of avg order value for overdue
             top_growing_products=growing,
             top_declining_products=declining,
             top_customers=customer_trends[:5],

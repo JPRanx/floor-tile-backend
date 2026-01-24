@@ -19,12 +19,21 @@ from models.order_builder import (
     OrderBuilderResponse,
     ConfirmOrderRequest,
     ConfirmOrderResponse,
+    DemandForecastResponse,
+    CustomerDue,
+    CustomerProduct,
+    OverdueAlert,
+    OverdueSeverity,
+    ProductDemand,
 )
 from models.factory_order import FactoryOrderCreate, FactoryOrderItemCreate
 from services.order_builder_service import get_order_builder_service
 from services.export_service import get_export_service, MONTHS_ES
 from services.factory_order_service import get_factory_order_service
+from services.customer_pattern_service import get_customer_pattern_service
+from services.trend_service import get_trend_service
 from exceptions import FactoryOrderPVExistsError, DatabaseError
+from collections import defaultdict
 
 logger = structlog.get_logger(__name__)
 
@@ -249,4 +258,185 @@ def export_order(request: ExportOrderRequest) -> StreamingResponse:
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"'
         }
+    )
+
+
+@router.get("/demand-forecast", response_model=DemandForecastResponse)
+def get_demand_forecast(
+    boat_id: Optional[str] = Query(
+        None,
+        description="Specific boat ID. If not provided, uses next available boat."
+    ),
+) -> DemandForecastResponse:
+    """
+    Get demand forecast combining velocity and customer patterns.
+
+    Returns:
+    - velocity_based_demand_m2: Traditional demand based on current velocity × lead time
+    - pattern_based_demand_m2: Demand based on customers expected to order
+    - customers_due_soon: Customers with patterns suggesting imminent orders
+    - overdue_alerts: Severely overdue customers (call before ordering)
+    - demand_by_product: Product-level demand breakdown
+    """
+    logger.info("demand_forecast_request", boat_id=boat_id)
+
+    # Get order builder data for velocity-based demand and boat info
+    order_builder_service = get_order_builder_service()
+    order_data = order_builder_service.get_order_builder(boat_id=boat_id, mode=OrderBuilderMode.STANDARD)
+
+    lead_time_days = order_data.boat.days_until_departure + 30  # +30 for transit
+
+    # Calculate velocity-based demand (sum of all coverage gaps)
+    velocity_demand = Decimal("0")
+    product_velocity: dict[str, Decimal] = {}
+
+    all_products = (
+        order_data.high_priority +
+        order_data.consider +
+        order_data.well_covered +
+        order_data.your_call
+    )
+
+    for product in all_products:
+        velocity_demand += product.total_demand_m2
+        product_velocity[product.sku] = product.total_demand_m2
+
+    # Get customer patterns and trends
+    pattern_service = get_customer_pattern_service()
+    trend_service = get_trend_service()
+
+    # Get customer trends (includes pattern data and top_products)
+    customer_trends = trend_service.get_customer_trends(period_days=90, comparison_period_days=90, limit=100)
+
+    # Get overdue customers
+    overdue_customers = pattern_service.get_overdue_customers(min_days=1, limit=50)
+
+    # Build customers due soon list (overdue 0-60 days or due within 14 days)
+    customers_due_soon: list[CustomerDue] = []
+    overdue_alerts: list[OverdueAlert] = []
+    pattern_demand = Decimal("0")
+
+    # Aggregate demand by product from customer patterns
+    product_pattern_demand: dict[str, dict] = defaultdict(lambda: {
+        "m2": Decimal("0"),
+        "customers": [],
+    })
+
+    for customer in customer_trends:
+        # Skip if no pattern data
+        if not customer.avg_gap_days or customer.order_count < 2:
+            continue
+
+        days_overdue = customer.days_overdue
+        avg_order_m2 = customer.avg_order_m2
+        avg_order_usd = customer.avg_order_revenue_usd
+
+        # Determine if customer is due soon (within lead time window)
+        is_due_soon = days_overdue >= -14  # Due within 14 days OR overdue
+
+        if is_due_soon:
+            # Build top products list
+            top_prods: list[CustomerProduct] = []
+            total_product_m2 = sum(p.total_m2 for p in customer.top_products[:5])
+
+            for prod in customer.top_products[:5]:
+                share = (prod.total_m2 / total_product_m2 * 100) if total_product_m2 > 0 else Decimal("0")
+                avg_per_order = prod.total_m2 / customer.order_count if customer.order_count > 0 else Decimal("0")
+
+                top_prods.append(CustomerProduct(
+                    sku=prod.sku,
+                    avg_m2_per_order=round(avg_per_order, 2),
+                    purchase_count=prod.purchase_count,
+                    share_pct=round(share, 2),
+                ))
+
+                # Add to product pattern demand if customer is overdue or due within window
+                if days_overdue >= 0:  # Currently overdue - likely to order
+                    product_pattern_demand[prod.sku]["m2"] += avg_per_order
+                    product_pattern_demand[prod.sku]["customers"].append(customer.customer_normalized)
+
+            # Add customer to due soon list
+            customers_due_soon.append(CustomerDue(
+                customer_normalized=customer.customer_normalized,
+                tier=customer.tier.value,
+                days_overdue=days_overdue,
+                expected_date=customer.expected_next_date,
+                predictability=customer.predictability.value if customer.predictability else None,
+                avg_order_m2=round(avg_order_m2, 2),
+                avg_order_usd=round(avg_order_usd, 2),
+                last_order_date=customer.last_order_date,
+                trend_direction=customer.trend_direction.value.lower(),
+                top_products=top_prods,
+            ))
+
+            # Add to pattern demand
+            if days_overdue >= 0:
+                pattern_demand += avg_order_m2
+
+        # Check for severely overdue (need to call before ordering)
+        if days_overdue >= 60:  # At least 60 days overdue
+            severity = OverdueSeverity.CRITICAL if days_overdue >= 180 else OverdueSeverity.WARNING
+
+            if severity == OverdueSeverity.CRITICAL:
+                message = f"Sin órdenes hace {days_overdue} días. Llamar para confirmar si sigue activo."
+            else:
+                message = f"Atrasado {days_overdue} días. Verificar disponibilidad antes de incluir en pedido."
+
+            overdue_alerts.append(OverdueAlert(
+                customer_normalized=customer.customer_normalized,
+                tier=customer.tier.value,
+                days_overdue=days_overdue,
+                severity=severity,
+                avg_order_usd=round(avg_order_usd, 2),
+                last_order_date=customer.last_order_date,
+                message=message,
+            ))
+
+    # Sort customers due soon by days_overdue descending (most overdue first)
+    customers_due_soon.sort(key=lambda c: c.days_overdue, reverse=True)
+
+    # Sort overdue alerts by days_overdue descending
+    overdue_alerts.sort(key=lambda a: a.days_overdue, reverse=True)
+
+    # Build product demand list
+    demand_by_product: list[ProductDemand] = []
+    all_skus = set(product_velocity.keys()) | set(product_pattern_demand.keys())
+
+    for sku in all_skus:
+        velocity_m2 = product_velocity.get(sku, Decimal("0"))
+        pattern_m2 = product_pattern_demand.get(sku, {"m2": Decimal("0"), "customers": []})["m2"]
+        customers = product_pattern_demand.get(sku, {"m2": Decimal("0"), "customers": []})["customers"]
+
+        recommended = max(velocity_m2, pattern_m2)
+
+        demand_by_product.append(ProductDemand(
+            sku=sku,
+            velocity_demand_m2=round(velocity_m2, 2),
+            pattern_demand_m2=round(pattern_m2, 2),
+            recommended_m2=round(recommended, 2),
+            customers_expecting=len(set(customers)),
+            customer_names=list(set(customers))[:5],  # Top 5 unique customers
+        ))
+
+    # Sort by recommended demand descending
+    demand_by_product.sort(key=lambda p: p.recommended_m2, reverse=True)
+
+    recommended_demand = max(velocity_demand, pattern_demand)
+
+    logger.info(
+        "demand_forecast_calculated",
+        velocity_demand=float(velocity_demand),
+        pattern_demand=float(pattern_demand),
+        customers_due=len(customers_due_soon),
+        overdue_alerts=len(overdue_alerts),
+    )
+
+    return DemandForecastResponse(
+        velocity_based_demand_m2=round(velocity_demand, 2),
+        pattern_based_demand_m2=round(pattern_demand, 2),
+        recommended_demand_m2=round(recommended_demand, 2),
+        lead_time_days=lead_time_days,
+        customers_due_soon=customers_due_soon[:20],  # Top 20
+        overdue_alerts=overdue_alerts[:10],  # Top 10
+        demand_by_product=demand_by_product[:20],  # Top 20 products
     )

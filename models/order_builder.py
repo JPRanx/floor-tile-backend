@@ -115,6 +115,10 @@ class OrderBuilderProduct(BaseSchema):
         None, description="How the suggestion was calculated"
     )
 
+    # Weight data (for container optimization)
+    weight_per_m2_kg: Decimal = Field(default=Decimal("14.90"), description="Weight per m² in kg")
+    total_weight_kg: Decimal = Field(default=Decimal("0"), description="Total weight for selected pallets")
+
     # Selection state (editable by user)
     is_selected: bool = Field(default=False, description="Whether product is in order")
     selected_pallets: int = Field(default=0, description="Editable quantity")
@@ -149,6 +153,12 @@ class OrderBuilderSummary(BaseSchema):
     total_pallets: int = Field(default=0)
     total_containers: int = Field(default=0)
     total_m2: Decimal = Field(default=Decimal("0"))
+
+    # Weight-based container calculation
+    total_weight_kg: Decimal = Field(default=Decimal("0"), description="Total weight of selection in kg")
+    containers_by_pallets: int = Field(default=0, description="Containers needed by pallet count")
+    containers_by_weight: int = Field(default=0, description="Containers needed by weight limit")
+    weight_is_limiting: bool = Field(default=False, description="True if weight > pallets for container calc")
 
     # Boat capacity
     boat_max_containers: int = Field(default=5)
@@ -225,3 +235,79 @@ class ConfirmOrderResponse(BaseSchema):
     total_m2: Decimal = Field(..., description="Total m² ordered")
     total_pallets: int = Field(..., description="Total pallets ordered")
     created_at: str = Field(..., description="Created timestamp")
+
+
+# ===================
+# DEMAND FORECAST (Customer Pattern Overlay)
+# ===================
+
+class OverdueSeverity(str, Enum):
+    """Severity levels for overdue customers."""
+    CRITICAL = "critical"    # 180+ days - possibly lost
+    WARNING = "warning"      # 60-180 days - at risk
+    ATTENTION = "attention"  # 14-60 days - needs follow-up
+    MINOR = "minor"          # 1-14 days - slightly overdue
+
+
+class CustomerProduct(BaseSchema):
+    """Product typically purchased by a customer."""
+    sku: str
+    avg_m2_per_order: Decimal = Field(..., description="Average m² per order for this product")
+    purchase_count: int = Field(..., description="Number of times purchased")
+    share_pct: Decimal = Field(..., description="Percentage of customer's total purchases")
+
+
+class CustomerDue(BaseSchema):
+    """Customer expected to order soon."""
+    customer_normalized: str
+    tier: str = Field(..., description="A, B, or C")
+    days_overdue: int = Field(..., description="Days past expected order date (negative = due in future)")
+    expected_date: Optional[str] = None
+    predictability: Optional[str] = None
+    avg_order_m2: Decimal = Field(..., description="Customer's average order size in m²")
+    avg_order_usd: Decimal = Field(..., description="Customer's average order value in USD")
+    last_order_date: Optional[str] = None
+    trend_direction: str = Field(default="stable", description="up, down, stable")
+    top_products: list[CustomerProduct] = Field(default_factory=list)
+
+
+class OverdueAlert(BaseSchema):
+    """Alert for severely overdue customer."""
+    customer_normalized: str
+    tier: str
+    days_overdue: int
+    severity: OverdueSeverity
+    avg_order_usd: Decimal
+    last_order_date: Optional[str] = None
+    message: str = Field(..., description="Human-readable recommendation")
+
+
+class ProductDemand(BaseSchema):
+    """Aggregated demand for a product from customer patterns."""
+    sku: str
+    velocity_demand_m2: Decimal = Field(..., description="Demand based on current velocity")
+    pattern_demand_m2: Decimal = Field(..., description="Demand based on customer patterns")
+    recommended_m2: Decimal = Field(..., description="Recommended demand (higher of two)")
+    customers_expecting: int = Field(..., description="Number of customers likely to order this")
+    customer_names: list[str] = Field(default_factory=list, description="Top customer names")
+
+
+class DemandForecastResponse(BaseSchema):
+    """Demand forecast combining velocity and customer patterns."""
+
+    # Demand estimates
+    velocity_based_demand_m2: Decimal = Field(..., description="Traditional velocity × lead time demand")
+    pattern_based_demand_m2: Decimal = Field(..., description="Sum of expected customer orders")
+    recommended_demand_m2: Decimal = Field(..., description="Recommended demand (usually higher)")
+
+    # Lead time info
+    lead_time_days: int = Field(..., description="Days until boat arrives")
+
+    # Customers due soon
+    customers_due_soon: list[CustomerDue] = Field(default_factory=list)
+
+    # Overdue alerts (for call-before-ordering)
+    overdue_alerts: list[OverdueAlert] = Field(default_factory=list)
+
+    # Demand by product
+    demand_by_product: list[ProductDemand] = Field(default_factory=list)
