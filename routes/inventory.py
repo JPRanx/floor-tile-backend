@@ -357,6 +357,50 @@ async def upload_siesa_inventory(
                 db.table("inventory_lots").insert(chunk).execute()
                 lots_created += len(chunk)
 
+        # ===================
+        # SYNC TO INVENTORY_SNAPSHOTS
+        # ===================
+        # Aggregate lots by product_id and update inventory_snapshots table
+        # This ensures Dashboard/Order Builder see correct totals
+        if lots_created > 0:
+            # Aggregate quantities by product_id from the lots we just inserted
+            product_totals: dict[str, float] = {}
+            for lot in lots_to_insert:
+                pid = lot["product_id"]
+                qty = lot["quantity_m2"]
+                if pid in product_totals:
+                    product_totals[pid] += qty
+                else:
+                    product_totals[pid] = qty
+
+            # Delete existing snapshots for this date
+            db.table("inventory_snapshots").delete().eq(
+                "snapshot_date", actual_date.isoformat()
+            ).execute()
+
+            # Insert aggregated snapshots
+            snapshots_to_insert = [
+                {
+                    "product_id": pid,
+                    "warehouse_qty": total_qty,
+                    "in_transit_qty": 0,  # SIESA is warehouse inventory only
+                    "snapshot_date": actual_date.isoformat(),
+                }
+                for pid, total_qty in product_totals.items()
+            ]
+
+            if snapshots_to_insert:
+                # Batch insert snapshots
+                for i in range(0, len(snapshots_to_insert), chunk_size):
+                    chunk = snapshots_to_insert[i:i + chunk_size]
+                    db.table("inventory_snapshots").insert(chunk).execute()
+
+            logger.info(
+                "siesa_synced_to_snapshots",
+                products_synced=len(product_totals),
+                date=actual_date.isoformat(),
+            )
+
         # Calculate container statistics
         total_weight = float(parse_result.total_weight_kg)
         containers_needed = calculate_containers_needed(total_weight, CONTAINER_WEIGHT_LIMIT_KG)
