@@ -169,8 +169,14 @@ def parse_siesa_file(
 
     # Read Excel file
     try:
-        # xlrd handles .xls files, pandas uses it automatically for .xls
-        df = pd.read_excel(file_path, engine="xlrd")
+        # Detect file format by extension
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext == ".xlsx":
+            # Modern Excel format - use openpyxl
+            df = pd.read_excel(file_path, engine="openpyxl")
+        else:
+            # Legacy .xls format - use xlrd
+            df = pd.read_excel(file_path, engine="xlrd")
         # Strip whitespace from column names (SIESA exports have trailing spaces)
         df.columns = df.columns.str.strip()
     except Exception as e:
