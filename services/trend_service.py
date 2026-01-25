@@ -135,6 +135,10 @@ def infer_country_code(customer_name: str, nit: Optional[str] = None) -> Optiona
     """
     import re
 
+    # Safety check for None
+    if not customer_name:
+        return "GT"
+
     customer_lower = customer_name.lower()
 
     # Check keywords first
@@ -418,12 +422,16 @@ class TrendService:
         })
 
         for sale in sales_result.data:
-            customer = sale.get("customer_normalized", "")
+            customer = sale.get("customer_normalized") or ""
             week_start_str = sale.get("week_start")
             qty = Decimal(str(sale.get("quantity_m2") or 0))
             revenue = Decimal(str(sale.get("total_price_usd") or 0))
 
             if not week_start_str:
+                continue
+
+            # Skip records without customer (shouldn't happen but be safe)
+            if not customer:
                 continue
 
             # Parse date
@@ -595,7 +603,7 @@ class TrendService:
         })
 
         for sale in sales_result.data:
-            customer_norm = sale.get("customer_normalized", "")
+            customer_norm = sale.get("customer_normalized") or ""
             customer_orig = sale.get("customer")
             product_id = sale.get("product_id")
             week_start_str = sale.get("week_start")
