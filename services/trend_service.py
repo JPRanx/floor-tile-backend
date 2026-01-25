@@ -266,17 +266,22 @@ class TrendService:
         ).execute()
         products_by_id = {p["id"]: p for p in products_result.data}
 
-        # Fetch current inventory
-        inventory_result = self.db.table("inventory_lots").select(
-            "product_id, quantity_m2"
-        ).execute()
+        # Fetch current inventory from canonical source (inventory_snapshots)
+        # NOTE: Changed from inventory_lots to inventory_snapshots for consistency
+        # across all services (stockout_service, recommendation_service, etc.)
+        inventory_result = self.db.table("inventory_snapshots").select(
+            "product_id, warehouse_qty, in_transit_qty, snapshot_date"
+        ).order("snapshot_date", desc=True).execute()
 
-        # Aggregate inventory by product
-        inventory_by_product: Dict[str, Decimal] = defaultdict(Decimal)
-        for lot in inventory_result.data:
-            pid = lot.get("product_id")
-            qty = Decimal(str(lot.get("quantity_m2") or 0))
-            inventory_by_product[pid] += qty
+        # Get latest snapshot per product (warehouse only for days_of_stock urgency)
+        inventory_by_product: Dict[str, Decimal] = {}
+        seen_products: set = set()
+        for snap in inventory_result.data:
+            pid = snap.get("product_id")
+            if pid and pid not in seen_products:
+                warehouse_qty = Decimal(str(snap.get("warehouse_qty") or 0))
+                inventory_by_product[pid] = warehouse_qty
+                seen_products.add(pid)
 
         # Aggregate sales by product and period
         current_sales: Dict[str, List[Tuple[date, Decimal]]] = defaultdict(list)
