@@ -2,6 +2,7 @@
 Trend calculation service for the Intelligence system.
 
 Calculates product, country, and customer trends with statistical confidence metrics.
+Uses MetricsService for days_of_stock to ensure consistency across all pages.
 """
 
 import math
@@ -13,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import structlog
 
 from config import get_supabase_client
+from services.metrics_service import get_metrics_service
 from models.trends import (
     ConfidenceLevel,
     CountryBreakdown,
@@ -266,22 +268,16 @@ class TrendService:
         ).execute()
         products_by_id = {p["id"]: p for p in products_result.data}
 
-        # Fetch current inventory from canonical source (inventory_snapshots)
-        # NOTE: Changed from inventory_lots to inventory_snapshots for consistency
-        # across all services (stockout_service, recommendation_service, etc.)
-        inventory_result = self.db.table("inventory_snapshots").select(
-            "product_id, warehouse_qty, in_transit_qty, snapshot_date"
-        ).order("snapshot_date", desc=True).execute()
+        # Get days_of_stock from MetricsService (single source of truth)
+        # This ensures Dashboard, Order Builder, and Intelligence all show the same value
+        metrics_service = get_metrics_service()
+        all_metrics = metrics_service.get_all_product_metrics()
+        metrics_by_product = {m.product_id: m for m in all_metrics}
 
-        # Get latest snapshot per product (warehouse only for days_of_stock urgency)
+        # Also get inventory for current_stock_m2 display
         inventory_by_product: Dict[str, Decimal] = {}
-        seen_products: set = set()
-        for snap in inventory_result.data:
-            pid = snap.get("product_id")
-            if pid and pid not in seen_products:
-                warehouse_qty = Decimal(str(snap.get("warehouse_qty") or 0))
-                inventory_by_product[pid] = warehouse_qty
-                seen_products.add(pid)
+        for m in all_metrics:
+            inventory_by_product[m.product_id] = m.coverage.warehouse_m2
 
         # Aggregate sales by product and period
         current_sales: Dict[str, List[Tuple[date, Decimal]]] = defaultdict(list)
@@ -350,11 +346,12 @@ class TrendService:
             # Classify trend
             direction, strength = classify_trend(velocity_change_pct)
 
-            # Calculate days of stock
+            # Get days of stock from MetricsService (single source of truth)
             current_stock = inventory_by_product.get(pid, Decimal("0"))
+            product_metrics = metrics_by_product.get(pid)
             days_of_stock = None
-            if current_velocity > 0:
-                days_of_stock = int(current_stock / current_velocity)
+            if product_metrics and product_metrics.coverage.warehouse_days is not None:
+                days_of_stock = int(product_metrics.coverage.warehouse_days)
 
             # Generate sparkline
             sparkline_data = current_sales.get(pid, []) + previous_sales.get(pid, [])

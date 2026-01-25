@@ -4,6 +4,7 @@ Stockout calculation service — Core business logic.
 Calculates days until stockout for each product based on
 inventory levels and sales velocity.
 
+Now uses MetricsService as single source of truth for coverage calculations.
 See BUILDER_BLUEPRINT.md for calculation logic.
 """
 
@@ -18,6 +19,7 @@ from services.inventory_service import get_inventory_service
 from services.sales_service import get_sales_service
 from services.product_service import get_product_service
 from services.boat_schedule_service import get_boat_schedule_service
+from services.metrics_service import get_metrics_service
 from models.base import BaseSchema
 
 logger = structlog.get_logger(__name__)
@@ -134,11 +136,8 @@ class StockoutService:
         """
         Calculate stockout status for all products.
 
-        Optimized: Uses batch queries instead of N+1 queries.
-        - 1 query for products
-        - 1 query for inventory
-        - 2 queries for sales (12-week recent + 52-week historical)
-        - 1 query for boat arrivals
+        Uses MetricsService as single source of truth for coverage calculations.
+        Adds boat-based priority classification on top.
 
         Returns:
             StockoutSummary with all product calculations
@@ -165,43 +164,54 @@ class StockoutService:
             days_to_next_departure=days_to_next_departure
         )
 
-        # Get all products (1 query)
-        products, _ = self.product_service.get_all(
-            page=1,
-            page_size=1000,
-            active_only=True
+        # Get all metrics from MetricsService (single source of truth)
+        # Uses 90-day velocity and warehouse-only for days calculation
+        metrics_service = get_metrics_service()
+        all_metrics = metrics_service.get_all_product_metrics(
+            next_boat_arrival_days=days_to_next
         )
 
-        # Get latest inventory for all products (1 query)
-        inventory_snapshots = self.inventory_service.get_latest()
-        inventory_by_product = {
-            snap.product_id: snap
-            for snap in inventory_snapshots
-        }
-
-        # Get recent sales (12 weeks) for velocity calculation
-        recent_sales_by_product = self.sales_service.get_recent_sales_all(
-            weeks=self.sales_weeks
-        )
-
-        # Get historical sales (52 weeks) for YOUR_CALL detection
-        historical_sales_by_product = self.sales_service.get_recent_sales_all(
-            weeks=settings.historical_window_weeks
-        )
-
-        # Calculate for each product using pre-fetched data
+        # Build results with boat-based priority classification
         results = []
-        for product in products:
-            result = self._calculate_with_sales(
-                product_id=product.id,
-                sku=product.sku,
-                category=product.category.value if product.category else None,
-                rotation=product.rotation.value if product.rotation else None,
-                inventory=inventory_by_product.get(product.id),
-                recent_sales_records=recent_sales_by_product.get(product.id, []),
-                historical_sales_records=historical_sales_by_product.get(product.id, []),
-                days_to_next_boat=days_to_next,
-                days_to_second_boat=days_to_second,
+        for metrics in all_metrics:
+            coverage = metrics.coverage
+
+            # Use warehouse_days from MetricsService (warehouse / 90-day velocity)
+            days_to_stockout = coverage.warehouse_days
+            stockout_date = coverage.stockout_date
+
+            # Determine status based on boat arrivals
+            if days_to_stockout is None or coverage.velocity_m2_day == 0:
+                status = StockoutStatus.YOUR_CALL
+                status_reason = "No sales velocity — needs manual review"
+            elif days_to_stockout < days_to_next:
+                status = StockoutStatus.HIGH_PRIORITY
+                status_reason = f"Stockout in {int(days_to_stockout)} days — before next boat arrives ({days_to_next} days)"
+            elif days_to_stockout < days_to_second:
+                status = StockoutStatus.CONSIDER
+                status_reason = f"Stockout in {int(days_to_stockout)} days — before second boat ({days_to_second} days)"
+            else:
+                status = StockoutStatus.WELL_COVERED
+                status_reason = f"Covered for {int(days_to_stockout)} days — beyond 2 boat cycles"
+
+            # Calculate weekly sales for compatibility
+            weekly_sales = coverage.velocity_m2_day * 7
+
+            result = ProductStockout(
+                product_id=metrics.product_id,
+                sku=metrics.sku,
+                category=metrics.category,
+                rotation=None,  # Not in metrics, keep for backwards compatibility
+                warehouse_qty=coverage.warehouse_m2,
+                in_transit_qty=coverage.in_transit_m2,
+                total_qty=coverage.warehouse_m2 + coverage.in_transit_m2,
+                avg_daily_sales=coverage.velocity_m2_day,
+                weekly_sales=round(weekly_sales, 2),
+                weeks_of_data=metrics.sample_count,
+                days_to_stockout=days_to_stockout,
+                stockout_date=stockout_date,
+                status=status,
+                status_reason=status_reason
             )
             results.append(result)
 
