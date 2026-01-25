@@ -36,6 +36,79 @@ class TrendStrength(str, Enum):
     WEAK = "weak"          # <5% change
 
 
+# ===================
+# REASONING DATA STRUCTURES
+# ===================
+
+class PrimaryFactor(str, Enum):
+    """Primary factor driving the recommendation."""
+    LOW_STOCK = "LOW_STOCK"          # Days of stock < 14
+    TRENDING_UP = "TRENDING_UP"      # Strong upward demand trend
+    OVERSTOCKED = "OVERSTOCKED"      # >180 days stock + declining
+    DECLINING = "DECLINING"          # Significant demand drop
+    NO_SALES = "NO_SALES"            # Zero velocity
+    NO_DATA = "NO_DATA"              # Insufficient data
+    STABLE = "STABLE"                # Normal levels
+
+
+class StockAnalysis(BaseSchema):
+    """Stock position analysis for reasoning."""
+    current_m2: Decimal = Field(..., description="Current warehouse stock in m²")
+    days_of_stock: Optional[Decimal] = Field(None, description="Days of stock at current velocity")
+    days_to_boat: int = Field(..., description="Days until boat arrival")
+    gap_days: Optional[Decimal] = Field(None, description="Negative = stockout before boat")
+
+
+class DemandAnalysis(BaseSchema):
+    """Demand analysis for reasoning."""
+    velocity_m2_day: Decimal = Field(..., description="Current daily velocity in m²")
+    trend_pct: Decimal = Field(default=Decimal("0"), description="Percent change in velocity")
+    trend_direction: str = Field(default="stable", description="up, down, stable")
+    sales_rank: Optional[int] = Field(None, description="Rank by sales volume (1 = top seller)")
+
+
+class QuantityReasoning(BaseSchema):
+    """Quantity calculation reasoning."""
+    target_coverage_days: int = Field(..., description="Target days of coverage")
+    m2_needed: Decimal = Field(..., description="Total m² needed for coverage")
+    m2_in_transit: Decimal = Field(default=Decimal("0"), description="m² currently in transit")
+    m2_in_stock: Decimal = Field(..., description="m² currently in warehouse")
+    m2_to_order: Decimal = Field(..., description="m² recommended to order")
+
+
+class ProductReasoning(BaseSchema):
+    """Complete reasoning for a product recommendation."""
+    primary_factor: str = Field(..., description="Main driver: LOW_STOCK, TRENDING_UP, etc.")
+    stock: StockAnalysis
+    demand: DemandAnalysis
+    quantity: QuantityReasoning
+    exclusion_reason: Optional[str] = Field(None, description="Why not recommended (if applicable)")
+
+
+class ExcludedProduct(BaseSchema):
+    """Product excluded from recommendations with reason."""
+    sku: str
+    product_name: Optional[str] = None
+    reason: str = Field(..., description="OVERSTOCKED, NO_SALES, DECLINING, NO_DATA")
+    days_of_stock: Optional[Decimal] = None
+    trend_pct: Optional[Decimal] = None
+    last_sale_days_ago: Optional[int] = None
+
+
+class OrderSummaryReasoning(BaseSchema):
+    """Order-level reasoning and strategy summary."""
+    strategy: str = Field(..., description="STOCKOUT_PREVENTION, DEMAND_CAPTURE, BALANCED")
+    days_to_boat: int = Field(..., description="Days until boat departure")
+    boat_date: str = Field(..., description="Boat departure date")
+    boat_name: str = Field(..., description="Boat/vessel name")
+    critical_count: int = Field(default=0, description="Products with critical urgency")
+    urgent_count: int = Field(default=0, description="Products with urgent priority")
+    stable_count: int = Field(default=0, description="Products with stable stock")
+    excluded_count: int = Field(default=0, description="Products excluded from recommendations")
+    key_insights: list[str] = Field(default_factory=list, description="Top insights about the order")
+    excluded_products: list[ExcludedProduct] = Field(default_factory=list, description="Products not recommended")
+
+
 class CalculationBreakdown(BaseSchema):
     """Breakdown of how suggested quantity was calculated."""
 
@@ -115,6 +188,11 @@ class OrderBuilderProduct(BaseSchema):
         None, description="How the suggestion was calculated"
     )
 
+    # Reasoning (explains WHY this recommendation)
+    reasoning: Optional[ProductReasoning] = Field(
+        None, description="Detailed reasoning for this recommendation"
+    )
+
     # Weight data (for container optimization)
     weight_per_m2_kg: Decimal = Field(default=Decimal("14.90"), description="Weight per m² in kg")
     total_weight_kg: Decimal = Field(default=Decimal("0"), description="Total weight for selected pallets")
@@ -192,6 +270,11 @@ class OrderBuilderResponse(BaseSchema):
 
     # Summary
     summary: OrderBuilderSummary
+
+    # Reasoning (explains WHY this order strategy)
+    summary_reasoning: Optional[OrderSummaryReasoning] = Field(
+        None, description="Order-level reasoning and strategy explanation"
+    )
 
 
 # ===================

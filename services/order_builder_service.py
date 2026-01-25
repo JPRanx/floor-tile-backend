@@ -34,6 +34,14 @@ from models.order_builder import (
     OrderBuilderResponse,
     CalculationBreakdown,
     Urgency,
+    # Reasoning models
+    ProductReasoning,
+    StockAnalysis,
+    DemandAnalysis,
+    QuantityReasoning,
+    OrderSummaryReasoning,
+    ExcludedProduct,
+    PrimaryFactor,
 )
 from models.recommendation import RecommendationPriority
 
@@ -131,6 +139,9 @@ class OrderBuilderService:
         alerts = self._generate_alerts(all_products, summary, boat)
         summary.alerts = alerts
 
+        # Step 7: Generate summary reasoning
+        summary_reasoning = self._generate_summary_reasoning(all_products, boat, summary)
+
         # Re-group after mode application
         high_priority = [p for p in all_products if p.priority == "HIGH_PRIORITY"]
         consider = [p for p in all_products if p.priority == "CONSIDER"]
@@ -146,6 +157,7 @@ class OrderBuilderService:
             well_covered=well_covered,
             your_call=your_call,
             summary=summary,
+            summary_reasoning=summary_reasoning,
         )
 
         logger.info(
@@ -280,6 +292,44 @@ class OrderBuilderService:
 
         return adjustment_m2, adjustment_pct * 100  # Return as percentage
 
+    def _determine_primary_factor(
+        self,
+        days_of_stock: Optional[int],
+        trend_pct: Decimal,
+        velocity: Decimal,
+        days_to_boat: int
+    ) -> str:
+        """
+        Determine the primary factor driving this product's recommendation.
+
+        Returns one of: LOW_STOCK, TRENDING_UP, OVERSTOCKED, DECLINING, NO_SALES, NO_DATA, STABLE
+        """
+        # No sales data
+        if velocity is None or velocity == 0:
+            return PrimaryFactor.NO_SALES.value
+
+        # No stock data
+        if days_of_stock is None:
+            return PrimaryFactor.NO_DATA.value
+
+        # Overstocked with declining demand
+        if days_of_stock > 180 and trend_pct < -25:
+            return PrimaryFactor.OVERSTOCKED.value
+
+        # Significant demand decline even with moderate stock
+        if days_of_stock > 90 and trend_pct < -50:
+            return PrimaryFactor.DECLINING.value
+
+        # Low stock - will stockout before boat or within 14 days
+        if days_of_stock < 14 or days_of_stock < days_to_boat:
+            return PrimaryFactor.LOW_STOCK.value
+
+        # Strong upward trend
+        if trend_pct > 30:
+            return PrimaryFactor.TRENDING_UP.value
+
+        return PrimaryFactor.STABLE.value
+
     def _group_products_by_priority(
         self,
         recommendations: list,
@@ -350,6 +400,56 @@ class OrderBuilderService:
             coverage_gap_pallets = max(0, rec.coverage_gap_pallets or 0)
             suggested = final_suggestion_pallets if daily_velocity_m2 > 0 else coverage_gap_pallets
 
+            # Determine primary factor for reasoning
+            primary_factor = self._determine_primary_factor(
+                days_of_stock=days_of_stock,
+                trend_pct=velocity_change_pct,
+                velocity=daily_velocity_m2,
+                days_to_boat=days_to_cover
+            )
+
+            # Calculate gap days (negative = stockout before boat)
+            gap_days = None
+            if days_of_stock is not None:
+                gap_days = Decimal(str(days_of_stock)) - Decimal(str(days_to_cover))
+
+            # Determine exclusion reason if suggested is 0
+            exclusion_reason = None
+            if suggested == 0:
+                if primary_factor == PrimaryFactor.OVERSTOCKED.value:
+                    exclusion_reason = "OVERSTOCKED"
+                elif primary_factor == PrimaryFactor.NO_SALES.value:
+                    exclusion_reason = "NO_SALES"
+                elif primary_factor == PrimaryFactor.DECLINING.value:
+                    exclusion_reason = "DECLINING"
+                elif primary_factor == PrimaryFactor.NO_DATA.value:
+                    exclusion_reason = "NO_DATA"
+
+            # Build reasoning object
+            reasoning = ProductReasoning(
+                primary_factor=primary_factor,
+                stock=StockAnalysis(
+                    current_m2=minus_current,
+                    days_of_stock=Decimal(str(days_of_stock)) if days_of_stock is not None else None,
+                    days_to_boat=days_to_cover,
+                    gap_days=gap_days,
+                ),
+                demand=DemandAnalysis(
+                    velocity_m2_day=daily_velocity_m2,
+                    trend_pct=velocity_change_pct,
+                    trend_direction=direction,
+                    sales_rank=None,  # Will be populated later with ranking
+                ),
+                quantity=QuantityReasoning(
+                    target_coverage_days=total_coverage_days,
+                    m2_needed=round(adjusted_quantity_m2, 2),
+                    m2_in_transit=minus_incoming,
+                    m2_in_stock=minus_current,
+                    m2_to_order=round(final_suggestion_m2, 2),
+                ),
+                exclusion_reason=exclusion_reason,
+            )
+
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
@@ -378,6 +478,8 @@ class OrderBuilderService:
                 velocity_change_pct=velocity_change_pct,
                 daily_velocity_m2=daily_velocity_m2,
                 calculation_breakdown=breakdown if daily_velocity_m2 > 0 else None,
+                # Reasoning
+                reasoning=reasoning,
                 # Selection
                 is_selected=False,
                 selected_pallets=0,
@@ -625,6 +727,121 @@ class OrderBuilderService:
 
         return alerts
 
+    def _generate_summary_reasoning(
+        self,
+        all_products: list[OrderBuilderProduct],
+        boat: OrderBuilderBoat,
+        summary: OrderBuilderSummary
+    ) -> OrderSummaryReasoning:
+        """
+        Generate order-level reasoning with strategy, counts, insights, and excluded products.
+        """
+        # Count by urgency
+        critical_count = sum(1 for p in all_products if p.urgency == "critical")
+        urgent_count = sum(1 for p in all_products if p.urgency == "urgent")
+        stable_count = sum(1 for p in all_products if p.urgency in ["ok", "soon"])
+
+        # Build excluded products list (products with suggested_pallets = 0)
+        excluded_products = []
+        for p in all_products:
+            if p.suggested_pallets == 0 and p.reasoning and p.reasoning.exclusion_reason:
+                excluded_products.append(ExcludedProduct(
+                    sku=p.sku,
+                    product_name=p.description,
+                    reason=p.reasoning.exclusion_reason,
+                    days_of_stock=p.reasoning.stock.days_of_stock,
+                    trend_pct=p.reasoning.demand.trend_pct,
+                    last_sale_days_ago=None,  # Could be populated from trend data
+                ))
+
+        excluded_count = len(excluded_products)
+
+        # Determine overall strategy
+        if critical_count > 0:
+            strategy = "STOCKOUT_PREVENTION"
+        elif urgent_count > 0:
+            strategy = "DEMAND_CAPTURE"
+        else:
+            strategy = "BALANCED"
+
+        # Generate key insights
+        key_insights = []
+
+        # Insight 1: Stockout risk count
+        stockout_risk_count = sum(
+            1 for p in all_products
+            if p.reasoning and p.reasoning.stock.gap_days is not None
+            and p.reasoning.stock.gap_days < 0
+        )
+        if stockout_risk_count > 0:
+            key_insights.append(
+                f"{stockout_risk_count} product(s) will stockout before boat arrives"
+            )
+
+        # Insight 2: Highest risk product
+        products_with_stock = [
+            p for p in all_products
+            if p.reasoning and p.reasoning.stock.days_of_stock is not None
+        ]
+        if products_with_stock:
+            most_critical = min(
+                products_with_stock,
+                key=lambda p: p.reasoning.stock.days_of_stock
+            )
+            days = most_critical.reasoning.stock.days_of_stock
+            key_insights.append(
+                f"{most_critical.sku} is highest-risk ({days:.0f} days of stock)"
+            )
+
+        # Insight 3: Container utilization
+        if summary.total_containers > 0:
+            weight_util = float(summary.total_weight_kg) / (summary.total_containers * CONTAINER_MAX_WEIGHT_KG) * 100
+            key_insights.append(
+                f"Container weight utilization: {weight_util:.0f}%"
+            )
+
+        # Insight 4: Excluded products summary
+        if excluded_count > 0:
+            overstocked = sum(1 for e in excluded_products if e.reason == "OVERSTOCKED")
+            no_sales = sum(1 for e in excluded_products if e.reason == "NO_SALES")
+            declining = sum(1 for e in excluded_products if e.reason == "DECLINING")
+
+            reasons = []
+            if overstocked > 0:
+                reasons.append(f"{overstocked} overstocked")
+            if no_sales > 0:
+                reasons.append(f"{no_sales} with no sales")
+            if declining > 0:
+                reasons.append(f"{declining} with declining demand")
+
+            if reasons:
+                key_insights.append(
+                    f"{excluded_count} product(s) excluded: {', '.join(reasons)}"
+                )
+
+        # Insight 5: Trending products
+        trending_up_count = sum(
+            1 for p in all_products
+            if p.reasoning and p.reasoning.primary_factor == PrimaryFactor.TRENDING_UP.value
+        )
+        if trending_up_count > 0:
+            key_insights.append(
+                f"{trending_up_count} product(s) with strong upward demand trend"
+            )
+
+        return OrderSummaryReasoning(
+            strategy=strategy,
+            days_to_boat=boat.days_until_departure,
+            boat_date=boat.departure_date.isoformat(),
+            boat_name=boat.name,
+            critical_count=critical_count,
+            urgent_count=urgent_count,
+            stable_count=stable_count,
+            excluded_count=excluded_count,
+            key_insights=key_insights[:5],  # Top 5 insights
+            excluded_products=excluded_products[:10],  # Top 10 excluded
+        )
+
     def _empty_response(self, mode: OrderBuilderMode) -> OrderBuilderResponse:
         """Return empty response when no boats available."""
         today = date.today()
@@ -649,6 +866,19 @@ class OrderBuilderService:
             ]
         )
 
+        empty_reasoning = OrderSummaryReasoning(
+            strategy="BALANCED",
+            days_to_boat=0,
+            boat_date=today.isoformat(),
+            boat_name="No boats scheduled",
+            critical_count=0,
+            urgent_count=0,
+            stable_count=0,
+            excluded_count=0,
+            key_insights=["No boat schedule available. Upload a boat schedule to get recommendations."],
+            excluded_products=[],
+        )
+
         return OrderBuilderResponse(
             boat=dummy_boat,
             next_boat=None,
@@ -658,6 +888,7 @@ class OrderBuilderService:
             well_covered=[],
             your_call=[],
             summary=summary,
+            summary_reasoning=empty_reasoning,
         )
 
 
