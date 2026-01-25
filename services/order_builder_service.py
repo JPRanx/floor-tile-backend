@@ -11,6 +11,7 @@ from typing import Optional
 from decimal import Decimal
 from datetime import date, timedelta
 import math
+import time
 import structlog
 
 from config import settings
@@ -86,6 +87,8 @@ class OrderBuilderService:
         Returns:
             OrderBuilderResponse with all data needed for the UI
         """
+        timings = {}
+        t0 = time.time()
         logger.info(
             "getting_order_builder",
             boat_id=boat_id,
@@ -94,6 +97,7 @@ class OrderBuilderService:
 
         # Step 1: Get boat info
         boat, next_boat = self._get_boats(boat_id)
+        timings["1_boats"] = round(time.time() - t0, 2)
 
         # Default lead time for "no boat" mode (45 days)
         DEFAULT_LEAD_TIME_DAYS = 45
@@ -117,17 +121,25 @@ class OrderBuilderService:
             )
 
         # Step 2: Get recommendations (has coverage gap, confidence, priority)
+        t1 = time.time()
         recommendations = self.recommendation_service.get_recommendations()
+        timings["2_recommendations"] = round(time.time() - t1, 2)
 
         # Step 2b: Get trend data for products
+        t2 = time.time()
         trend_data = self._get_product_trends()
+        timings["3_trends"] = round(time.time() - t2, 2)
 
         # Step 3: Convert to OrderBuilderProducts grouped by priority
+        t3 = time.time()
         products_by_priority = self._group_products_by_priority(
             recommendations.recommendations,
             boat.days_until_departure,
             trend_data
         )
+        timings["4_grouping"] = round(time.time() - t3, 2)
+
+        logger.info("order_builder_timings", **timings)
 
         # Step 4: Apply mode logic (pre-select products)
         all_products = self._apply_mode(products_by_priority, mode, boat.max_containers)

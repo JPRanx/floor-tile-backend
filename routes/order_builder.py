@@ -9,6 +9,7 @@ POST /api/order-builder/export — Export order to factory Excel format.
 from datetime import date, timedelta
 from typing import Optional, List
 from decimal import Decimal
+import time
 from fastapi import APIRouter, Query, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -82,6 +83,7 @@ def get_order_builder(
     - standard: 4 containers (56 pallets) — HIGH_PRIORITY + CONSIDER
     - optimal: 5 containers (70 pallets) — fill boat with WELL_COVERED
     """
+    start_time = time.time()
     logger.info(
         "order_builder_request",
         boat_id=boat_id,
@@ -89,7 +91,11 @@ def get_order_builder(
     )
 
     service = get_order_builder_service()
-    return service.get_order_builder(boat_id=boat_id, mode=mode)
+    result = service.get_order_builder(boat_id=boat_id, mode=mode)
+
+    elapsed = time.time() - start_time
+    logger.info("order_builder_complete", elapsed_seconds=round(elapsed, 2))
+    return result
 
 
 @router.post("/confirm", response_model=ConfirmOrderResponse, status_code=status.HTTP_201_CREATED)
@@ -278,11 +284,15 @@ def get_demand_forecast(
     - overdue_alerts: Severely overdue customers (call before ordering)
     - demand_by_product: Product-level demand breakdown
     """
+    start_time = time.time()
+    timings = {}
     logger.info("demand_forecast_request", boat_id=boat_id)
 
     # Get order builder data for velocity-based demand and boat info
+    t1 = time.time()
     order_builder_service = get_order_builder_service()
     order_data = order_builder_service.get_order_builder(boat_id=boat_id, mode=OrderBuilderMode.STANDARD)
+    timings["order_builder"] = round(time.time() - t1, 2)
 
     lead_time_days = order_data.boat.days_until_departure + 30  # +30 for transit
 
@@ -302,11 +312,15 @@ def get_demand_forecast(
         product_velocity[product.sku] = product.total_demand_m2
 
     # Get customer patterns and trends
+    t2 = time.time()
     pattern_service = get_customer_pattern_service()
     trend_service = get_trend_service()
 
     # Get customer trends (includes pattern data and top_products)
     customer_trends = trend_service.get_customer_trends(period_days=90, comparison_period_days=90, limit=100)
+    timings["customer_trends"] = round(time.time() - t2, 2)
+
+    logger.info("demand_forecast_timings", **timings, total=round(time.time() - start_time, 2))
 
     # Get overdue customers
     overdue_customers = pattern_service.get_overdue_customers(min_days_overdue=1, limit=50)
