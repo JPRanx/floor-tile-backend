@@ -1331,25 +1331,25 @@ class OrderBuilderService:
             constraint_sentence = "No constraints — all recommended products fit."
 
         # === CUSTOMER SENTENCE ===
-        # Who's waiting?
-        customers_with_demand = set()
-        for p in all_products:
-            if p.customers_expecting_count and p.customers_expecting_count > 0:
-                customers_with_demand.add(p.sku)
+        # Who's waiting? Count products with customer demand signals
+        products_with_customer_demand = sum(
+            1 for p in all_products
+            if p.customers_expecting_count and p.customers_expecting_count > 0
+        )
 
-        customers_expecting = len(customers_with_demand)
-
-        if customers_expecting >= 3:
+        if products_with_customer_demand >= 3:
             customer_sentence = (
-                f"{customers_expecting} customers expected to order soon "
+                f"{products_with_customer_demand} products have customers expected to order soon "
                 f"based on purchase patterns."
             )
-        elif customers_expecting > 0:
+        elif products_with_customer_demand > 0:
             customer_sentence = (
-                f"{customers_expecting} customer(s) expected to order soon."
+                f"{products_with_customer_demand} product(s) with customers expected to order soon."
             )
         else:
             customer_sentence = None  # No customer signal to report
+
+        customers_expecting = products_with_customer_demand  # For the badge
 
         return OrderReasoning(
             strategy_sentence=strategy_sentence,
