@@ -20,6 +20,8 @@ from config.shipping import (
     CONTAINER_MAX_PALLETS,
     DEFAULT_WEIGHT_PER_M2_KG,
     M2_PER_PALLET as SHIPPING_M2_PER_PALLET,
+    WAREHOUSE_BUFFER_DAYS,
+    SAFETY_STOCK_DAYS,
 )
 from services.boat_schedule_service import get_boat_schedule_service
 from services.recommendation_service import get_recommendation_service
@@ -108,6 +110,7 @@ class OrderBuilderService:
             today = date.today()
             default_departure = today + timedelta(days=DEFAULT_LEAD_TIME_DAYS)
             default_arrival = default_departure + timedelta(days=25)  # ~25 days transit
+            default_warehouse = DEFAULT_LEAD_TIME_DAYS + 25 + WAREHOUSE_BUFFER_DAYS  # departure + transit + buffer
 
             boat = OrderBuilderBoat(
                 boat_id="",
@@ -115,6 +118,8 @@ class OrderBuilderService:
                 departure_date=default_departure,
                 arrival_date=default_arrival,
                 days_until_departure=DEFAULT_LEAD_TIME_DAYS,
+                days_until_arrival=DEFAULT_LEAD_TIME_DAYS + 25,  # departure + transit
+                days_until_warehouse=default_warehouse,
                 booking_deadline=today,
                 days_until_deadline=0,
                 max_containers=5,
@@ -134,7 +139,7 @@ class OrderBuilderService:
         t3 = time.time()
         products_by_priority = self._group_products_by_priority(
             recommendations.recommendations,
-            boat.days_until_departure,
+            boat.days_until_warehouse,  # Use warehouse arrival (not departure!)
             trend_data
         )
         timings["4_grouping"] = round(time.time() - t3, 2)
@@ -224,7 +229,12 @@ class OrderBuilderService:
     def _to_order_builder_boat(self, boat_data, today: date) -> OrderBuilderBoat:
         """Convert BoatScheduleResponse to OrderBuilderBoat."""
         days_until_departure = (boat_data.departure_date - today).days
+        days_until_arrival = (boat_data.arrival_date - today).days
         days_until_deadline = (boat_data.booking_deadline - today).days
+
+        # days_until_warehouse = arrival + port buffer + trucking
+        # This is the TRUE lead time for coverage calculation
+        days_until_warehouse = days_until_arrival + WAREHOUSE_BUFFER_DAYS
 
         return OrderBuilderBoat(
             boat_id=boat_data.id,
@@ -232,6 +242,8 @@ class OrderBuilderService:
             departure_date=boat_data.departure_date,
             arrival_date=boat_data.arrival_date,
             days_until_departure=max(0, days_until_departure),
+            days_until_arrival=max(0, days_until_arrival),
+            days_until_warehouse=max(0, days_until_warehouse),
             booking_deadline=boat_data.booking_deadline,
             days_until_deadline=max(0, days_until_deadline),
             max_containers=5,  # Default, could be configurable per boat
@@ -356,7 +368,8 @@ class OrderBuilderService:
             "YOUR_CALL": [],
         }
 
-        SAFETY_STOCK_DAYS = 14
+        # SAFETY_STOCK_DAYS imported from config.shipping (default: 7)
+        # Reduced from 14 because lead time now includes port + trucking buffer
 
         for rec in recommendations:
             # Get trend data for this product
@@ -863,6 +876,8 @@ class OrderBuilderService:
             departure_date=today,
             arrival_date=today,
             days_until_departure=0,
+            days_until_arrival=0,
+            days_until_warehouse=0,
             booking_deadline=today,
             days_until_deadline=0,
             max_containers=5,

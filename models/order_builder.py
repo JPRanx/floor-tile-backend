@@ -210,6 +210,8 @@ class OrderBuilderBoat(BaseSchema):
     departure_date: date
     arrival_date: date
     days_until_departure: int
+    days_until_arrival: int = Field(..., description="Days until boat arrives at port")
+    days_until_warehouse: int = Field(..., description="Days until product in warehouse (arrival + port + trucking)")
     booking_deadline: date
     days_until_deadline: int
     max_containers: int = Field(default=5, description="3-5, default 5")

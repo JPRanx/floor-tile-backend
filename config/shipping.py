@@ -9,6 +9,25 @@ from decimal import Decimal
 from typing import Optional
 
 # =============================================================================
+# LEAD TIME CONSTANTS
+# =============================================================================
+# These define how many days until product is IN WAREHOUSE (not just at port)
+
+# Days container typically sits at port awaiting customs/clearance
+PORT_BUFFER_DAYS = 5
+
+# Days from port to warehouse (trucking)
+TRUCKING_DAYS = 1
+
+# Total buffer beyond boat arrival: PORT_BUFFER_DAYS + TRUCKING_DAYS = 6 days
+WAREHOUSE_BUFFER_DAYS = PORT_BUFFER_DAYS + TRUCKING_DAYS
+
+# Safety stock buffer (days of extra coverage beyond lead time)
+# Reduced from 14 because lead time now includes port + trucking buffer
+SAFETY_STOCK_DAYS = 7
+
+
+# =============================================================================
 # CONTAINER CONSTANTS (20ft Container)
 # =============================================================================
 
