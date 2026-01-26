@@ -21,12 +21,18 @@ from config.shipping import (
     DEFAULT_WEIGHT_PER_M2_KG,
     M2_PER_PALLET as SHIPPING_M2_PER_PALLET,
     WAREHOUSE_BUFFER_DAYS,
-    SAFETY_STOCK_DAYS,
+    ORDERING_CYCLE_DAYS,
+    LIQUIDATION_DECLINING_TREND_PCT_MAX,
+    LIQUIDATION_DECLINING_DAYS_MIN,
+    LIQUIDATION_NO_SALES_DAYS,
+    LIQUIDATION_EXTREME_DAYS_MIN,
 )
 from services.boat_schedule_service import get_boat_schedule_service
 from services.recommendation_service import get_recommendation_service
 from services.inventory_service import get_inventory_service
 from services.trend_service import get_trend_service
+from services.customer_pattern_service import get_customer_pattern_service
+from services.production_schedule_service import get_production_schedule_service
 from models.order_builder import (
     OrderBuilderMode,
     OrderBuilderProduct,
@@ -36,6 +42,8 @@ from models.order_builder import (
     OrderBuilderSummary,
     OrderBuilderResponse,
     CalculationBreakdown,
+    ConstraintAnalysis,
+    LiquidationCandidate,
     Urgency,
     # Reasoning models
     ProductReasoning,
@@ -73,6 +81,8 @@ class OrderBuilderService:
         self.recommendation_service = get_recommendation_service()
         self.inventory_service = get_inventory_service()
         self.trend_service = get_trend_service()
+        self.customer_pattern_service = get_customer_pattern_service()
+        self.production_schedule_service = get_production_schedule_service()
 
     def get_order_builder(
         self,
@@ -140,14 +150,17 @@ class OrderBuilderService:
         products_by_priority = self._group_products_by_priority(
             recommendations.recommendations,
             boat.days_until_warehouse,  # Use warehouse arrival (not departure!)
-            trend_data
+            trend_data,
+            boat_departure=boat.departure_date if boat.boat_id else None  # Pass departure for factory status
         )
         timings["4_grouping"] = round(time.time() - t3, 2)
 
         logger.info("order_builder_timings", **timings)
 
-        # Step 4: Apply mode logic (pre-select products)
-        all_products = self._apply_mode(products_by_priority, mode, boat.max_containers)
+        # Step 4: Apply mode logic (pre-select products) with constraint analysis
+        all_products, constraint_analysis = self._apply_mode(
+            products_by_priority, mode, boat.max_containers, trend_data
+        )
 
         # Step 5: Calculate summary
         summary = self._calculate_summary(all_products, boat.max_containers)
@@ -174,6 +187,7 @@ class OrderBuilderService:
             well_covered=well_covered,
             your_call=your_call,
             summary=summary,
+            constraint_analysis=constraint_analysis,
             summary_reasoning=summary_reasoning,
         )
 
@@ -289,6 +303,95 @@ class OrderBuilderService:
             return Urgency.SOON.value
         return Urgency.OK.value
 
+    def _get_customer_demand_scores(self) -> dict[str, dict]:
+        """
+        Calculate customer demand scores for products based on customers due soon.
+
+        Returns dict keyed by SKU with:
+        - score: int (0-300+ based on tier weights and overdue status)
+        - customers_count: int (number of customers expecting this product)
+
+        Tier weights:
+        - A-tier: 100 points
+        - B-tier: 50 points
+        - C-tier: 25 points
+
+        Overdue multiplier:
+        - 0-14 days: 1.0x (due soon)
+        - 15-30 days: 1.5x (moderately overdue)
+        - 31-60 days: 2.0x (significantly overdue)
+        - 60+ days: 2.5x (severely overdue)
+        """
+        try:
+            # Get customer trends (includes pattern data and top_products)
+            customer_trends = self.trend_service.get_customer_trends(
+                period_days=90,
+                comparison_period_days=90,
+                limit=100
+            )
+
+            # Build SKU → demand info mapping
+            sku_demand: dict[str, dict] = {}
+
+            tier_weights = {"A": 100, "B": 50, "C": 25}
+
+            for customer in customer_trends:
+                # Skip if no pattern data
+                if not customer.avg_days_between_orders or customer.order_count < 2:
+                    continue
+
+                days_overdue = customer.days_overdue
+
+                # Only consider customers due within 14 days or overdue
+                if days_overdue < -14:
+                    continue
+
+                # Calculate overdue multiplier
+                if days_overdue <= 14:
+                    overdue_multiplier = 1.0
+                elif days_overdue <= 30:
+                    overdue_multiplier = 1.5
+                elif days_overdue <= 60:
+                    overdue_multiplier = 2.0
+                else:
+                    overdue_multiplier = 2.5
+
+                # Get tier weight
+                tier = customer.tier.value if hasattr(customer.tier, 'value') else str(customer.tier)
+                tier_weight = tier_weights.get(tier, 25)
+
+                # Score for this customer
+                customer_score = int(tier_weight * overdue_multiplier)
+
+                # Add score to each of their top products
+                for prod in customer.top_products[:5]:  # Top 5 products per customer
+                    sku = prod.sku
+                    if sku not in sku_demand:
+                        sku_demand[sku] = {"score": 0, "customers": set()}
+
+                    sku_demand[sku]["score"] += customer_score
+                    sku_demand[sku]["customers"].add(customer.customer_normalized)
+
+            # Convert sets to counts
+            result = {}
+            for sku, data in sku_demand.items():
+                result[sku] = {
+                    "score": data["score"],
+                    "customers_count": len(data["customers"])
+                }
+
+            logger.debug(
+                "customer_demand_scores_calculated",
+                products_with_demand=len(result),
+                top_score=max((d["score"] for d in result.values()), default=0)
+            )
+
+            return result
+
+        except Exception as e:
+            logger.warning("customer_demand_scores_failed", error=str(e))
+            return {}
+
     def _calculate_trend_adjustment(
         self,
         direction: str,
@@ -358,7 +461,8 @@ class OrderBuilderService:
         self,
         recommendations: list,
         days_to_cover: int,
-        trend_data: dict[str, dict]
+        trend_data: dict[str, dict],
+        boat_departure: Optional[date] = None
     ) -> dict[str, list[OrderBuilderProduct]]:
         """Convert recommendations to OrderBuilderProducts grouped by priority."""
         groups = {
@@ -368,8 +472,24 @@ class OrderBuilderService:
             "YOUR_CALL": [],
         }
 
-        # SAFETY_STOCK_DAYS imported from config.shipping (default: 7)
-        # Reduced from 14 because lead time now includes port + trucking buffer
+        # ORDERING_CYCLE_DAYS imported from config.shipping (default: 30)
+        # Covers the gap until the NEXT boat arrives (monthly ordering cycle)
+
+        # Get customer demand scores for priority ranking
+        customer_demand_data = self._get_customer_demand_scores()
+
+        # Get factory production status for all products
+        factory_status_map = {}
+        if boat_departure:
+            product_ids = [rec.product_id for rec in recommendations]
+            try:
+                factory_status_map = self.production_schedule_service.get_factory_status(
+                    product_ids=product_ids,
+                    boat_departure=boat_departure,
+                    buffer_days=3
+                )
+            except Exception as e:
+                logger.warning("factory_status_lookup_failed", error=str(e))
 
         for rec in recommendations:
             # Get trend data for this product
@@ -383,8 +503,8 @@ class OrderBuilderService:
             # Calculate urgency based on days of stock
             urgency = self._calculate_urgency(days_of_stock)
 
-            # Calculate base quantity (lead time + safety stock) × velocity
-            total_coverage_days = days_to_cover + SAFETY_STOCK_DAYS
+            # Calculate base quantity (lead time + ordering cycle) × velocity
+            total_coverage_days = days_to_cover + ORDERING_CYCLE_DAYS
             base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
 
             # Calculate trend adjustment
@@ -410,7 +530,7 @@ class OrderBuilderService:
             # Build calculation breakdown
             breakdown = CalculationBreakdown(
                 lead_time_days=days_to_cover,
-                safety_stock_days=SAFETY_STOCK_DAYS,
+                ordering_cycle_days=ORDERING_CYCLE_DAYS,
                 daily_velocity_m2=daily_velocity_m2,
                 base_quantity_m2=round(base_quantity_m2, 2),
                 trend_adjustment_m2=round(trend_adjustment_m2, 2),
@@ -475,6 +595,28 @@ class OrderBuilderService:
                 exclusion_reason=exclusion_reason,
             )
 
+            # Get customer demand score for this product
+            demand_info = customer_demand_data.get(rec.sku, {"score": 0, "customers_count": 0})
+            customer_demand_score = demand_info["score"]
+            customers_expecting_count = demand_info["customers_count"]
+
+            # Get factory production status
+            factory_info = factory_status_map.get(rec.product_id)
+            factory_status = "not_scheduled"
+            factory_production_date = None
+            factory_production_m2 = None
+            days_until_factory_ready = None
+            factory_ready_before_boat = None
+            factory_timing_message = None
+
+            if factory_info:
+                factory_status = factory_info.status.value if hasattr(factory_info.status, 'value') else str(factory_info.status)
+                factory_production_date = factory_info.production_date
+                factory_production_m2 = factory_info.production_m2
+                days_until_factory_ready = factory_info.days_until_ready
+                factory_ready_before_boat = factory_info.ready_before_boat
+                factory_timing_message = factory_info.timing_message
+
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
@@ -493,8 +635,13 @@ class OrderBuilderService:
                 unique_customers=rec.unique_customers,
                 top_customer_name=rec.top_customer_name,
                 top_customer_share=rec.top_customer_share,
-                factory_available=None,
-                factory_status="unknown",
+                # Factory production status
+                factory_status=factory_status,
+                factory_production_date=factory_production_date,
+                factory_production_m2=factory_production_m2,
+                days_until_factory_ready=days_until_factory_ready,
+                factory_ready_before_boat=factory_ready_before_boat,
+                factory_timing_message=factory_timing_message,
                 # Trend fields
                 urgency=urgency,
                 days_of_stock=days_of_stock,
@@ -505,6 +652,9 @@ class OrderBuilderService:
                 calculation_breakdown=breakdown if daily_velocity_m2 > 0 else None,
                 # Reasoning
                 reasoning=reasoning,
+                # Customer demand signal
+                customer_demand_score=customer_demand_score,
+                customers_expecting_count=customers_expecting_count,
                 # Selection
                 is_selected=False,
                 selected_pallets=0,
@@ -516,14 +666,134 @@ class OrderBuilderService:
             else:
                 groups["YOUR_CALL"].append(product)
 
+        # Sort each tier by:
+        # 1. Urgency (critical → urgent → soon → ok)
+        # 2. Customer demand score (higher = customers expecting this product)
+        # 3. Days of stock (lower = more urgent)
+        # 4. Velocity (higher = more important for revenue)
+        urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
+
+        for priority_key in groups:
+            groups[priority_key].sort(
+                key=lambda p: (
+                    urgency_order.get(p.urgency, 4),
+                    -p.customer_demand_score,  # Higher score = higher priority
+                    p.days_of_stock if p.days_of_stock is not None else 999,
+                    -float(p.daily_velocity_m2),
+                )
+            )
+
+        logger.debug(
+            "products_sorted_by_urgency_and_demand",
+            high_priority_order=[p.sku for p in groups["HIGH_PRIORITY"][:5]],
+            top_demand_scores=[p.customer_demand_score for p in groups["HIGH_PRIORITY"][:5]],
+        )
+
         return groups
+
+    def _get_warehouse_available_pallets(self) -> int:
+        """Get available space in warehouse (in pallets)."""
+        inventory_snapshots = self.inventory_service.get_latest()
+        warehouse_current_m2 = sum(
+            Decimal(str(inv.warehouse_qty))
+            for inv in inventory_snapshots
+        )
+        warehouse_current_pallets = int(warehouse_current_m2 / M2_PER_PALLET)
+        available = max(0, WAREHOUSE_CAPACITY - warehouse_current_pallets)
+        return available
+
+    def _identify_liquidation_candidates(
+        self,
+        trend_data: dict[str, dict]
+    ) -> list[LiquidationCandidate]:
+        """
+        Find slow movers that could be cleared to make room for fast movers.
+
+        Uses LIQUIDATION_THRESHOLDS from config to identify:
+        - declining_overstocked: Declining trend + high inventory
+        - no_sales: No recent sales
+        - extreme_overstock: Very high stock regardless of trend
+        """
+        candidates = []
+
+        # Get inventory data
+        inventory_snapshots = self.inventory_service.get_latest()
+
+        for inv in inventory_snapshots:
+            warehouse_m2 = Decimal(str(inv.warehouse_qty or 0))
+
+            # Skip products with no warehouse stock
+            if warehouse_m2 <= 0:
+                continue
+
+            product_id = inv.product_id
+            sku = inv.sku if hasattr(inv, 'sku') else None
+
+            # Get trend data for this product
+            trend = trend_data.get(sku, {}) if sku else {}
+            days_of_stock = trend.get("days_of_stock")
+            trend_pct = Decimal(str(trend.get("velocity_change_pct", 0)))
+            direction = trend.get("direction", "stable")
+            daily_velocity_m2 = Decimal(str(trend.get("daily_velocity_m2", 0)))
+
+            reason = None
+            reason_display = ""
+
+            # Check: Declining + Overstocked
+            if (trend_pct <= LIQUIDATION_DECLINING_TREND_PCT_MAX and
+                days_of_stock is not None and
+                days_of_stock >= LIQUIDATION_DECLINING_DAYS_MIN):
+                reason = "declining_overstocked"
+                reason_display = f"Declining {trend_pct:+.0f}%, {days_of_stock} days stock"
+
+            # Check: No sales in 90 days (days_of_stock is None or extremely high)
+            elif days_of_stock is None or days_of_stock >= 365:
+                reason = "no_sales"
+                reason_display = "No sales in 90+ days"
+
+            # Check: Extreme overstock (any trend)
+            elif days_of_stock is not None and days_of_stock >= LIQUIDATION_EXTREME_DAYS_MIN:
+                reason = "extreme_overstock"
+                reason_display = f"{days_of_stock} days of stock"
+
+            if reason:
+                current_pallets = math.ceil(float(warehouse_m2 / M2_PER_PALLET))
+
+                candidates.append(LiquidationCandidate(
+                    product_id=product_id,
+                    sku=sku or product_id,
+                    description=None,
+                    current_m2=warehouse_m2,
+                    current_pallets=current_pallets,
+                    days_of_stock=days_of_stock,
+                    trend_direction=direction,
+                    trend_pct=trend_pct,
+                    daily_velocity_m2=daily_velocity_m2,
+                    reason=reason,
+                    reason_display=reason_display,
+                    potential_space_freed_m2=warehouse_m2,
+                    potential_space_freed_pallets=current_pallets,
+                ))
+
+        # Sort by most clearable (highest stock first, then most declining)
+        candidates.sort(key=lambda c: (-c.current_pallets, float(c.trend_pct)))
+
+        logger.debug(
+            "liquidation_candidates_identified",
+            count=len(candidates),
+            total_pallets=sum(c.current_pallets for c in candidates),
+        )
+
+        return candidates
 
     def _apply_mode(
         self,
         products_by_priority: dict[str, list[OrderBuilderProduct]],
         mode: OrderBuilderMode,
-        boat_max_containers: int
-    ) -> list[OrderBuilderProduct]:
+        boat_max_containers: int,
+        trend_data: dict[str, dict],
+        warehouse_available_pallets: Optional[int] = None
+    ) -> tuple[list[OrderBuilderProduct], ConstraintAnalysis]:
         """
         Apply mode logic to pre-select products.
 
@@ -531,15 +801,45 @@ class OrderBuilderService:
         - minimal: 3 containers (42 pallets)
         - standard: 4 containers (56 pallets)
         - optimal: 5 containers (70 pallets)
+
+        Returns tuple of (products, constraint_analysis)
         """
-        max_pallets = {
+        mode_pallets = {
             OrderBuilderMode.MINIMAL: 3 * PALLETS_PER_CONTAINER,   # 42
             OrderBuilderMode.STANDARD: 4 * PALLETS_PER_CONTAINER,  # 56
             OrderBuilderMode.OPTIMAL: 5 * PALLETS_PER_CONTAINER,   # 70
         }[mode]
 
-        # Cap at boat's actual capacity
-        max_pallets = min(max_pallets, boat_max_containers * PALLETS_PER_CONTAINER)
+        boat_capacity = boat_max_containers * PALLETS_PER_CONTAINER
+
+        # Get warehouse available if not provided
+        if warehouse_available_pallets is None:
+            warehouse_available_pallets = self._get_warehouse_available_pallets()
+
+        # Calculate total needed pallets (sum of all suggestions)
+        total_needed = sum(
+            p.suggested_pallets
+            for group in products_by_priority.values()
+            for p in group
+            if p.suggested_pallets > 0
+        )
+        total_needed_m2 = Decimal(total_needed) * M2_PER_PALLET
+
+        # Determine limiting factor and effective limit
+        constraints = {
+            "mode": mode_pallets,
+            "boat": boat_capacity,
+            "warehouse": warehouse_available_pallets,
+        }
+        limiting_factor = min(constraints, key=constraints.get)
+        effective_limit = constraints[limiting_factor]
+
+        # If all constraints allow more than needed, no constraint is active
+        if effective_limit >= total_needed:
+            limiting_factor = "none"
+            effective_limit = total_needed
+
+        max_pallets = effective_limit
 
         total_selected = 0
         all_products = []
@@ -596,15 +896,66 @@ class OrderBuilderService:
         # YOUR_CALL products - never auto-select
         all_products.extend(products_by_priority.get("YOUR_CALL", []))
 
+        # Track deferred SKUs (products that couldn't fully fit)
+        deferred_skus = []
+        for p in all_products:
+            if p.suggested_pallets > 0:
+                if not p.is_selected:
+                    deferred_skus.append(p.sku)
+                elif p.selected_pallets < p.suggested_pallets:
+                    deferred_skus.append(p.sku)
+
+        # Calculate deferred pallets
+        deferred_pallets = max(0, total_needed - total_selected)
+
+        # Calculate utilization percentage
+        utilization_pct = Decimal("0")
+        if effective_limit > 0:
+            utilization_pct = round(Decimal(total_selected) / Decimal(effective_limit) * 100, 1)
+
+        # Identify liquidation candidates (slow movers that could be cleared)
+        liquidation_candidates = self._identify_liquidation_candidates(trend_data)
+        total_liquidation_pallets = sum(c.current_pallets for c in liquidation_candidates)
+        total_liquidation_m2 = sum(c.current_m2 for c in liquidation_candidates)
+
+        # Determine if liquidation is needed and if it could help
+        liquidation_needed = deferred_pallets > 0 and len(liquidation_candidates) > 0
+        liquidation_could_fit = total_liquidation_pallets >= deferred_pallets
+
+        # Build constraint analysis
+        constraint_analysis = ConstraintAnalysis(
+            total_needed_pallets=total_needed,
+            total_needed_m2=total_needed_m2,
+            warehouse_available_pallets=warehouse_available_pallets,
+            boat_capacity_pallets=boat_capacity,
+            mode_limit_pallets=mode_pallets,
+            limiting_factor=limiting_factor,
+            effective_limit_pallets=effective_limit,
+            can_order_pallets=total_selected,
+            deferred_pallets=deferred_pallets,
+            deferred_skus=deferred_skus[:10],  # Top 10 deferred
+            constraint_utilization_pct=utilization_pct,
+            # Liquidation insight
+            liquidation_candidates=liquidation_candidates[:10],  # Top 10 candidates
+            total_liquidation_potential_pallets=total_liquidation_pallets,
+            total_liquidation_potential_m2=total_liquidation_m2,
+            liquidation_needed=liquidation_needed,
+            liquidation_could_fit_deferred=liquidation_could_fit,
+        )
+
         logger.debug(
             "mode_applied",
             mode=mode.value,
             max_pallets=max_pallets,
             total_selected=total_selected,
-            products_count=len(all_products)
+            products_count=len(all_products),
+            limiting_factor=limiting_factor,
+            deferred_pallets=deferred_pallets,
+            liquidation_candidates=len(liquidation_candidates),
+            liquidation_potential=total_liquidation_pallets,
         )
 
-        return all_products
+        return all_products, constraint_analysis
 
     def _calculate_summary(
         self,

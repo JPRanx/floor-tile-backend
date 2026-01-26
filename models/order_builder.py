@@ -113,14 +113,14 @@ class CalculationBreakdown(BaseSchema):
     """Breakdown of how suggested quantity was calculated."""
 
     # Time parameters
-    lead_time_days: int = Field(..., description="Days until boat arrives")
-    safety_stock_days: int = Field(default=14, description="Safety buffer days")
+    lead_time_days: int = Field(..., description="Days until product in warehouse")
+    ordering_cycle_days: int = Field(default=30, description="Days until next boat arrives")
 
     # Velocity
     daily_velocity_m2: Decimal = Field(..., description="Average daily demand in m²")
 
     # Calculation steps
-    base_quantity_m2: Decimal = Field(..., description="(lead_time + safety) × velocity")
+    base_quantity_m2: Decimal = Field(..., description="(lead_time + ordering_cycle) × velocity")
     trend_adjustment_m2: Decimal = Field(default=Decimal("0"), description="Adjustment for trend")
     trend_adjustment_pct: Decimal = Field(default=Decimal("0"), description="Trend adjustment percentage")
     minus_current_stock_m2: Decimal = Field(..., description="Subtract warehouse stock")
@@ -171,9 +171,31 @@ class OrderBuilderProduct(BaseSchema):
     top_customer_name: Optional[str] = None
     top_customer_share: Optional[Decimal] = None
 
-    # Factory (MVP: placeholder)
-    factory_available: Optional[int] = Field(None, description="Pallets available at factory")
-    factory_status: str = Field(default="unknown", description="available, partial, blocked, unknown")
+    # Factory production status (from production_schedule)
+    factory_status: str = Field(
+        default="not_scheduled",
+        description="in_production, not_scheduled"
+    )
+    factory_production_date: Optional[date] = Field(
+        None,
+        description="When production completes"
+    )
+    factory_production_m2: Optional[Decimal] = Field(
+        None,
+        description="Total m² in production"
+    )
+    days_until_factory_ready: Optional[int] = Field(
+        None,
+        description="Days until production_date"
+    )
+    factory_ready_before_boat: Optional[bool] = Field(
+        None,
+        description="True if production completes before boat deadline"
+    )
+    factory_timing_message: Optional[str] = Field(
+        None,
+        description="Human-readable factory timing status"
+    )
 
     # Trend data (from Intelligence system)
     urgency: str = Field(default="ok", description="critical, urgent, soon, ok")
@@ -196,6 +218,16 @@ class OrderBuilderProduct(BaseSchema):
     # Weight data (for container optimization)
     weight_per_m2_kg: Decimal = Field(default=Decimal("14.90"), description="Weight per m² in kg")
     total_weight_kg: Decimal = Field(default=Decimal("0"), description="Total weight for selected pallets")
+
+    # Customer demand signal (for intelligent prioritization)
+    customer_demand_score: int = Field(
+        default=0,
+        description="Priority score based on customers due soon who buy this product (0-300)"
+    )
+    customers_expecting_count: int = Field(
+        default=0,
+        description="Number of customers due soon who typically buy this product"
+    )
 
     # Selection state (editable by user)
     is_selected: bool = Field(default=False, description="Whether product is in order")
@@ -254,6 +286,94 @@ class OrderBuilderSummary(BaseSchema):
     alerts: list[OrderBuilderAlert] = Field(default_factory=list)
 
 
+class LiquidationReason(str, Enum):
+    """Reasons why a product is a liquidation candidate."""
+    DECLINING_OVERSTOCKED = "declining_overstocked"  # Declining trend + high stock
+    NO_SALES = "no_sales"                            # No recent sales
+    EXTREME_OVERSTOCK = "extreme_overstock"          # Very high stock (any trend)
+
+
+class LiquidationCandidate(BaseSchema):
+    """Product identified as slow mover that could be cleared for fast movers."""
+
+    product_id: str
+    sku: str
+    description: Optional[str] = None
+
+    # Current stock
+    current_m2: Decimal = Field(..., description="Current warehouse stock in m²")
+    current_pallets: int = Field(..., description="Current stock in pallets")
+
+    # Stock metrics
+    days_of_stock: Optional[int] = Field(None, description="Days of stock at current velocity")
+    trend_direction: str = Field(default="stable", description="up, down, stable")
+    trend_pct: Decimal = Field(default=Decimal("0"), description="Velocity change percentage")
+    daily_velocity_m2: Decimal = Field(default=Decimal("0"), description="Current daily velocity")
+
+    # Liquidation reason
+    reason: str = Field(..., description="declining_overstocked, no_sales, extreme_overstock")
+    reason_display: str = Field(..., description="Human readable reason")
+
+    # Space that could be freed
+    potential_space_freed_m2: Decimal = Field(..., description="m² that would be freed")
+    potential_space_freed_pallets: int = Field(..., description="Pallets that would be freed")
+
+
+class ConstraintAnalysis(BaseSchema):
+    """Analysis of order constraints and limiting factors."""
+
+    # Total demand
+    total_needed_pallets: int = Field(..., description="Total pallets suggested by system")
+    total_needed_m2: Decimal = Field(..., description="Total m² suggested")
+
+    # Available capacity
+    warehouse_available_pallets: int = Field(..., description="Room in warehouse for new pallets")
+    boat_capacity_pallets: int = Field(..., description="Max pallets for this boat")
+    mode_limit_pallets: int = Field(..., description="Max pallets for selected mode")
+
+    # Limiting factor
+    limiting_factor: str = Field(
+        ...,
+        description="Which constraint is limiting: 'none', 'warehouse', 'boat', 'mode'"
+    )
+    effective_limit_pallets: int = Field(..., description="Actual max pallets (min of all constraints)")
+
+    # What fits vs what doesn't
+    can_order_pallets: int = Field(..., description="Pallets that fit within constraints")
+    deferred_pallets: int = Field(..., description="Pallets that don't fit (need next boat or liquidation)")
+    deferred_skus: list[str] = Field(default_factory=list, description="SKUs that couldn't fully fit")
+
+    # Utilization
+    constraint_utilization_pct: Decimal = Field(
+        default=Decimal("0"),
+        description="How much of the constraint is used (0-100)"
+    )
+
+    # Liquidation insight
+    liquidation_candidates: list[LiquidationCandidate] = Field(
+        default_factory=list,
+        description="Slow movers that could be cleared to make room"
+    )
+    total_liquidation_potential_pallets: int = Field(
+        default=0,
+        description="Total pallets that could be freed by liquidating"
+    )
+    total_liquidation_potential_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Total m² that could be freed by liquidating"
+    )
+
+    # Helpful flags
+    liquidation_needed: bool = Field(
+        default=False,
+        description="True if deferred_pallets > 0 and candidates exist"
+    )
+    liquidation_could_fit_deferred: bool = Field(
+        default=False,
+        description="True if liquidating would free enough space for deferred items"
+    )
+
+
 class OrderBuilderResponse(BaseSchema):
     """Complete Order Builder API response."""
 
@@ -272,6 +392,11 @@ class OrderBuilderResponse(BaseSchema):
 
     # Summary
     summary: OrderBuilderSummary
+
+    # Constraint analysis (explains capacity limits)
+    constraint_analysis: Optional[ConstraintAnalysis] = Field(
+        None, description="Analysis of which constraint is limiting the order"
+    )
 
     # Reasoning (explains WHY this order strategy)
     summary_reasoning: Optional[OrderSummaryReasoning] = Field(

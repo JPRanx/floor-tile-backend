@@ -22,9 +22,10 @@ TRUCKING_DAYS = 1
 # Total buffer beyond boat arrival: PORT_BUFFER_DAYS + TRUCKING_DAYS = 6 days
 WAREHOUSE_BUFFER_DAYS = PORT_BUFFER_DAYS + TRUCKING_DAYS
 
-# Safety stock buffer (days of extra coverage beyond lead time)
-# Reduced from 14 because lead time now includes port + trucking buffer
-SAFETY_STOCK_DAYS = 7
+# Ordering cycle coverage (days until NEXT boat arrives)
+# Ashley orders monthly (~20th), so boats arrive ~30 days apart.
+# When Boat 1 arrives, we need enough stock to last until Boat 2.
+ORDERING_CYCLE_DAYS = 30
 
 
 # =============================================================================
@@ -54,6 +55,34 @@ MAX_PALLETS_BY_WEIGHT = CONTAINER_MAX_WEIGHT_KG / WEIGHT_PER_PALLET_KG
 
 # Legacy constant (deprecated - use CONTAINER_MAX_WEIGHT_KG)
 CONTAINER_WEIGHT_LIMIT_KG = CONTAINER_MAX_WEIGHT_KG
+
+
+# =============================================================================
+# LIQUIDATION THRESHOLDS
+# =============================================================================
+# Criteria for identifying slow movers that could be cleared to make room
+
+LIQUIDATION_THRESHOLDS = {
+    # Declining demand + high inventory
+    "declining_overstocked": {
+        "trend_pct_max": -10,        # Declining by 10%+
+        "days_of_stock_min": 120,    # 4+ months of inventory
+    },
+    # No sales in 90 days
+    "no_sales": {
+        "days_since_last_sale": 90,  # No sales in 90 days (days_of_stock is None or very high)
+    },
+    # Extreme overstock (any trend)
+    "extreme_overstock": {
+        "days_of_stock_min": 180,    # 6+ months (any trend)
+    },
+}
+
+# Thresholds extracted as constants for easy access
+LIQUIDATION_DECLINING_TREND_PCT_MAX = LIQUIDATION_THRESHOLDS["declining_overstocked"]["trend_pct_max"]
+LIQUIDATION_DECLINING_DAYS_MIN = LIQUIDATION_THRESHOLDS["declining_overstocked"]["days_of_stock_min"]
+LIQUIDATION_NO_SALES_DAYS = LIQUIDATION_THRESHOLDS["no_sales"]["days_since_last_sale"]
+LIQUIDATION_EXTREME_DAYS_MIN = LIQUIDATION_THRESHOLDS["extreme_overstock"]["days_of_stock_min"]
 
 
 def get_container_weight_limit(db_value: Optional[Decimal] = None) -> float:

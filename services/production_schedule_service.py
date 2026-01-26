@@ -8,6 +8,7 @@ See STANDARDS_ERRORS.md for error handling patterns.
 from typing import Optional
 from datetime import date, timedelta
 from decimal import Decimal
+from collections import defaultdict
 import structlog
 
 from config import get_supabase_client
@@ -15,9 +16,22 @@ from models.production_schedule import (
     ParsedProductionSchedule,
     ProductionScheduleResponse,
     UpcomingProductionItem,
+    # Order Builder integration
+    FactoryStatus,
+    ProductFactoryStatus,
+    UnmappedProduct,
+    MatchSuggestion,
+    UploadResult,
 )
 from services.product_service import get_product_service
 from exceptions import DatabaseError
+
+# Optional: fuzzy matching
+try:
+    from rapidfuzz import fuzz
+    FUZZY_AVAILABLE = True
+except ImportError:
+    FUZZY_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
 
@@ -414,6 +428,338 @@ class ProductionScheduleService:
 
         except Exception as e:
             logger.error("rematch_products_failed", error=str(e))
+            raise DatabaseError("update", str(e))
+
+    # ===================
+    # ORDER BUILDER INTEGRATION
+    # ===================
+
+    def wipe_and_replace(
+        self,
+        parsed_data: ParsedProductionSchedule,
+        filename: Optional[str] = None
+    ) -> UploadResult:
+        """
+        Wipe existing production schedule and replace with new data.
+
+        Used for daily PDF uploads that replace the entire schedule.
+
+        Args:
+            parsed_data: Parsed schedule from Claude Vision
+            filename: Original PDF filename
+
+        Returns:
+            UploadResult with matched/unmatched counts
+        """
+        logger.info(
+            "wiping_and_replacing_schedule",
+            schedule_date=str(parsed_data.schedule_date),
+            line_items_count=len(parsed_data.line_items),
+            filename=filename
+        )
+
+        warnings = []
+
+        try:
+            # Step 1: Wipe existing data
+            delete_result = (
+                self.db.table(self.table)
+                .delete()
+                .neq("id", "00000000-0000-0000-0000-000000000000")  # Delete all
+                .execute()
+            )
+            logger.info("existing_schedule_deleted")
+
+        except Exception as e:
+            warnings.append(f"Could not delete existing data: {str(e)}")
+            logger.warning("delete_existing_failed", error=str(e))
+
+        # Step 2: Insert new data
+        items_saved, products_matched, unmatched_codes = self.save_parsed_schedule(
+            parsed_data,
+            filename
+        )
+
+        # Step 3: Build unmatched product details with fuzzy suggestions
+        unmatched_products = self._get_unmatched_with_suggestions(parsed_data, unmatched_codes)
+
+        return UploadResult(
+            total_rows=items_saved,
+            matched_count=products_matched,
+            unmatched_count=len(unmatched_codes),
+            schedule_date=parsed_data.schedule_date,
+            schedule_version=parsed_data.schedule_version,
+            filename=filename or "unknown.pdf",
+            unmatched_products=unmatched_products,
+            warnings=warnings,
+        )
+
+    def _get_unmatched_with_suggestions(
+        self,
+        parsed_data: ParsedProductionSchedule,
+        unmatched_codes: list[str]
+    ) -> list[UnmappedProduct]:
+        """
+        Build UnmappedProduct list with fuzzy match suggestions.
+
+        Args:
+            parsed_data: Parsed schedule data
+            unmatched_codes: List of factory codes without product match
+
+        Returns:
+            List of UnmappedProduct with suggestions
+        """
+        if not unmatched_codes:
+            return []
+
+        # Group line items by factory code
+        items_by_code: dict[str, list] = defaultdict(list)
+        for item in parsed_data.line_items:
+            if item.factory_code in unmatched_codes:
+                items_by_code[item.factory_code].append(item)
+
+        # Get all products for fuzzy matching
+        all_products = []
+        try:
+            all_products = self.product_service.get_all_active()
+        except Exception as e:
+            logger.warning("get_products_for_fuzzy_failed", error=str(e))
+
+        unmatched_products = []
+        for factory_code in unmatched_codes:
+            items = items_by_code.get(factory_code, [])
+            if not items:
+                continue
+
+            # Get factory name from first item
+            factory_name = items[0].product_name or factory_code
+
+            # Sum total m²
+            total_m2 = sum(
+                item.m2_total_net or Decimal("0")
+                for item in items
+            )
+
+            # Get unique production dates
+            production_dates = sorted(set(
+                item.production_date.isoformat()
+                for item in items
+            ))
+
+            # Generate fuzzy match suggestions
+            suggestions = self._get_fuzzy_suggestions(factory_name, all_products)
+
+            unmatched_products.append(UnmappedProduct(
+                factory_code=factory_code,
+                factory_name=factory_name,
+                total_m2=total_m2,
+                production_dates=production_dates,
+                row_count=len(items),
+                suggested_matches=suggestions,
+            ))
+
+        return unmatched_products
+
+    def _get_fuzzy_suggestions(
+        self,
+        factory_name: str,
+        products: list,
+        limit: int = 3
+    ) -> list[MatchSuggestion]:
+        """
+        Generate fuzzy match suggestions for a factory product name.
+
+        Args:
+            factory_name: Product name from factory PDF
+            products: List of product objects with id and sku
+            limit: Max suggestions to return
+
+        Returns:
+            List of MatchSuggestion sorted by score
+        """
+        if not FUZZY_AVAILABLE or not products:
+            return []
+
+        suggestions = []
+        for product in products:
+            sku = getattr(product, "sku", None)
+            if not sku:
+                continue
+
+            # Calculate fuzzy match score
+            score = fuzz.token_sort_ratio(factory_name.upper(), sku.upper())
+
+            if score >= 50:  # Minimum threshold
+                suggestions.append(MatchSuggestion(
+                    product_id=product.id,
+                    sku=sku,
+                    score=score,
+                    match_reason="fuzzy_name" if score >= 80 else "partial_match"
+                ))
+
+        # Sort by score descending and limit
+        suggestions.sort(key=lambda s: s.score, reverse=True)
+        return suggestions[:limit]
+
+    def get_factory_status(
+        self,
+        product_ids: list[str],
+        boat_departure: date,
+        buffer_days: int = 3
+    ) -> dict[str, ProductFactoryStatus]:
+        """
+        Get factory production status for Order Builder.
+
+        Checks if products have scheduled production and whether
+        they'll be ready before the boat departs.
+
+        Args:
+            product_ids: List of product UUIDs to check
+            boat_departure: Boat departure date for timing assessment
+            buffer_days: Days buffer before boat (default 3)
+
+        Returns:
+            Dict mapping product_id to ProductFactoryStatus
+        """
+        if not product_ids:
+            return {}
+
+        logger.debug(
+            "getting_factory_status",
+            product_count=len(product_ids),
+            boat_departure=str(boat_departure)
+        )
+
+        today = date.today()
+        cutoff_date = boat_departure - timedelta(days=buffer_days)
+
+        try:
+            # Get upcoming production for these products
+            result = (
+                self.db.table(self.table)
+                .select("product_id, production_date, m2_total_net, products(sku)")
+                .in_("product_id", product_ids)
+                .gte("production_date", today.isoformat())
+                .order("production_date")
+                .execute()
+            )
+
+            # Group by product_id (take earliest production date)
+            production_by_product: dict[str, dict] = {}
+            for row in result.data:
+                pid = row["product_id"]
+                if pid not in production_by_product:
+                    production_by_product[pid] = row
+
+            # Build status for each requested product
+            status_map = {}
+            for pid in product_ids:
+                prod = production_by_product.get(pid)
+
+                if prod:
+                    prod_date = date.fromisoformat(prod["production_date"])
+                    days_until = (prod_date - today).days
+                    ready_before_boat = prod_date <= cutoff_date
+                    m2 = Decimal(str(prod.get("m2_total_net") or 0))
+                    sku = prod.get("products", {}).get("sku", "") if prod.get("products") else ""
+
+                    # Build timing message
+                    if ready_before_boat:
+                        timing_msg = f"Ready {prod_date.strftime('%b %d')} - in time"
+                    else:
+                        days_late = (prod_date - cutoff_date).days
+                        timing_msg = f"Ready {prod_date.strftime('%b %d')} - {days_late}d after deadline"
+
+                    status_map[pid] = ProductFactoryStatus(
+                        product_id=pid,
+                        sku=sku,
+                        status=FactoryStatus.IN_PRODUCTION,
+                        production_date=prod_date,
+                        production_m2=m2,
+                        days_until_ready=days_until,
+                        ready_before_boat=ready_before_boat,
+                        timing_message=timing_msg,
+                    )
+                else:
+                    # No scheduled production
+                    status_map[pid] = ProductFactoryStatus(
+                        product_id=pid,
+                        sku="",
+                        status=FactoryStatus.NOT_SCHEDULED,
+                        timing_message="Not in production schedule",
+                    )
+
+            logger.debug(
+                "factory_status_retrieved",
+                in_production=sum(1 for s in status_map.values() if s.status == FactoryStatus.IN_PRODUCTION),
+                not_scheduled=sum(1 for s in status_map.values() if s.status == FactoryStatus.NOT_SCHEDULED),
+            )
+
+            return status_map
+
+        except Exception as e:
+            logger.error("get_factory_status_failed", error=str(e))
+            # Return empty status for all products on error
+            return {
+                pid: ProductFactoryStatus(
+                    product_id=pid,
+                    sku="",
+                    status=FactoryStatus.NOT_SCHEDULED,
+                    timing_message="Status unavailable",
+                )
+                for pid in product_ids
+            }
+
+    def map_factory_code_to_product(
+        self,
+        factory_code: str,
+        product_id: str
+    ) -> int:
+        """
+        Map a factory code to a product and update all schedule rows.
+
+        Also updates the product's factory_code field.
+
+        Args:
+            factory_code: Factory internal code
+            product_id: Product UUID
+
+        Returns:
+            Number of schedule rows updated
+        """
+        logger.info(
+            "mapping_factory_code",
+            factory_code=factory_code,
+            product_id=product_id
+        )
+
+        try:
+            # Update product's factory_code
+            self.db.table("products").update({
+                "factory_code": factory_code
+            }).eq("id", product_id).execute()
+
+            # Update all schedule rows with this factory code
+            result = (
+                self.db.table(self.table)
+                .update({"product_id": product_id})
+                .eq("factory_code", factory_code)
+                .execute()
+            )
+
+            rows_updated = len(result.data) if result.data else 0
+
+            logger.info(
+                "factory_code_mapped",
+                factory_code=factory_code,
+                product_id=product_id,
+                rows_updated=rows_updated
+            )
+
+            return rows_updated
+
+        except Exception as e:
+            logger.error("map_factory_code_failed", error=str(e))
             raise DatabaseError("update", str(e))
 
 

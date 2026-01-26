@@ -4,12 +4,19 @@ Production schedule schemas for validation and serialization.
 See STANDARDS_VALIDATION.md for patterns.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 from typing import Optional
+from enum import Enum
 from datetime import date, datetime
 from decimal import Decimal
 
 from models.base import BaseSchema, TimestampMixin
+
+
+class FactoryStatus(str, Enum):
+    """Production status for Order Builder display."""
+    IN_PRODUCTION = "in_production"      # Scheduled in current PDF
+    NOT_SCHEDULED = "not_scheduled"      # Not in current PDF
 
 
 class ProductionScheduleLineItem(BaseSchema):
@@ -215,3 +222,109 @@ class UpcomingProductionResponse(BaseSchema):
     total_m2_upcoming: Decimal
     date_range_start: date
     date_range_end: date
+
+
+# ===================
+# ORDER BUILDER INTEGRATION
+# ===================
+
+class MatchSuggestion(BaseSchema):
+    """Suggested SKU match for an unmapped factory code."""
+
+    product_id: str = Field(..., description="Product UUID")
+    sku: str = Field(..., description="Product SKU")
+    score: int = Field(..., ge=0, le=100, description="Match confidence 0-100")
+    match_reason: str = Field(default="fuzzy", description="Why this match was suggested")
+
+
+class UnmappedProduct(BaseSchema):
+    """
+    Factory product code that couldn't be matched to a SKU.
+
+    Includes fuzzy match suggestions for manual mapping.
+    """
+
+    factory_code: str = Field(..., description="Factory internal code")
+    factory_name: str = Field(..., description="Product name from PDF")
+
+    # Production info
+    total_m2: Decimal = Field(..., description="Total m² in schedule")
+    production_dates: list[str] = Field(default_factory=list, description="Scheduled dates")
+    row_count: int = Field(default=1, description="Number of schedule rows")
+
+    # Match suggestions
+    suggested_matches: list[MatchSuggestion] = Field(
+        default_factory=list,
+        description="Fuzzy match suggestions from products table"
+    )
+
+
+class MapProductRequest(BaseSchema):
+    """Request to map a factory code to a product."""
+
+    factory_code: str = Field(..., description="Factory internal code")
+    product_id: str = Field(..., description="Product UUID to link")
+
+
+class MapProductResponse(BaseSchema):
+    """Response after mapping a product."""
+
+    factory_code: str
+    product_id: str
+    product_sku: str
+    rows_updated: int = Field(..., description="Schedule rows updated with this mapping")
+
+
+class UploadResult(BaseSchema):
+    """Result of uploading a production schedule PDF."""
+
+    # Counts
+    total_rows: int = Field(..., description="Total rows parsed from PDF")
+    matched_count: int = Field(..., description="Rows matched to products")
+    unmatched_count: int = Field(..., description="Rows without product match")
+
+    # Schedule info
+    schedule_date: date = Field(..., description="Date from PDF")
+    schedule_version: Optional[str] = Field(None, description="Version from filename")
+    filename: str = Field(..., description="Original filename")
+
+    # Products needing mapping
+    unmatched_products: list[UnmappedProduct] = Field(
+        default_factory=list,
+        description="Factory codes needing manual mapping"
+    )
+
+    # Warnings
+    warnings: list[str] = Field(default_factory=list, description="Parse warnings")
+
+
+class ProductFactoryStatus(BaseSchema):
+    """
+    Factory production status for a single product.
+
+    Used by Order Builder to show production info.
+    """
+
+    product_id: str
+    sku: str
+
+    # Status
+    status: FactoryStatus = Field(
+        default=FactoryStatus.NOT_SCHEDULED,
+        description="in_production or not_scheduled"
+    )
+
+    # Production details (if in_production)
+    production_date: Optional[date] = Field(None, description="When production completes")
+    production_m2: Optional[Decimal] = Field(None, description="Total m² in production")
+    days_until_ready: Optional[int] = Field(None, description="Days until production_date")
+
+    # Timing assessment (relative to boat)
+    ready_before_boat: Optional[bool] = Field(
+        None,
+        description="True if production_date is before boat departure (with buffer)"
+    )
+    timing_message: Optional[str] = Field(
+        None,
+        description="Human-readable timing status"
+    )
