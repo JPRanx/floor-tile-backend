@@ -533,7 +533,7 @@ class OrderBuilderService:
 
         # First pass: HIGH_PRIORITY (always include if room)
         for p in products_by_priority.get("HIGH_PRIORITY", []):
-            pallets_needed = p.coverage_gap_pallets
+            pallets_needed = p.suggested_pallets  # Use suggestion (includes trend adjustment)
             if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
                 p.is_selected = True
                 p.selected_pallets = pallets_needed
@@ -550,7 +550,7 @@ class OrderBuilderService:
         # Second pass: CONSIDER (if mode >= standard)
         if mode in [OrderBuilderMode.STANDARD, OrderBuilderMode.OPTIMAL]:
             for p in products_by_priority.get("CONSIDER", []):
-                pallets_needed = p.coverage_gap_pallets
+                pallets_needed = p.suggested_pallets  # Use suggestion (includes trend adjustment)
                 if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
                     p.is_selected = True
                     p.selected_pallets = pallets_needed
@@ -572,8 +572,8 @@ class OrderBuilderService:
             if mode == OrderBuilderMode.OPTIMAL:
                 remaining = max_pallets - total_selected
                 if remaining > 0:
-                    # Add partial to help fill containers
-                    pallets_to_add = min(PALLETS_PER_CONTAINER, remaining, p.coverage_gap_pallets or PALLETS_PER_CONTAINER)
+                    # Add partial to help fill containers (use suggestion if available)
+                    pallets_to_add = min(PALLETS_PER_CONTAINER, remaining, p.suggested_pallets or PALLETS_PER_CONTAINER)
                     if pallets_to_add > 0:
                         p.is_selected = True
                         p.selected_pallets = pallets_to_add
