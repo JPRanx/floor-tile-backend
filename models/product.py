@@ -14,10 +14,32 @@ from models.base import BaseSchema, TimestampMixin
 
 
 class Category(str, Enum):
-    """Product categories."""
+    """Product categories.
+
+    Tile categories (used in category analysis):
+    - MADERAS: Wood-look tiles
+    - EXTERIORES: Outdoor/exterior tiles
+    - MARMOLIZADOS: Marble-look tiles
+    - OTHER: Uncategorized tile products
+
+    Non-tile categories (excluded from category analysis):
+    - FURNITURE: Furniture items
+    - SINK: Sink products
+    - SURCHARGE: Surcharges/fees
+    """
+    # Tile categories
     MADERAS = "MADERAS"
     EXTERIORES = "EXTERIORES"
     MARMOLIZADOS = "MARMOLIZADOS"
+    OTHER = "OTHER"
+    # Non-tile categories (excluded from category analysis)
+    FURNITURE = "FURNITURE"
+    SINK = "SINK"
+    SURCHARGE = "SURCHARGE"
+
+
+# Categories to include in category analysis (tiles only)
+TILE_CATEGORIES = {Category.MADERAS, Category.EXTERIORES, Category.MARMOLIZADOS, Category.OTHER}
 
 
 class Rotation(str, Enum):

@@ -4,7 +4,7 @@ Intelligence API endpoints.
 Exposes product, country, and customer trend data for the Intelligence dashboard.
 """
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Query
 
@@ -15,6 +15,10 @@ from models.trends import (
     ProductTrend,
 )
 from services.trend_service import get_trend_service
+from services.metrics_service import get_metrics_service
+
+# Valid sort options for products
+ProductSortBy = Literal["velocity", "revenue", "volume"]
 from services.customer_pattern_service import get_customer_pattern_service
 
 router = APIRouter(prefix="/api/intelligence", tags=["Intelligence"])
@@ -24,12 +28,16 @@ router = APIRouter(prefix="/api/intelligence", tags=["Intelligence"])
 async def get_product_trends(
     period_days: int = Query(90, ge=7, le=365, description="Current analysis period in days"),
     comparison_days: int = Query(90, ge=7, le=365, description="Previous period for comparison"),
+    sort_by: ProductSortBy = Query("velocity", description="Sort by: velocity (trend %), revenue ($), or volume (m²/day)"),
     limit: int = Query(50, ge=1, le=200, description="Maximum products to return"),
 ):
     """
     Get product trends with velocity, volume, and statistical confidence.
 
-    Products are sorted by velocity change (highest growth first).
+    **Sort options:**
+    - `velocity`: Sort by velocity change % (highest growth first) — default
+    - `revenue`: Sort by total revenue (highest first)
+    - `volume`: Sort by daily velocity m²/day (highest first)
 
     **Response fields:**
     - `velocity_change_pct`: Percent change in daily velocity vs previous period
@@ -42,6 +50,7 @@ async def get_product_trends(
     return service.get_product_trends(
         period_days=period_days,
         comparison_period_days=comparison_days,
+        sort_by=sort_by,
         limit=limit,
     )
 
@@ -113,6 +122,83 @@ async def get_intelligence_dashboard(
     """
     service = get_trend_service()
     return service.get_intelligence_dashboard(period_days=period_days)
+
+
+# =======================
+# CATEGORY ANALYSIS ENDPOINTS
+# =======================
+
+
+@router.get("/categories")
+async def get_category_metrics(
+    period_days: int = Query(90, ge=7, le=365, description="Analysis period in days"),
+):
+    """
+    Get warehouse composition and trends by product category.
+
+    Only includes tile categories (MADERAS, EXTERIORES, MARMOLIZADOS, OTHER).
+    Excludes non-tile categories (FURNITURE, SINK, SURCHARGE).
+
+    **Response fields:**
+    - `category`: Category name
+    - `warehouse_m2`: Total m² in warehouse
+    - `warehouse_pct`: % of total warehouse occupied
+    - `product_count`: Number of products in category
+    - `velocity_change_pct`: % change vs previous period
+    - `trend_direction`: UP, DOWN, or STABLE
+    - `avg_warehouse_days`: Average coverage days
+    - `products_at_risk`: Products with < 30 days stock
+    """
+    service = get_metrics_service()
+    categories = service.get_category_metrics(period_days=period_days)
+    return [
+        {
+            "category": c.category,
+            "warehouse_m2": str(c.warehouse_m2),
+            "warehouse_pct": str(c.warehouse_pct),
+            "product_count": c.product_count,
+            "total_velocity_m2_day": str(c.total_velocity_m2_day),
+            "avg_velocity_m2_day": str(c.avg_velocity_m2_day),
+            "velocity_change_pct": str(c.velocity_change_pct),
+            "trend_direction": c.trend_direction,
+            "trend_strength": c.trend_strength,
+            "avg_warehouse_days": str(c.avg_warehouse_days) if c.avg_warehouse_days else None,
+            "products_at_risk": c.products_at_risk,
+        }
+        for c in categories
+    ]
+
+
+@router.get("/categories/insights")
+async def get_category_insights(
+    period_days: int = Query(90, ge=7, le=365, description="Analysis period in days"),
+):
+    """
+    Get actionable insights based on category metrics.
+
+    Analyzes warehouse composition vs. sales trends to identify:
+    - IMBALANCE: Declining category occupies significant warehouse space
+    - GROWTH_OPPORTUNITY: Growing category with low inventory
+    - RISK: Multiple products at risk in a category
+    - LOW_COVERAGE: Category average coverage is dangerously low
+
+    **Response fields:**
+    - `category`: Category name
+    - `insight_type`: IMBALANCE, GROWTH_OPPORTUNITY, RISK, or LOW_COVERAGE
+    - `message`: Human-readable insight
+    - `severity`: INFO, WARNING, or CRITICAL
+    """
+    service = get_metrics_service()
+    insights = service.get_category_insights(period_days=period_days)
+    return [
+        {
+            "category": i.category,
+            "insight_type": i.insight_type,
+            "message": i.message,
+            "severity": i.severity,
+        }
+        for i in insights
+    ]
 
 
 # =======================

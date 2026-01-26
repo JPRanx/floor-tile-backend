@@ -64,3 +64,44 @@ class ProductMetrics(BaseModel):
     # Confidence
     confidence: str = Field(default="LOW", description="HIGH, MEDIUM, or LOW")
     sample_count: int = Field(default=0, description="Number of sales records")
+
+
+class CategoryMetrics(BaseModel):
+    """Aggregated metrics for a product category.
+
+    Used by Intelligence page to show warehouse composition and trends by category.
+    """
+
+    category: str = Field(..., description="Category name (MADERAS, EXTERIORES, etc.)")
+
+    # Warehouse composition
+    warehouse_m2: Decimal = Field(..., description="Total m² in warehouse for this category")
+    warehouse_pct: Decimal = Field(..., description="% of total warehouse occupied by this category")
+    product_count: int = Field(..., description="Number of products in this category")
+
+    # Sales velocity
+    total_velocity_m2_day: Decimal = Field(..., description="Combined daily velocity for all products")
+    avg_velocity_m2_day: Decimal = Field(..., description="Average daily velocity per product")
+
+    # Trend (category-level aggregation)
+    velocity_change_pct: Decimal = Field(default=Decimal("0"), description="% change vs previous period")
+    trend_direction: str = Field(default="STABLE", description="UP, DOWN, or STABLE")
+    trend_strength: str = Field(default="WEAK", description="STRONG, MODERATE, or WEAK")
+
+    # Coverage
+    avg_warehouse_days: Optional[Decimal] = Field(None, description="Average days of stock across products")
+    products_at_risk: int = Field(default=0, description="Products with < 30 days of stock")
+
+
+class CategoryInsight(BaseModel):
+    """Generated insight about a category.
+
+    Examples:
+    - "MARMOLIZADOS declining 12% but occupies 28% of warehouse"
+    - "MADERAS growing 15% with only 18% warehouse share - consider restocking"
+    """
+
+    category: str
+    insight_type: str = Field(..., description="Type: IMBALANCE, GROWTH_OPPORTUNITY, RISK, etc.")
+    message: str = Field(..., description="Human-readable insight message")
+    severity: str = Field(default="INFO", description="INFO, WARNING, or CRITICAL")

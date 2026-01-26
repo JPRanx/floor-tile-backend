@@ -26,13 +26,14 @@ from collections import defaultdict
 import structlog
 
 from config import get_supabase_client
-from models.metrics import StockCoverage, ProductMetrics
+from models.metrics import StockCoverage, ProductMetrics, CategoryMetrics, CategoryInsight
+from models.product import TILE_CATEGORIES
 
 logger = structlog.get_logger(__name__)
 
-# Configuration — Standard across all services
-VELOCITY_PERIOD_DAYS = 90
-COMPARISON_PERIOD_DAYS = 90
+# Configuration — Default periods (can be overridden via parameter)
+DEFAULT_VELOCITY_PERIOD_DAYS = 90
+DEFAULT_COMPARISON_PERIOD_DAYS = 90
 
 
 def round_decimal(value: Decimal, places: int = 2) -> Decimal:
@@ -48,6 +49,7 @@ class MetricsService:
 
     def get_all_product_metrics(
         self,
+        period_days: int = DEFAULT_VELOCITY_PERIOD_DAYS,
         next_boat_arrival_days: Optional[int] = None
     ) -> List[ProductMetrics]:
         """
@@ -57,12 +59,13 @@ class MetricsService:
         or use cached results from this.
 
         Args:
+            period_days: Number of days for velocity calculation (default 90)
             next_boat_arrival_days: Days until next boat arrives (for gap analysis)
 
         Returns:
             List of ProductMetrics for all active products
         """
-        logger.info("calculating_all_product_metrics")
+        logger.info("calculating_all_product_metrics", period_days=period_days)
 
         # === 1. FETCH ALL DATA IN BATCH ===
 
@@ -84,10 +87,11 @@ class MetricsService:
             if pid and pid not in inventory_by_product:
                 inventory_by_product[pid] = snap
 
-        # Sales (last 180 days for both current and comparison periods)
+        # Sales (fetch period + comparison period)
         today = date.today()
-        sales_start = today - timedelta(days=VELOCITY_PERIOD_DAYS + COMPARISON_PERIOD_DAYS)
-        current_start = today - timedelta(days=VELOCITY_PERIOD_DAYS)
+        comparison_days = period_days  # Compare against same-length previous period
+        sales_start = today - timedelta(days=period_days + comparison_days)
+        current_start = today - timedelta(days=period_days)
 
         sales_result = self.db.table("sales").select(
             "product_id, week_start, quantity_m2"
@@ -126,9 +130,9 @@ class MetricsService:
             warehouse_m2 = Decimal(str(inv.get("warehouse_qty") or 0))
             in_transit_m2 = Decimal(str(inv.get("in_transit_qty") or 0))
 
-            # Velocity (90-day, 2 decimal precision)
+            # Velocity (based on period_days, 2 decimal precision)
             total_current = current_sales.get(pid, Decimal("0"))
-            velocity = total_current / VELOCITY_PERIOD_DAYS if VELOCITY_PERIOD_DAYS > 0 else Decimal("0")
+            velocity = total_current / Decimal(str(period_days)) if period_days > 0 else Decimal("0")
             velocity = round_decimal(velocity, 2)
 
             # Trend calculation
@@ -207,6 +211,7 @@ class MetricsService:
     def get_product_metrics(
         self,
         product_id: str,
+        period_days: int = DEFAULT_VELOCITY_PERIOD_DAYS,
         next_boat_arrival_days: Optional[int] = None
     ) -> Optional[ProductMetrics]:
         """Get metrics for a single product.
@@ -214,7 +219,7 @@ class MetricsService:
         This calls get_all_product_metrics and filters.
         For bulk operations, call get_all_product_metrics directly.
         """
-        all_metrics = self.get_all_product_metrics(next_boat_arrival_days)
+        all_metrics = self.get_all_product_metrics(period_days, next_boat_arrival_days)
         return next((m for m in all_metrics if m.product_id == product_id), None)
 
     def _classify_trend(self, change_pct: Decimal) -> tuple[str, str]:
@@ -236,6 +241,176 @@ class MetricsService:
 
         direction = "UP" if change_pct > 0 else "DOWN"
         return direction, strength
+
+    def get_category_metrics(
+        self,
+        period_days: int = DEFAULT_VELOCITY_PERIOD_DAYS,
+    ) -> List[CategoryMetrics]:
+        """
+        Get aggregated metrics by category.
+
+        Only includes tile categories (MADERAS, EXTERIORES, MARMOLIZADOS, OTHER).
+        Excludes FURNITURE, SINK, SURCHARGE.
+
+        Args:
+            period_days: Number of days for velocity calculation
+
+        Returns:
+            List of CategoryMetrics, one per tile category
+        """
+        logger.info("calculating_category_metrics", period_days=period_days)
+
+        # Get all product metrics
+        all_metrics = self.get_all_product_metrics(period_days=period_days)
+
+        # Filter to tile categories only
+        tile_category_names = {cat.value for cat in TILE_CATEGORIES}
+        tile_metrics = [m for m in all_metrics if m.category in tile_category_names]
+
+        # Calculate total warehouse m² for percentage calculation
+        total_warehouse_m2 = sum(m.coverage.warehouse_m2 for m in tile_metrics)
+
+        # Group by category
+        by_category: Dict[str, List[ProductMetrics]] = defaultdict(list)
+        for m in tile_metrics:
+            by_category[m.category or "OTHER"].append(m)
+
+        # Build CategoryMetrics for each category
+        results = []
+        for cat_name, products in by_category.items():
+            # Warehouse composition
+            cat_warehouse_m2 = sum(p.coverage.warehouse_m2 for p in products)
+            cat_warehouse_pct = (
+                round_decimal((cat_warehouse_m2 / total_warehouse_m2) * 100, 2)
+                if total_warehouse_m2 > 0 else Decimal("0")
+            )
+
+            # Velocity
+            total_velocity = sum(p.coverage.velocity_m2_day for p in products)
+            avg_velocity = (
+                round_decimal(total_velocity / len(products), 2)
+                if products else Decimal("0")
+            )
+
+            # Trend - weighted average by warehouse m²
+            if cat_warehouse_m2 > 0:
+                weighted_change = sum(
+                    p.velocity_change_pct * p.coverage.warehouse_m2
+                    for p in products
+                )
+                avg_change_pct = round_decimal(weighted_change / cat_warehouse_m2, 2)
+            else:
+                avg_change_pct = Decimal("0")
+
+            direction, strength = self._classify_trend(avg_change_pct)
+
+            # Coverage
+            products_with_days = [
+                p for p in products
+                if p.coverage.warehouse_days is not None
+            ]
+            if products_with_days:
+                avg_days = sum(p.coverage.warehouse_days for p in products_with_days) / len(products_with_days)
+                avg_warehouse_days = round_decimal(avg_days, 2)
+            else:
+                avg_warehouse_days = None
+
+            # Products at risk (< 30 days of stock)
+            products_at_risk = sum(
+                1 for p in products
+                if p.coverage.warehouse_days is not None and p.coverage.warehouse_days < 30
+            )
+
+            results.append(CategoryMetrics(
+                category=cat_name,
+                warehouse_m2=round_decimal(cat_warehouse_m2, 2),
+                warehouse_pct=cat_warehouse_pct,
+                product_count=len(products),
+                total_velocity_m2_day=round_decimal(total_velocity, 2),
+                avg_velocity_m2_day=avg_velocity,
+                velocity_change_pct=avg_change_pct,
+                trend_direction=direction,
+                trend_strength=strength,
+                avg_warehouse_days=avg_warehouse_days,
+                products_at_risk=products_at_risk,
+            ))
+
+        # Sort by warehouse percentage descending
+        results.sort(key=lambda c: c.warehouse_pct, reverse=True)
+
+        logger.info("category_metrics_calculated", count=len(results))
+        return results
+
+    def get_category_insights(
+        self,
+        period_days: int = DEFAULT_VELOCITY_PERIOD_DAYS,
+    ) -> List[CategoryInsight]:
+        """
+        Generate actionable insights based on category metrics.
+
+        Looks for:
+        - IMBALANCE: High warehouse % but declining trend
+        - GROWTH_OPPORTUNITY: Growing trend but low warehouse %
+        - RISK: Multiple products at risk in a category
+
+        Returns:
+            List of CategoryInsight with recommendations
+        """
+        logger.info("generating_category_insights")
+
+        categories = self.get_category_metrics(period_days=period_days)
+        insights = []
+
+        for cat in categories:
+            # IMBALANCE: Declining category occupies significant warehouse space
+            if (
+                cat.trend_direction == "DOWN"
+                and cat.velocity_change_pct <= Decimal("-10")
+                and cat.warehouse_pct >= Decimal("20")
+            ):
+                insights.append(CategoryInsight(
+                    category=cat.category,
+                    insight_type="IMBALANCE",
+                    message=f"{cat.category} is declining {abs(cat.velocity_change_pct):.0f}% but occupies {cat.warehouse_pct:.0f}% of warehouse",
+                    severity="WARNING",
+                ))
+
+            # GROWTH_OPPORTUNITY: Growing category with low inventory
+            if (
+                cat.trend_direction == "UP"
+                and cat.velocity_change_pct >= Decimal("10")
+                and cat.warehouse_pct <= Decimal("25")
+            ):
+                insights.append(CategoryInsight(
+                    category=cat.category,
+                    insight_type="GROWTH_OPPORTUNITY",
+                    message=f"{cat.category} is growing {cat.velocity_change_pct:.0f}% but only has {cat.warehouse_pct:.0f}% warehouse share",
+                    severity="INFO",
+                ))
+
+            # RISK: Many products at risk
+            if cat.products_at_risk >= 3:
+                insights.append(CategoryInsight(
+                    category=cat.category,
+                    insight_type="RISK",
+                    message=f"{cat.category} has {cat.products_at_risk} products with <30 days stock",
+                    severity="CRITICAL" if cat.products_at_risk >= 5 else "WARNING",
+                ))
+
+            # LOW_COVERAGE: Category average coverage is dangerously low
+            if (
+                cat.avg_warehouse_days is not None
+                and cat.avg_warehouse_days < Decimal("45")
+            ):
+                insights.append(CategoryInsight(
+                    category=cat.category,
+                    insight_type="LOW_COVERAGE",
+                    message=f"{cat.category} has only {cat.avg_warehouse_days:.0f} days avg coverage",
+                    severity="WARNING",
+                ))
+
+        logger.info("category_insights_generated", count=len(insights))
+        return insights
 
 
 # Singleton instance
