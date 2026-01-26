@@ -233,6 +233,7 @@ class TrendService:
         self,
         period_days: int = 90,
         comparison_period_days: int = 90,
+        sort_by: str = "velocity",
         limit: int = 50,
     ) -> List[ProductTrend]:
         """
@@ -241,10 +242,11 @@ class TrendService:
         Args:
             period_days: Current period to analyze
             comparison_period_days: Previous period for comparison
+            sort_by: Sort order - "velocity" (trend %), "revenue" ($), or "volume" (m²/day)
             limit: Maximum products to return
 
         Returns:
-            List of ProductTrend sorted by velocity change
+            List of ProductTrend sorted by specified field
         """
         today = date.today()
         current_start = today - timedelta(days=period_days)
@@ -270,8 +272,9 @@ class TrendService:
 
         # Get days_of_stock from MetricsService (single source of truth)
         # This ensures Dashboard, Order Builder, and Intelligence all show the same value
+        # Forward period_days to ensure consistent velocity calculation
         metrics_service = get_metrics_service()
-        all_metrics = metrics_service.get_all_product_metrics()
+        all_metrics = metrics_service.get_all_product_metrics(period_days=period_days)
         metrics_by_product = {m.product_id: m for m in all_metrics}
 
         # Also get inventory for current_stock_m2 display
@@ -350,8 +353,15 @@ class TrendService:
             current_stock = inventory_by_product.get(pid, Decimal("0"))
             product_metrics = metrics_by_product.get(pid)
             days_of_stock = None
-            if product_metrics and product_metrics.coverage.warehouse_days is not None:
-                days_of_stock = int(product_metrics.coverage.warehouse_days)
+            days_with_transit = None
+            in_transit_m2 = None
+            if product_metrics:
+                if product_metrics.coverage.warehouse_days is not None:
+                    days_of_stock = int(product_metrics.coverage.warehouse_days)
+                if product_metrics.coverage.with_transit_days is not None:
+                    days_with_transit = int(product_metrics.coverage.with_transit_days)
+                if product_metrics.coverage.in_transit_m2:
+                    in_transit_m2 = product_metrics.coverage.in_transit_m2
 
             # Generate sparkline
             sparkline_data = current_sales.get(pid, []) + previous_sales.get(pid, [])
@@ -373,13 +383,21 @@ class TrendService:
                 sample_count=len(all_volumes),
                 days_of_stock=days_of_stock,
                 current_stock_m2=round(current_stock, 2) if current_stock else None,
+                in_transit_m2=round(in_transit_m2, 2) if in_transit_m2 else None,
+                days_with_transit=days_with_transit,
                 sparkline=sparkline,
             ))
 
-        # Sort by velocity change descending
-        trends.sort(key=lambda t: t.velocity_change_pct, reverse=True)
+        # Sort by specified field (descending)
+        sort_keys = {
+            "velocity": lambda t: t.velocity_change_pct,
+            "revenue": lambda t: t.total_revenue_usd,
+            "volume": lambda t: t.daily_velocity_m2,
+        }
+        sort_key = sort_keys.get(sort_by, sort_keys["velocity"])
+        trends.sort(key=sort_key, reverse=True)
 
-        logger.info("product_trends_calculated", count=len(trends))
+        logger.info("product_trends_calculated", count=len(trends), sort_by=sort_by)
         return trends[:limit]
 
     # ==================
