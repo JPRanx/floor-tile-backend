@@ -95,6 +95,52 @@ class ExcludedProduct(BaseSchema):
     last_sale_days_ago: Optional[int] = None
 
 
+# ===================
+# PRIORITY SCORING (Layer 2 & 4)
+# ===================
+
+class DominantFactor(str, Enum):
+    """Which factor contributed most to the score."""
+    STOCKOUT = "stockout"
+    CUSTOMER = "customer"
+    TREND = "trend"
+    REVENUE = "revenue"
+
+
+class ProductScore(BaseSchema):
+    """Weighted priority score breakdown (0-100 total)."""
+    total: int = Field(..., ge=0, le=100, description="Composite score 0-100")
+    stockout_risk: int = Field(..., ge=0, le=40, description="0-40 points: Days until stockout")
+    customer_demand: int = Field(..., ge=0, le=30, description="0-30 points: Customers waiting")
+    growth_trend: int = Field(..., ge=0, le=20, description="0-20 points: Demand trend")
+    revenue_impact: int = Field(..., ge=0, le=10, description="0-10 points: Sales velocity")
+
+
+class ProductReasoningDisplay(BaseSchema):
+    """
+    Human-readable reasoning for product card display.
+
+    This is separate from ProductReasoning which stores calculation details.
+    This is for UI presentation.
+    """
+    why_product_sentence: str = Field(
+        ...,
+        description="One sentence explaining why: 'Out of stock · 2 customers waiting'"
+    )
+    why_quantity_sentence: str = Field(
+        ...,
+        description="One sentence explaining quantity: '63d coverage × 30 m²/day'"
+    )
+    dominant_factor: str = Field(
+        ...,
+        description="Which factor dominates: stockout, customer, trend, revenue"
+    )
+    would_include_if: Optional[str] = Field(
+        None,
+        description="For excluded products: 'Stock drops below 60 days' (Phase 3)"
+    )
+
+
 class OrderReasoning(BaseSchema):
     """Structured reasoning narrative for order strategy."""
 
@@ -267,6 +313,16 @@ class OrderBuilderProduct(BaseSchema):
     # Reasoning (explains WHY this recommendation)
     reasoning: Optional[ProductReasoning] = Field(
         None, description="Detailed reasoning for this recommendation"
+    )
+
+    # Priority score (Layer 2 scoring system)
+    score: Optional[ProductScore] = Field(
+        None, description="Weighted priority score breakdown (0-100)"
+    )
+
+    # Display reasoning (Layer 4 per-product explanation)
+    reasoning_display: Optional[ProductReasoningDisplay] = Field(
+        None, description="Human-readable reasoning for UI display"
     )
 
     # Weight data (for container optimization)
