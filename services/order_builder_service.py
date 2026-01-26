@@ -51,6 +51,7 @@ from models.order_builder import (
     DemandAnalysis,
     QuantityReasoning,
     OrderSummaryReasoning,
+    OrderReasoning,
     ExcludedProduct,
     PrimaryFactor,
 )
@@ -170,7 +171,9 @@ class OrderBuilderService:
         summary.alerts = alerts
 
         # Step 7: Generate summary reasoning
-        summary_reasoning = self._generate_summary_reasoning(all_products, boat, summary)
+        summary_reasoning = self._generate_summary_reasoning(
+            all_products, boat, summary, constraint_analysis
+        )
 
         # Re-group after mode application
         high_priority = [p for p in all_products if p.priority == "HIGH_PRIORITY"]
@@ -1107,7 +1110,8 @@ class OrderBuilderService:
         self,
         all_products: list[OrderBuilderProduct],
         boat: OrderBuilderBoat,
-        summary: OrderBuilderSummary
+        summary: OrderBuilderSummary,
+        constraint_analysis: Optional[ConstraintAnalysis] = None
     ) -> OrderSummaryReasoning:
         """
         Generate order-level reasoning with strategy, counts, insights, and excluded products.
@@ -1205,6 +1209,16 @@ class OrderBuilderService:
                 f"{trending_up_count} product(s) with strong upward demand trend"
             )
 
+        # Generate structured reasoning narrative
+        reasoning = self._generate_order_reasoning(
+            all_products=all_products,
+            boat=boat,
+            summary=summary,
+            constraint_analysis=constraint_analysis,
+            critical_count=critical_count,
+            stockout_risk_count=stockout_risk_count,
+        )
+
         return OrderSummaryReasoning(
             strategy=strategy,
             days_to_boat=boat.days_until_departure,
@@ -1214,8 +1228,140 @@ class OrderBuilderService:
             urgent_count=urgent_count,
             stable_count=stable_count,
             excluded_count=excluded_count,
-            key_insights=key_insights[:5],  # Top 5 insights
+            key_insights=key_insights[:5],  # Top 5 insights (legacy)
             excluded_products=excluded_products[:10],  # Top 10 excluded
+            reasoning=reasoning,
+        )
+
+    def _generate_order_reasoning(
+        self,
+        all_products: list[OrderBuilderProduct],
+        boat: OrderBuilderBoat,
+        summary: OrderBuilderSummary,
+        constraint_analysis: Optional[ConstraintAnalysis],
+        critical_count: int,
+        stockout_risk_count: int,
+    ) -> OrderReasoning:
+        """
+        Generate structured reasoning narrative with 4 sentences.
+
+        Template-based approach for consistent, translatable output.
+        """
+        boat_date_str = boat.departure_date.strftime("%b %d")  # e.g., "Feb 15"
+
+        # === STRATEGY SENTENCE ===
+        # Why are we ordering?
+        if stockout_risk_count > 0:
+            strategy_sentence = (
+                f"Prioritizing {stockout_risk_count} products at stockout risk "
+                f"before the {boat_date_str} boat."
+            )
+        elif critical_count > 0:
+            strategy_sentence = (
+                f"Addressing {critical_count} critical products "
+                f"for the {boat_date_str} shipment."
+            )
+        else:
+            strategy_sentence = (
+                f"Replenishing inventory for the {boat_date_str} shipment."
+            )
+
+        # === RISK SENTENCE ===
+        # What's the biggest risk?
+        products_with_stock = [
+            p for p in all_products
+            if p.reasoning and p.reasoning.stock.days_of_stock is not None
+        ]
+
+        highest_risk_sku = None
+        highest_risk_days = None
+
+        if products_with_stock:
+            most_critical = min(
+                products_with_stock,
+                key=lambda p: p.reasoning.stock.days_of_stock
+            )
+            highest_risk_sku = most_critical.sku
+            highest_risk_days = int(most_critical.reasoning.stock.days_of_stock)
+
+            if highest_risk_days <= 0:
+                risk_sentence = f"{highest_risk_sku} is out of stock now."
+            elif highest_risk_days < 7:
+                risk_sentence = (
+                    f"{highest_risk_sku} is most critical "
+                    f"({highest_risk_days} days of stock)."
+                )
+            elif highest_risk_days < boat.days_until_warehouse:
+                risk_sentence = (
+                    f"{highest_risk_sku} will stockout before boat arrives "
+                    f"({highest_risk_days} days vs {boat.days_until_warehouse} day lead time)."
+                )
+            else:
+                risk_sentence = "All products have adequate coverage until boat arrives."
+        else:
+            risk_sentence = "Unable to assess risk due to insufficient sales data."
+
+        # === CONSTRAINT SENTENCE ===
+        # What's limiting the order?
+        limiting_factor = "none"
+        deferred_count = 0
+
+        if constraint_analysis:
+            limiting_factor = constraint_analysis.limiting_factor
+            deferred_count = constraint_analysis.deferred_pallets
+
+        if limiting_factor == "warehouse":
+            constraint_sentence = (
+                f"Warehouse space is the limiting factor. "
+                f"{deferred_count} pallets deferred to next boat."
+            )
+        elif limiting_factor == "boat":
+            constraint_sentence = (
+                f"Boat capacity is the limiting factor. "
+                f"{deferred_count} pallets deferred to next boat."
+            )
+        elif limiting_factor == "mode":
+            constraint_sentence = (
+                f"Mode limit reached. "
+                f"Switch to Optimal mode to order {deferred_count} more pallets."
+            )
+        elif deferred_count > 0:
+            constraint_sentence = f"{deferred_count} pallets deferred to next boat."
+        else:
+            constraint_sentence = "No constraints — all recommended products fit."
+
+        # === CUSTOMER SENTENCE ===
+        # Who's waiting?
+        customers_with_demand = set()
+        for p in all_products:
+            if p.customers_expecting_count and p.customers_expecting_count > 0:
+                customers_with_demand.add(p.sku)
+
+        customers_expecting = len(customers_with_demand)
+
+        if customers_expecting >= 3:
+            customer_sentence = (
+                f"{customers_expecting} customers expected to order soon "
+                f"based on purchase patterns."
+            )
+        elif customers_expecting > 0:
+            customer_sentence = (
+                f"{customers_expecting} customer(s) expected to order soon."
+            )
+        else:
+            customer_sentence = None  # No customer signal to report
+
+        return OrderReasoning(
+            strategy_sentence=strategy_sentence,
+            risk_sentence=risk_sentence,
+            constraint_sentence=constraint_sentence,
+            customer_sentence=customer_sentence,
+            limiting_factor=limiting_factor,
+            deferred_count=deferred_count,
+            customers_expecting=customers_expecting,
+            critical_count=critical_count,
+            highest_risk_sku=highest_risk_sku,
+            highest_risk_days=highest_risk_days,
         )
 
     def _empty_response(self, mode: OrderBuilderMode) -> OrderBuilderResponse:

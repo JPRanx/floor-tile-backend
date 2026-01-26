@@ -95,6 +95,54 @@ class ExcludedProduct(BaseSchema):
     last_sale_days_ago: Optional[int] = None
 
 
+class OrderReasoning(BaseSchema):
+    """Structured reasoning narrative for order strategy."""
+
+    # Core narrative sentences (1 sentence each)
+    strategy_sentence: str = Field(
+        ...,
+        description="Why this order: 'Prioritizing 22 products at stockout risk...'"
+    )
+    risk_sentence: str = Field(
+        ...,
+        description="Biggest risk: 'TOLU BEIGE is most critical (0 days)...'"
+    )
+    constraint_sentence: str = Field(
+        ...,
+        description="What limits: 'Warehouse space is the limit...'"
+    )
+    customer_sentence: Optional[str] = Field(
+        None,
+        description="Customer signal: '3 customers expected to order soon...'"
+    )
+
+    # Supporting facts for UI badges/pills
+    limiting_factor: str = Field(
+        default="none",
+        description="warehouse, boat, mode, or none"
+    )
+    deferred_count: int = Field(
+        default=0,
+        description="Pallets deferred to next boat"
+    )
+    customers_expecting: int = Field(
+        default=0,
+        description="Customers expected to order soon"
+    )
+    critical_count: int = Field(
+        default=0,
+        description="Products at stockout risk"
+    )
+    highest_risk_sku: Optional[str] = Field(
+        None,
+        description="SKU with lowest days of stock"
+    )
+    highest_risk_days: Optional[int] = Field(
+        None,
+        description="Days of stock for highest risk product"
+    )
+
+
 class OrderSummaryReasoning(BaseSchema):
     """Order-level reasoning and strategy summary."""
     strategy: str = Field(..., description="STOCKOUT_PREVENTION, DEMAND_CAPTURE, BALANCED")
@@ -105,8 +153,14 @@ class OrderSummaryReasoning(BaseSchema):
     urgent_count: int = Field(default=0, description="Products with urgent priority")
     stable_count: int = Field(default=0, description="Products with stable stock")
     excluded_count: int = Field(default=0, description="Products excluded from recommendations")
-    key_insights: list[str] = Field(default_factory=list, description="Top insights about the order")
+    key_insights: list[str] = Field(default_factory=list, description="Top insights about the order (legacy)")
     excluded_products: list[ExcludedProduct] = Field(default_factory=list, description="Products not recommended")
+
+    # NEW: Structured reasoning narrative
+    reasoning: Optional[OrderReasoning] = Field(
+        None,
+        description="Structured narrative explaining order strategy"
+    )
 
 
 class CalculationBreakdown(BaseSchema):
