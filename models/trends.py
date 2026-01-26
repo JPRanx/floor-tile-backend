@@ -112,10 +112,16 @@ class ProductTrend(BaseSchema):
 
     # Inventory context
     days_of_stock: Optional[int] = Field(
-        None, description="Days of stock at current velocity"
+        None, description="Days of warehouse stock at current velocity"
     )
     current_stock_m2: Optional[Decimal] = Field(
-        None, description="Current inventory in m²"
+        None, description="Current warehouse inventory in m²"
+    )
+    in_transit_m2: Optional[Decimal] = Field(
+        None, description="In-transit inventory in m²"
+    )
+    days_with_transit: Optional[int] = Field(
+        None, description="Days of stock including in-transit"
     )
 
     # Sparkline data
