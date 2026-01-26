@@ -83,12 +83,8 @@ class RecommendationService:
         """
         logger.info("calculating_warehouse_allocations")
 
-        # Get all active products (1 query)
-        products, _ = self.product_service.get_all(
-            page=1,
-            page_size=1000,
-            active_only=True
-        )
+        # Get all active tile products (excludes FURNITURE, SINK, SURCHARGE)
+        products = self.product_service.get_all_active_tiles()
 
         # Get recent sales for ALL products in ONE query (was N queries!)
         sales_by_product = self.sales_service.get_recent_sales_all(

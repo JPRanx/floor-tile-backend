@@ -521,7 +521,7 @@ class ProductionScheduleService:
         # Get all products for fuzzy matching
         all_products = []
         try:
-            all_products = self.product_service.get_all_active()
+            all_products = self.product_service.get_all_active_tiles()
         except Exception as e:
             logger.warning("get_products_for_fuzzy_failed", error=str(e))
 

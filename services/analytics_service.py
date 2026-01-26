@@ -14,6 +14,7 @@ from decimal import Decimal
 import structlog
 
 from config import get_supabase_client
+from models.product import TILE_CATEGORIES
 from models.analytics import (
     CustomerSummary,
     CustomerAnalyticsResponse,
@@ -233,8 +234,9 @@ class AnalyticsService:
             # Calculate FOB cost from sales × product.fob_cost_usd
             fob_total = Decimal("0")
 
-            # Get all products with FOB cost
-            products_result = self.db.table("products").select("id, fob_cost_usd").execute()
+            # Get all tile products with FOB cost (excludes FURNITURE, SINK, SURCHARGE)
+            tile_categories = [cat.value for cat in TILE_CATEGORIES]
+            products_result = self.db.table("products").select("id, fob_cost_usd").eq("active", True).in_("category", tile_categories).execute()
             products_by_id = {
                 p["id"]: Decimal(str(p.get("fob_cost_usd") or 0))
                 for p in products_result.data
@@ -480,8 +482,9 @@ class AnalyticsService:
         Returns:
             Tuple of (inflows list, total revenue)
         """
-        # Get all products to map id -> sku
-        products_result = self.db.table("products").select("id, sku").execute()
+        # Get all tile products to map id -> sku (excludes FURNITURE, SINK, SURCHARGE)
+        tile_categories = [cat.value for cat in TILE_CATEGORIES]
+        products_result = self.db.table("products").select("id, sku").eq("active", True).in_("category", tile_categories).execute()
         products_by_id = {
             p["id"]: p.get("sku") or "Unknown"
             for p in products_result.data
@@ -560,8 +563,9 @@ class AnalyticsService:
                 "product_id, total_price_usd, quantity_m2"
             ).execute()
 
-            # Get product SKUs
-            products_result = self.db.table("products").select("id, sku").execute()
+            # Get tile product SKUs (excludes FURNITURE, SINK, SURCHARGE)
+            tile_categories = [cat.value for cat in TILE_CATEGORIES]
+            products_result = self.db.table("products").select("id, sku").eq("active", True).in_("category", tile_categories).execute()
             product_skus = {
                 p["id"]: p.get("sku") or "Unknown"
                 for p in products_result.data

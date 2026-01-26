@@ -14,7 +14,8 @@ from models.product import (
     ProductUpdate,
     ProductResponse,
     Category,
-    Rotation
+    Rotation,
+    TILE_CATEGORIES,
 )
 from exceptions import (
     ProductNotFoundError,
@@ -182,6 +183,38 @@ class ProductService:
                 sku=sku,
                 error=str(e)
             )
+            raise DatabaseError("select", str(e))
+
+    def get_all_active_tiles(self) -> list[ProductResponse]:
+        """
+        Get all active tile products (excludes FURNITURE, SINK, SURCHARGE).
+
+        Used by services that should only process tile products.
+
+        Returns:
+            List of active tile ProductResponse objects
+        """
+        logger.debug("getting_all_active_tiles")
+
+        try:
+            tile_categories = [cat.value for cat in TILE_CATEGORIES]
+
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("active", True)
+                .in_("category", tile_categories)
+                .order("sku")
+                .execute()
+            )
+
+            products = [ProductResponse(**row) for row in result.data]
+
+            logger.debug("active_tiles_retrieved", count=len(products))
+            return products
+
+        except Exception as e:
+            logger.error("get_all_active_tiles_failed", error=str(e))
             raise DatabaseError("select", str(e))
 
     def get_by_factory_code(self, factory_code: str) -> Optional[ProductResponse]:

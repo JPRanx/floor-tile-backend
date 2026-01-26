@@ -15,6 +15,7 @@ import structlog
 
 from config import get_supabase_client
 from services.metrics_service import get_metrics_service
+from models.product import TILE_CATEGORIES
 from models.trends import (
     ConfidenceLevel,
     CountryBreakdown,
@@ -264,10 +265,11 @@ class TrendService:
             "product_id, week_start, quantity_m2, total_price_usd"
         ).gte("week_start", previous_start.isoformat()).execute()
 
-        # Fetch products for SKU mapping
+        # Fetch products for SKU mapping (tiles only - excludes FURNITURE, SINK, SURCHARGE)
+        tile_categories = [cat.value for cat in TILE_CATEGORIES]
         products_result = self.db.table("products").select(
             "id, sku, category"
-        ).execute()
+        ).eq("active", True).in_("category", tile_categories).execute()
         products_by_id = {p["id"]: p for p in products_result.data}
 
         # Get days_of_stock from MetricsService (single source of truth)
@@ -596,8 +598,9 @@ class TrendService:
             "customer_normalized, customer, product_id, week_start, quantity_m2, total_price_usd"
         ).execute()
 
-        # Fetch products for SKU mapping
-        products_result = self.db.table("products").select("id, sku").execute()
+        # Fetch products for SKU mapping (tiles only - excludes FURNITURE, SINK, SURCHARGE)
+        tile_categories = [cat.value for cat in TILE_CATEGORIES]
+        products_result = self.db.table("products").select("id, sku").eq("active", True).in_("category", tile_categories).execute()
         products_by_id = {p["id"]: p["sku"] for p in products_result.data}
 
         # Aggregate by customer

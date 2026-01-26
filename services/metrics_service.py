@@ -69,10 +69,11 @@ class MetricsService:
 
         # === 1. FETCH ALL DATA IN BATCH ===
 
-        # Products
+        # Products (tiles only - excludes FURNITURE, SINK, SURCHARGE)
+        tile_categories = [cat.value for cat in TILE_CATEGORIES]
         products_result = self.db.table("products").select(
             "id, sku, category"
-        ).eq("active", True).execute()
+        ).eq("active", True).in_("category", tile_categories).execute()
         products_by_id = {p["id"]: p for p in products_result.data}
 
         # Inventory (from canonical source: inventory_snapshots)

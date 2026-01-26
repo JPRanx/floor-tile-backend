@@ -434,7 +434,7 @@ async def get_unmapped_with_suggestions():
         # Get all products for fuzzy matching
         from services.product_service import get_product_service
         product_service = get_product_service()
-        all_products = product_service.get_all_active()
+        all_products = product_service.get_all_active_tiles()
 
         # Build UnmappedProduct with suggestions
         result = []
