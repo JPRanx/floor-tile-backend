@@ -66,6 +66,7 @@ logger = structlog.get_logger(__name__)
 # Constants (actual factory pallet dimensions)
 M2_PER_PALLET = Decimal("134.4")
 PALLETS_PER_CONTAINER = 14
+MAX_CONTAINERS_PER_BL = 5  # Each BL can hold up to 5 containers
 WAREHOUSE_CAPACITY = 740  # pallets
 
 
@@ -92,24 +93,28 @@ class OrderBuilderService:
     def get_order_builder(
         self,
         boat_id: Optional[str] = None,
-        mode: OrderBuilderMode = OrderBuilderMode.STANDARD,
+        num_bls: int = 1,
     ) -> OrderBuilderResponse:
         """
         Get complete Order Builder data.
 
         Args:
             boat_id: Optional specific boat ID. If None, uses next available.
-            mode: Optimization mode (minimal/standard/optimal)
+            num_bls: Number of BLs (1-5). Determines capacity: num_bls × 5 × 14 pallets.
+                     Default 1 (70 pallets) for backward compatibility.
 
         Returns:
             OrderBuilderResponse with all data needed for the UI
         """
+        # Clamp num_bls to valid range
+        num_bls = max(1, min(5, num_bls))
+
         timings = {}
         t0 = time.time()
         logger.info(
             "getting_order_builder",
             boat_id=boat_id,
-            mode=mode.value
+            num_bls=num_bls
         )
 
         # Step 1: Get boat info
@@ -162,13 +167,14 @@ class OrderBuilderService:
 
         logger.info("order_builder_timings", **timings)
 
-        # Step 4: Apply mode logic (pre-select products) with constraint analysis
+        # Step 4: Apply BL capacity logic (pre-select products) with constraint analysis
         all_products, constraint_analysis = self._apply_mode(
-            products_by_priority, mode, boat.max_containers, trend_data
+            products_by_priority, num_bls, boat.max_containers, trend_data
         )
 
-        # Step 5: Calculate summary
-        summary = self._calculate_summary(all_products, boat.max_containers)
+        # Step 5: Calculate summary (use BL capacity, not boat capacity)
+        bl_max_containers = num_bls * MAX_CONTAINERS_PER_BL
+        summary = self._calculate_summary(all_products, bl_max_containers)
 
         # Step 6: Generate alerts
         alerts = self._generate_alerts(all_products, summary, boat)
@@ -188,7 +194,7 @@ class OrderBuilderService:
         result = OrderBuilderResponse(
             boat=boat,
             next_boat=next_boat,
-            mode=mode,
+            num_bls=num_bls,
             high_priority=high_priority,
             consider=consider,
             well_covered=well_covered,
@@ -200,7 +206,8 @@ class OrderBuilderService:
 
         logger.info(
             "order_builder_generated",
-            mode=mode.value,
+            num_bls=num_bls,
+            bl_capacity=num_bls * MAX_CONTAINERS_PER_BL * PALLETS_PER_CONTAINER,
             high_priority=len(high_priority),
             consider=len(consider),
             well_covered=len(well_covered),
@@ -984,26 +991,25 @@ class OrderBuilderService:
     def _apply_mode(
         self,
         products_by_priority: dict[str, list[OrderBuilderProduct]],
-        mode: OrderBuilderMode,
+        num_bls: int,
         boat_max_containers: int,
         trend_data: dict[str, dict],
         warehouse_available_pallets: Optional[int] = None
     ) -> tuple[list[OrderBuilderProduct], ConstraintAnalysis]:
         """
-        Apply mode logic to pre-select products.
+        Apply BL capacity logic to pre-select products.
 
-        Mode determines container limit:
-        - minimal: 3 containers (42 pallets)
-        - standard: 4 containers (56 pallets)
-        - optimal: 5 containers (70 pallets)
+        BL count determines capacity:
+        - 1 BL  =  5 containers =  70 pallets
+        - 2 BLs = 10 containers = 140 pallets
+        - 3 BLs = 15 containers = 210 pallets
+        - 4 BLs = 20 containers = 280 pallets
+        - 5 BLs = 25 containers = 350 pallets
 
         Returns tuple of (products, constraint_analysis)
         """
-        mode_pallets = {
-            OrderBuilderMode.MINIMAL: 3 * PALLETS_PER_CONTAINER,   # 42
-            OrderBuilderMode.STANDARD: 4 * PALLETS_PER_CONTAINER,  # 56
-            OrderBuilderMode.OPTIMAL: 5 * PALLETS_PER_CONTAINER,   # 70
-        }[mode]
+        # BL capacity: num_bls × 5 containers × 14 pallets
+        bl_capacity = num_bls * MAX_CONTAINERS_PER_BL * PALLETS_PER_CONTAINER
 
         boat_capacity = boat_max_containers * PALLETS_PER_CONTAINER
 
@@ -1021,9 +1027,11 @@ class OrderBuilderService:
         total_needed_m2 = Decimal(total_needed) * M2_PER_PALLET
 
         # Determine limiting factor and effective limit
+        # Note: boat_capacity is NOT included as a separate constraint because
+        # bl_capacity already represents the logical limit (num_bls × 5 containers).
+        # The boat's physical capacity (25 containers max) is handled by limiting num_bls to 5.
         constraints = {
-            "mode": mode_pallets,
-            "boat": boat_capacity,
+            "bl_capacity": bl_capacity,
             "warehouse": warehouse_available_pallets,
         }
         limiting_factor = min(constraints, key=constraints.get)
@@ -1055,37 +1063,32 @@ class OrderBuilderService:
                     total_selected += remaining
             all_products.append(p)
 
-        # Second pass: CONSIDER (if mode >= standard)
-        if mode in [OrderBuilderMode.STANDARD, OrderBuilderMode.OPTIMAL]:
-            for p in products_by_priority.get("CONSIDER", []):
-                pallets_needed = p.suggested_pallets  # Use suggestion (includes trend adjustment)
-                if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
-                    p.is_selected = True
-                    p.selected_pallets = pallets_needed
-                    total_selected += pallets_needed
-                elif pallets_needed > 0:
-                    # Partial fill
-                    remaining = max_pallets - total_selected
-                    if remaining > 0:
-                        p.is_selected = True
-                        p.selected_pallets = remaining
-                        total_selected += remaining
-                all_products.append(p)
-        else:
-            # Still include CONSIDER products, just not selected
-            all_products.extend(products_by_priority.get("CONSIDER", []))
-
-        # Third pass: WELL_COVERED (only if mode == optimal and room left)
-        for p in products_by_priority.get("WELL_COVERED", []):
-            if mode == OrderBuilderMode.OPTIMAL:
+        # Second pass: CONSIDER (include if room available)
+        for p in products_by_priority.get("CONSIDER", []):
+            pallets_needed = p.suggested_pallets  # Use suggestion (includes trend adjustment)
+            if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
+                p.is_selected = True
+                p.selected_pallets = pallets_needed
+                total_selected += pallets_needed
+            elif pallets_needed > 0:
+                # Partial fill
                 remaining = max_pallets - total_selected
                 if remaining > 0:
-                    # Add partial to help fill containers (use suggestion if available)
-                    pallets_to_add = min(PALLETS_PER_CONTAINER, remaining, p.suggested_pallets or PALLETS_PER_CONTAINER)
-                    if pallets_to_add > 0:
-                        p.is_selected = True
-                        p.selected_pallets = pallets_to_add
-                        total_selected += pallets_to_add
+                    p.is_selected = True
+                    p.selected_pallets = remaining
+                    total_selected += remaining
+            all_products.append(p)
+
+        # Third pass: WELL_COVERED (include if room left)
+        for p in products_by_priority.get("WELL_COVERED", []):
+            remaining = max_pallets - total_selected
+            if remaining > 0:
+                # Add partial to help fill containers (use suggestion if available)
+                pallets_to_add = min(PALLETS_PER_CONTAINER, remaining, p.suggested_pallets or PALLETS_PER_CONTAINER)
+                if pallets_to_add > 0:
+                    p.is_selected = True
+                    p.selected_pallets = pallets_to_add
+                    total_selected += pallets_to_add
             all_products.append(p)
 
         # YOUR_CALL products - never auto-select
@@ -1123,7 +1126,7 @@ class OrderBuilderService:
             total_needed_m2=total_needed_m2,
             warehouse_available_pallets=warehouse_available_pallets,
             boat_capacity_pallets=boat_capacity,
-            mode_limit_pallets=mode_pallets,
+            bl_capacity_pallets=bl_capacity,
             limiting_factor=limiting_factor,
             effective_limit_pallets=effective_limit,
             can_order_pallets=total_selected,
@@ -1139,8 +1142,9 @@ class OrderBuilderService:
         )
 
         logger.debug(
-            "mode_applied",
-            mode=mode.value,
+            "bl_capacity_applied",
+            num_bls=num_bls,
+            bl_capacity=bl_capacity,
             max_pallets=max_pallets,
             total_selected=total_selected,
             products_count=len(all_products),

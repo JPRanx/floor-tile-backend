@@ -16,7 +16,6 @@ from pydantic import BaseModel
 import structlog
 
 from models.order_builder import (
-    OrderBuilderMode,
     OrderBuilderResponse,
     ConfirmOrderRequest,
     ConfirmOrderResponse,
@@ -69,9 +68,11 @@ def get_order_builder(
         None,
         description="Specific boat ID. If not provided, uses next available boat."
     ),
-    mode: OrderBuilderMode = Query(
-        OrderBuilderMode.STANDARD,
-        description="Optimization mode: minimal (3 cnt), standard (4 cnt), optimal (5 cnt)"
+    num_bls: int = Query(
+        1,
+        ge=1,
+        le=5,
+        description="Number of BLs (1-5). Determines capacity: num_bls × 5 × 14 pallets. Default 1 (70 pallets)."
     ),
 ) -> OrderBuilderResponse:
     """
@@ -80,24 +81,26 @@ def get_order_builder(
     Returns everything needed for the Order Builder hero page:
     - Target boat information
     - Products grouped by priority (HIGH_PRIORITY, CONSIDER, WELL_COVERED, YOUR_CALL)
-    - Pre-selected products based on mode
+    - Pre-selected products based on BL capacity
     - Order summary with capacity checks
     - Alerts for issues
 
-    Mode determines container target:
-    - minimal: 3 containers (42 pallets) — only HIGH_PRIORITY
-    - standard: 4 containers (56 pallets) — HIGH_PRIORITY + CONSIDER
-    - optimal: 5 containers (70 pallets) — fill boat with WELL_COVERED
+    BL count determines capacity:
+    - 1 BL  =  5 containers =  70 pallets
+    - 2 BLs = 10 containers = 140 pallets
+    - 3 BLs = 15 containers = 210 pallets
+    - 4 BLs = 20 containers = 280 pallets
+    - 5 BLs = 25 containers = 350 pallets
     """
     start_time = time.time()
     logger.info(
         "order_builder_request",
         boat_id=boat_id,
-        mode=mode.value
+        num_bls=num_bls
     )
 
     service = get_order_builder_service()
-    result = service.get_order_builder(boat_id=boat_id, mode=mode)
+    result = service.get_order_builder(boat_id=boat_id, num_bls=num_bls)
 
     elapsed = time.time() - start_time
     logger.info("order_builder_complete", elapsed_seconds=round(elapsed, 2))
@@ -297,7 +300,7 @@ def get_demand_forecast(
     # Get order builder data for velocity-based demand and boat info
     t1 = time.time()
     order_builder_service = get_order_builder_service()
-    order_data = order_builder_service.get_order_builder(boat_id=boat_id, mode=OrderBuilderMode.STANDARD)
+    order_data = order_builder_service.get_order_builder(boat_id=boat_id, num_bls=5)  # Max capacity to get all products
     timings["order_builder"] = round(time.time() - t1, 2)
 
     lead_time_days = order_data.boat.days_until_departure + 30  # +30 for transit
@@ -501,7 +504,7 @@ def generate_bl_allocation(
     order_builder_service = get_order_builder_service()
     order_data = order_builder_service.get_order_builder(
         boat_id=request.boat_id,
-        mode=OrderBuilderMode.OPTIMAL,  # Get all products
+        num_bls=5,  # Max capacity to get all products for allocation
     )
 
     # Get all products
@@ -592,7 +595,7 @@ def export_bl_allocation(
     order_builder_service = get_order_builder_service()
     order_data = order_builder_service.get_order_builder(
         boat_id=request.boat_id,
-        mode=OrderBuilderMode.OPTIMAL,
+        num_bls=5,  # Max capacity to get all products for allocation
     )
 
     # Get all products

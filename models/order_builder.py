@@ -439,12 +439,12 @@ class ConstraintAnalysis(BaseSchema):
     # Available capacity
     warehouse_available_pallets: int = Field(..., description="Room in warehouse for new pallets")
     boat_capacity_pallets: int = Field(..., description="Max pallets for this boat")
-    mode_limit_pallets: int = Field(..., description="Max pallets for selected mode")
+    bl_capacity_pallets: int = Field(..., description="Max pallets based on BL count (num_bls × 5 × 14)")
 
     # Limiting factor
     limiting_factor: str = Field(
         ...,
-        description="Which constraint is limiting: 'none', 'warehouse', 'boat', 'mode'"
+        description="Which constraint is limiting: 'none', 'warehouse', 'boat', 'bl_capacity'"
     )
     effective_limit_pallets: int = Field(..., description="Actual max pallets (min of all constraints)")
 
@@ -491,8 +491,8 @@ class OrderBuilderResponse(BaseSchema):
     boat: OrderBuilderBoat
     next_boat: Optional[OrderBuilderBoat] = None
 
-    # Mode
-    mode: OrderBuilderMode
+    # BL count (determines capacity)
+    num_bls: int = Field(default=1, ge=1, le=5, description="Number of BLs (1-5). Capacity = num_bls × 5 × 14 pallets")
 
     # Products grouped by priority
     high_priority: list[OrderBuilderProduct] = Field(default_factory=list)
