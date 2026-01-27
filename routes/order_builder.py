@@ -27,12 +27,18 @@ from models.order_builder import (
     OverdueSeverity,
     ProductDemand,
 )
+from models.bl_allocation import (
+    BLAllocationRequest,
+    BLAllocationResponse,
+    BLAllocationReport,
+)
 from models.factory_order import FactoryOrderCreate, FactoryOrderItemCreate
 from services.order_builder_service import get_order_builder_service
 from services.export_service import get_export_service, MONTHS_ES
 from services.factory_order_service import get_factory_order_service
 from services.customer_pattern_service import get_customer_pattern_service
 from services.trend_service import get_trend_service
+from services.bl_allocation_service import get_bl_allocation_service
 from exceptions import FactoryOrderPVExistsError, DatabaseError
 from collections import defaultdict
 
@@ -456,4 +462,188 @@ def get_demand_forecast(
         customers_due_soon=customers_due_soon[:20],  # Top 20
         overdue_alerts=overdue_alerts[:10],  # Top 10
         demand_by_product=demand_by_product[:20],  # Top 20 products
+    )
+
+
+@router.post("/generate-bl-allocation", response_model=BLAllocationResponse)
+def generate_bl_allocation(
+    request: BLAllocationRequest,
+) -> BLAllocationResponse:
+    """
+    Generate BL allocation from Order Builder selection.
+
+    Allocates products across BLs for customs safety:
+    - Critical products (score >= 85) are SPREAD across BLs
+    - Customer products are grouped together
+    - General stock is distributed evenly
+    - No BL exceeds 5 containers
+
+    Request body:
+    {
+        "num_bls": 3,
+        "boat_id": "uuid" (optional),
+        "products": [{"sku": "...", "pallets": 14}] (optional, uses current selection)
+    }
+
+    Returns:
+    - allocation: BLAllocationReport with per-BL breakdown
+    - download_url: URL to download Excel file (if generated)
+    """
+    start_time = time.time()
+    logger.info(
+        "bl_allocation_request",
+        num_bls=request.num_bls,
+        boat_id=request.boat_id,
+        product_count=len(request.products) if request.products else "from_order_builder",
+    )
+
+    # Get order builder data
+    order_builder_service = get_order_builder_service()
+    order_data = order_builder_service.get_order_builder(
+        boat_id=request.boat_id,
+        mode=OrderBuilderMode.OPTIMAL,  # Get all products
+    )
+
+    # Get all products
+    all_products = (
+        order_data.high_priority +
+        order_data.consider +
+        order_data.well_covered +
+        order_data.your_call
+    )
+
+    # If specific products provided, filter and update selection
+    if request.products:
+        product_pallets = {p["sku"]: p["pallets"] for p in request.products}
+        for product in all_products:
+            if product.sku in product_pallets:
+                product.is_selected = True
+                product.selected_pallets = product_pallets[product.sku]
+            else:
+                product.is_selected = False
+                product.selected_pallets = 0
+
+    # Get customer trends for primary customer lookup
+    trend_service = get_trend_service()
+    customer_trends = trend_service.get_customer_trends(
+        period_days=90,
+        comparison_period_days=90,
+        limit=100,
+    )
+
+    # Allocate products to BLs
+    bl_service = get_bl_allocation_service()
+    allocation_report = bl_service.allocate_products_to_bls(
+        products=all_products,
+        num_bls=request.num_bls,
+        customer_trends=customer_trends,
+        boat_departure=order_data.boat.departure_date,
+        boat_name=order_data.boat.name,
+    )
+
+    # Generate Excel file
+    export_service = get_export_service()
+    excel_file = export_service.generate_bl_allocation_excel(allocation_report)
+
+    # For now, return without download URL (frontend can call export endpoint separately)
+    # In the future, we could save to S3 and return URL
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "bl_allocation_complete",
+        elapsed_seconds=round(elapsed, 2),
+        num_bls=request.num_bls,
+        total_containers=allocation_report.total_containers,
+        total_critical=allocation_report.total_critical_products,
+        risk_even=allocation_report.risk_distribution_even,
+    )
+
+    return BLAllocationResponse(
+        allocation=allocation_report,
+        download_url=None,  # Excel can be downloaded via separate endpoint
+    )
+
+
+@router.post("/export-bl-allocation")
+def export_bl_allocation(
+    request: BLAllocationRequest,
+) -> StreamingResponse:
+    """
+    Export BL allocation to Excel file.
+
+    Similar to generate-bl-allocation but returns Excel file directly.
+
+    Request body:
+    {
+        "num_bls": 3,
+        "boat_id": "uuid" (optional),
+        "products": [{"sku": "...", "pallets": 14}] (optional)
+    }
+
+    Returns: Excel file download with BL breakdown
+    """
+    logger.info(
+        "export_bl_allocation_request",
+        num_bls=request.num_bls,
+        boat_id=request.boat_id,
+    )
+
+    # Get order builder data
+    order_builder_service = get_order_builder_service()
+    order_data = order_builder_service.get_order_builder(
+        boat_id=request.boat_id,
+        mode=OrderBuilderMode.OPTIMAL,
+    )
+
+    # Get all products
+    all_products = (
+        order_data.high_priority +
+        order_data.consider +
+        order_data.well_covered +
+        order_data.your_call
+    )
+
+    # If specific products provided, filter and update selection
+    if request.products:
+        product_pallets = {p["sku"]: p["pallets"] for p in request.products}
+        for product in all_products:
+            if product.sku in product_pallets:
+                product.is_selected = True
+                product.selected_pallets = product_pallets[product.sku]
+            else:
+                product.is_selected = False
+                product.selected_pallets = 0
+
+    # Get customer trends
+    trend_service = get_trend_service()
+    customer_trends = trend_service.get_customer_trends(
+        period_days=90,
+        comparison_period_days=90,
+        limit=100,
+    )
+
+    # Allocate products to BLs
+    bl_service = get_bl_allocation_service()
+    allocation_report = bl_service.allocate_products_to_bls(
+        products=all_products,
+        num_bls=request.num_bls,
+        customer_trends=customer_trends,
+        boat_departure=order_data.boat.departure_date,
+        boat_name=order_data.boat.name,
+    )
+
+    # Generate Excel file
+    export_service = get_export_service()
+    excel_file = export_service.generate_bl_allocation_excel(allocation_report)
+
+    # Generate filename
+    departure_str = order_data.boat.departure_date.strftime("%Y%m%d")
+    filename = f"BL_ALLOCATION_{departure_str}_{request.num_bls}BLs.xlsx"
+
+    return StreamingResponse(
+        excel_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
     )
