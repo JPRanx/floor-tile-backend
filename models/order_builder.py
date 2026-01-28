@@ -331,6 +331,18 @@ class OrderBuilderProduct(BaseSchema):
     velocity_change_pct: Decimal = Field(default=Decimal("0"), description="Percent change in velocity")
     daily_velocity_m2: Decimal = Field(default=Decimal("0"), description="Current daily velocity in m²")
 
+    # Dual velocity system (90-day vs 6-month comparison)
+    velocity_90d_m2: Decimal = Field(default=Decimal("0"), description="90-day daily velocity in m²")
+    velocity_180d_m2: Decimal = Field(default=Decimal("0"), description="6-month daily velocity in m²")
+    velocity_trend_signal: str = Field(
+        default="stable",
+        description="growing (90d > 180d by 20%+), stable (within 20%), declining (90d < 180d by 20%+)"
+    )
+    velocity_trend_ratio: Decimal = Field(
+        default=Decimal("1.0"),
+        description="Ratio of 90d/180d velocity (e.g., 1.5 = 90d is 50% higher)"
+    )
+
     # Calculation breakdown (transparency)
     calculation_breakdown: Optional[CalculationBreakdown] = Field(
         None, description="How the suggestion was calculated"

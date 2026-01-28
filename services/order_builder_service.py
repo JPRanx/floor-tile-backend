@@ -279,28 +279,80 @@ class OrderBuilderService:
 
     def _get_product_trends(self) -> dict[str, dict]:
         """
-        Fetch trend data from Intelligence system.
+        Fetch trend data from Intelligence system with dual velocity calculation.
 
-        Returns dict keyed by SKU with trend metrics.
+        Returns dict keyed by SKU with trend metrics including:
+        - 90-day velocity (recent)
+        - 180-day velocity (historical)
+        - Trend signal (growing/stable/declining based on 90d vs 180d comparison)
+
+        Trend signal thresholds:
+        - growing: 90d velocity > 180d velocity by 20%+
+        - declining: 90d velocity < 180d velocity by 20%+
+        - stable: within 20%
         """
         try:
-            trends = self.trend_service.get_product_trends(
+            # Get 90-day trends (existing)
+            trends_90d = self.trend_service.get_product_trends(
                 period_days=90,
                 comparison_period_days=90,
                 limit=200  # Get all products
             )
 
-            return {
-                t.sku: {
+            # Get 180-day trends for longer-term comparison
+            trends_180d = self.trend_service.get_product_trends(
+                period_days=180,
+                comparison_period_days=180,
+                limit=200
+            )
+
+            # Build 180d velocity lookup by SKU
+            velocity_180d_by_sku = {
+                t.sku: t.current_velocity_m2_day
+                for t in trends_180d
+            }
+
+            # Thresholds for trend signal
+            GROWING_THRESHOLD = Decimal("1.20")   # 90d > 180d by 20%+
+            DECLINING_THRESHOLD = Decimal("0.80") # 90d < 180d by 20%+
+
+            result = {}
+            for t in trends_90d:
+                velocity_90d = t.current_velocity_m2_day
+                velocity_180d = velocity_180d_by_sku.get(t.sku, Decimal("0"))
+
+                # Calculate trend signal
+                if velocity_180d > 0:
+                    trend_ratio = velocity_90d / velocity_180d
+                    if trend_ratio >= GROWING_THRESHOLD:
+                        trend_signal = "growing"
+                    elif trend_ratio <= DECLINING_THRESHOLD:
+                        trend_signal = "declining"
+                    else:
+                        trend_signal = "stable"
+                else:
+                    # No 180d data - use 90d direction
+                    trend_ratio = Decimal("1.0")
+                    if velocity_90d > 0:
+                        trend_signal = "growing"  # New activity
+                    else:
+                        trend_signal = "stable"
+
+                result[t.sku] = {
                     "direction": t.direction.value if hasattr(t.direction, 'value') else str(t.direction),
                     "strength": t.strength.value if hasattr(t.strength, 'value') else str(t.strength),
                     "velocity_change_pct": t.velocity_change_pct,
-                    "daily_velocity_m2": t.current_velocity_m2_day,
+                    "daily_velocity_m2": velocity_90d,
                     "days_of_stock": t.days_of_stock,
                     "confidence": t.confidence.value if hasattr(t.confidence, 'value') else str(t.confidence),
+                    # Dual velocity fields
+                    "velocity_90d_m2": velocity_90d,
+                    "velocity_180d_m2": velocity_180d,
+                    "velocity_trend_signal": trend_signal,
+                    "velocity_trend_ratio": round(trend_ratio, 2) if velocity_180d > 0 else Decimal("1.0"),
                 }
-                for t in trends
-            }
+
+            return result
         except Exception as e:
             logger.warning("trend_fetch_failed", error=str(e))
             return {}
@@ -712,6 +764,12 @@ class OrderBuilderService:
             daily_velocity_m2 = Decimal(str(trend.get("daily_velocity_m2", 0)))
             days_of_stock = trend.get("days_of_stock")
 
+            # Dual velocity fields (90-day vs 6-month comparison)
+            velocity_90d_m2 = Decimal(str(trend.get("velocity_90d_m2", 0)))
+            velocity_180d_m2 = Decimal(str(trend.get("velocity_180d_m2", 0)))
+            velocity_trend_signal = trend.get("velocity_trend_signal", "stable")
+            velocity_trend_ratio = Decimal(str(trend.get("velocity_trend_ratio", 1.0)))
+
             # Calculate urgency based on days of stock
             urgency = self._calculate_urgency(days_of_stock)
 
@@ -895,6 +953,11 @@ class OrderBuilderService:
                 trend_strength=strength,
                 velocity_change_pct=velocity_change_pct,
                 daily_velocity_m2=daily_velocity_m2,
+                # Dual velocity fields (90-day vs 6-month comparison)
+                velocity_90d_m2=velocity_90d_m2,
+                velocity_180d_m2=velocity_180d_m2,
+                velocity_trend_signal=velocity_trend_signal,
+                velocity_trend_ratio=velocity_trend_ratio,
                 calculation_breakdown=breakdown if daily_velocity_m2 > 0 else None,
                 # Reasoning
                 reasoning=reasoning,
