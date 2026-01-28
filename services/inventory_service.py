@@ -407,6 +407,15 @@ class InventoryService:
                 update_data["in_transit_qty"] = data.in_transit_qty
             if data.snapshot_date is not None:
                 update_data["snapshot_date"] = data.snapshot_date.isoformat()
+            # Factory availability fields
+            if data.factory_available_m2 is not None:
+                update_data["factory_available_m2"] = data.factory_available_m2
+            if data.factory_largest_lot_m2 is not None:
+                update_data["factory_largest_lot_m2"] = data.factory_largest_lot_m2
+            if data.factory_largest_lot_code is not None:
+                update_data["factory_largest_lot_code"] = data.factory_largest_lot_code
+            if data.factory_lot_count is not None:
+                update_data["factory_lot_count"] = data.factory_lot_count
 
             if not update_data:
                 # Nothing to update, return existing

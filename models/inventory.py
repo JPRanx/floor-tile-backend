@@ -84,6 +84,27 @@ class InventorySnapshotUpdate(BaseSchema):
         max_length=500,
         description="Optional notes"
     )
+    # Factory availability fields
+    factory_available_m2: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Factory finished goods available in m²"
+    )
+    factory_largest_lot_m2: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Largest single lot size in m²"
+    )
+    factory_largest_lot_code: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Lot code of largest lot"
+    )
+    factory_lot_count: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Number of lots available"
+    )
 
     @field_validator("warehouse_qty", "in_transit_qty")
     @classmethod
@@ -118,6 +139,11 @@ class InventorySnapshotResponse(BaseSchema):
     snapshot_date: date = Field(..., description="Date of inventory count")
     notes: Optional[str] = Field(None, description="Optional notes")
     created_at: datetime = Field(..., description="Record creation timestamp")
+    # Factory availability fields
+    factory_available_m2: Optional[float] = Field(default=0, description="Factory finished goods available in m²")
+    factory_largest_lot_m2: Optional[float] = Field(default=None, description="Largest single lot size in m²")
+    factory_largest_lot_code: Optional[str] = Field(default=None, description="Lot code of largest lot")
+    factory_lot_count: Optional[int] = Field(default=0, description="Number of lots available")
 
 
 class InventorySnapshotWithProduct(InventorySnapshotResponse):

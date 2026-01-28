@@ -297,6 +297,32 @@ class OrderBuilderProduct(BaseSchema):
         description="Human-readable factory timing status"
     )
 
+    # Factory availability (SIESA finished goods)
+    factory_available_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Finished goods available at factory in m²"
+    )
+    factory_largest_lot_m2: Optional[Decimal] = Field(
+        None,
+        description="Size of largest available lot in m²"
+    )
+    factory_largest_lot_code: Optional[str] = Field(
+        None,
+        description="Lot code of largest available lot"
+    )
+    factory_lot_count: int = Field(
+        default=0,
+        description="Number of lots available at factory"
+    )
+    factory_fill_status: str = Field(
+        default="unknown",
+        description="single_lot, mixed_lots, needs_production, no_stock"
+    )
+    factory_fill_message: Optional[str] = Field(
+        None,
+        description="Human-readable factory fill status"
+    )
+
     # Trend data (from Intelligence system)
     urgency: str = Field(default="ok", description="critical, urgent, soon, ok")
     days_of_stock: Optional[int] = Field(None, description="Days of stock at current velocity")

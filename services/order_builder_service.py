@@ -689,6 +689,20 @@ class OrderBuilderService:
             except Exception as e:
                 logger.warning("factory_status_lookup_failed", error=str(e))
 
+        # Get factory availability (SIESA finished goods) for all products
+        factory_availability_map = {}
+        try:
+            inventory_snapshots = self.inventory_service.get_latest()
+            for inv in inventory_snapshots:
+                factory_availability_map[inv.product_id] = {
+                    "factory_available_m2": Decimal(str(inv.factory_available_m2 or 0)),
+                    "factory_largest_lot_m2": Decimal(str(inv.factory_largest_lot_m2)) if inv.factory_largest_lot_m2 else None,
+                    "factory_largest_lot_code": inv.factory_largest_lot_code,
+                    "factory_lot_count": inv.factory_lot_count or 0,
+                }
+        except Exception as e:
+            logger.warning("factory_availability_lookup_failed", error=str(e))
+
         for rec in recommendations:
             # Get trend data for this product
             trend = trend_data.get(rec.sku, {})
@@ -815,6 +829,33 @@ class OrderBuilderService:
                 factory_ready_before_boat = factory_info.ready_before_boat
                 factory_timing_message = factory_info.timing_message
 
+            # Get factory availability (SIESA finished goods)
+            factory_avail = factory_availability_map.get(rec.product_id, {})
+            factory_available_m2 = factory_avail.get("factory_available_m2", Decimal("0"))
+            factory_largest_lot_m2 = factory_avail.get("factory_largest_lot_m2")
+            factory_largest_lot_code = factory_avail.get("factory_largest_lot_code")
+            factory_lot_count = factory_avail.get("factory_lot_count", 0)
+
+            # Calculate factory fill status based on suggested quantity
+            suggested_m2 = final_suggestion_m2
+            if factory_available_m2 <= 0:
+                factory_fill_status = "no_stock"
+                factory_fill_message = "No stock at factory"
+            elif suggested_m2 <= 0:
+                factory_fill_status = "not_needed"
+                factory_fill_message = None
+            elif factory_largest_lot_m2 and suggested_m2 <= factory_largest_lot_m2:
+                factory_fill_status = "single_lot"
+                factory_fill_message = f"Can fill from single lot ({factory_largest_lot_code})"
+            elif suggested_m2 <= factory_available_m2:
+                factory_fill_status = "mixed_lots"
+                largest_str = f"{int(factory_largest_lot_m2):,}" if factory_largest_lot_m2 else "?"
+                factory_fill_message = f"Will need mixed lots (largest: {largest_str} m²)"
+            else:
+                shortfall = suggested_m2 - factory_available_m2
+                factory_fill_status = "needs_production"
+                factory_fill_message = f"Request production — need {int(shortfall):,} m² more"
+
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
@@ -840,6 +881,13 @@ class OrderBuilderService:
                 days_until_factory_ready=days_until_factory_ready,
                 factory_ready_before_boat=factory_ready_before_boat,
                 factory_timing_message=factory_timing_message,
+                # Factory availability (SIESA finished goods)
+                factory_available_m2=factory_available_m2,
+                factory_largest_lot_m2=factory_largest_lot_m2,
+                factory_largest_lot_code=factory_largest_lot_code,
+                factory_lot_count=factory_lot_count,
+                factory_fill_status=factory_fill_status,
+                factory_fill_message=factory_fill_message,
                 # Trend fields
                 urgency=urgency,
                 days_of_stock=days_of_stock,
