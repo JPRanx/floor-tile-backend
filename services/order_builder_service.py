@@ -75,6 +75,21 @@ PALLETS_PER_CONTAINER = 14
 MAX_CONTAINERS_PER_BL = 5  # Each BL can hold up to 5 containers
 WAREHOUSE_CAPACITY = 672  # pallets (90,316.80 m² Guatemala warehouse)
 
+# Factory request constants
+MIN_CONTAINER_M2 = M2_PER_PALLET * PALLETS_PER_CONTAINER  # 1,881.6 m²
+LOW_VOLUME_THRESHOLD_DAYS = 365  # 1 year — products that take longer to consume 1 container are flagged
+
+
+def _get_next_monday(from_date: date) -> date:
+    """
+    Get next Monday from a given date.
+    Factory adds new items to production schedule on Mondays.
+    """
+    days_ahead = (7 - from_date.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7  # If today is Monday, get next Monday
+    return from_date + timedelta(days=days_ahead)
+
 
 class OrderBuilderService:
     """
@@ -1969,52 +1984,131 @@ class OrderBuilderService:
         )
 
         # === SECTION 3: FACTORY REQUEST ===
-        # Products where:
-        # - production_status = 'not_scheduled' AND gap > 0, OR
-        # - Even if in production, suggested > (factory_available + production_requested)
+        # Dynamic calculation: Project stock at arrival, determine if request needed
+        # Enforce 1 container minimum PER PRODUCT with low-volume detection
         factory_request_items: list[FactoryRequestItem] = []
 
+        today = date.today()
+
+        # Get average production time from completed items (dynamic, not hardcoded)
+        avg_production_days = self.production_schedule_service.get_average_production_time(fallback_days=7)
+
+        # Calculate when production would be ready if requested now
+        next_monday = _get_next_monday(today)  # Factory adds items on Mondays
+        estimated_ready_date_global = next_monday + timedelta(days=avg_production_days)
+
+        # Find target boat (first boat departing after production ready)
+        target_boat_global = self.boat_service.get_first_boat_after(estimated_ready_date_global)
+
+        # Get boats after target for buffer calculation
+        boats_after_target = []
+        if target_boat_global:
+            boats_after_target = self.boat_service.get_boats_after(target_boat_global.arrival_date, limit=2)
+
         for p in all_products:
-            # Calculate total available coverage
+            # Skip items that are in scheduled production (they go in Section 2)
+            if p.production_status == "scheduled" and p.production_can_add_more:
+                continue
+
+            # Get product data
             warehouse_m2 = p.current_stock_m2 or Decimal("0")
             in_transit_m2 = p.in_transit_m2 or Decimal("0")
             factory_available_m2 = p.factory_available_m2 or Decimal("0")
             in_production_m2 = p.production_requested_m2 or Decimal("0")
-
-            # Total available = warehouse + transit + SIESA + production
-            total_available = warehouse_m2 + in_transit_m2 + factory_available_m2 + in_production_m2
-
-            # suggested_pallets is what Order Builder recommends, convert to m2
-            suggested_m2 = Decimal(str(p.suggested_pallets)) * M2_PER_PALLET
-            gap_m2 = suggested_m2 - total_available
-
-            # Skip if no gap or already has enough
-            if gap_m2 <= 0:
-                continue
-
-            # Skip items that are in scheduled production (they go in Section 2)
-            # Only include not_scheduled OR completed items with gaps
-            if p.production_status == "scheduled" and p.production_can_add_more:
-                continue
-
-            gap_pallets = int(gap_m2 / M2_PER_PALLET)
-            if gap_pallets <= 0:
-                continue
-
+            velocity_m2_day = p.daily_velocity_m2 or Decimal("0")
             score = p.score.total if p.score else 0
 
-            # Enforce 1 container minimum (14 pallets = 1,881.6 m²)
-            # Factory won't process orders smaller than 1 container
-            minimum_applied = False
-            minimum_note = None
-            request_pallets = gap_pallets
-            request_m2 = gap_m2
+            # If no target boat, use fallback calculation
+            if not target_boat_global:
+                # Fallback: Use simple gap calculation
+                suggested_m2 = Decimal(str(p.suggested_pallets)) * M2_PER_PALLET
+                total_available = warehouse_m2 + in_transit_m2 + factory_available_m2 + in_production_m2
+                gap_m2 = suggested_m2 - total_available
 
-            if gap_pallets > 0 and gap_pallets < PALLETS_PER_CONTAINER:
-                request_pallets = PALLETS_PER_CONTAINER
-                request_m2 = Decimal(str(PALLETS_PER_CONTAINER)) * M2_PER_PALLET
-                minimum_applied = True
-                minimum_note = f"Rounded up to 1 container minimum ({gap_pallets}p → {PALLETS_PER_CONTAINER}p)"
+                if gap_m2 <= 0:
+                    continue
+
+                gap_pallets = int(gap_m2 / M2_PER_PALLET)
+                if gap_pallets <= 0:
+                    continue
+
+                # Apply minimum with low-volume check
+                request_pallets, request_m2, minimum_applied, minimum_note, is_low_volume, low_volume_reason, should_request, skip_reason, days_to_consume = self._apply_container_minimum(
+                    gap_m2=gap_m2,
+                    gap_pallets=gap_pallets,
+                    velocity_m2_day=velocity_m2_day
+                )
+
+                factory_request_items.append(FactoryRequestItem(
+                    product_id=p.product_id,
+                    sku=p.sku,
+                    description=p.description,
+                    warehouse_m2=warehouse_m2,
+                    in_transit_m2=in_transit_m2,
+                    factory_available_m2=factory_available_m2,
+                    in_production_m2=in_production_m2,
+                    suggested_m2=suggested_m2,
+                    gap_m2=gap_m2,
+                    gap_pallets=gap_pallets,
+                    request_m2=request_m2,
+                    request_pallets=request_pallets,
+                    estimated_ready=f"~{avg_production_days} days",
+                    avg_production_days=avg_production_days,
+                    velocity_m2_day=velocity_m2_day,
+                    days_to_consume_container=days_to_consume,
+                    is_low_volume=is_low_volume,
+                    low_volume_reason=low_volume_reason,
+                    should_request=should_request,
+                    skip_reason=skip_reason if not should_request else None,
+                    urgency=p.urgency,
+                    score=score,
+                    is_selected=should_request,
+                    minimum_applied=minimum_applied,
+                    minimum_note=minimum_note,
+                ))
+                continue
+
+            # Dynamic calculation with target boat
+            target_boat = target_boat_global
+            arrival_date = target_boat.arrival_date
+            days_until_arrival = (arrival_date - today).days
+
+            # Calculate consumption until arrival
+            consumption_until_arrival = velocity_m2_day * Decimal(str(days_until_arrival))
+
+            # Pipeline: in-transit + completed production (NOT factory_available — that's for warehouse orders)
+            pipeline_m2 = in_transit_m2 + (p.production_completed_m2 or Decimal("0"))
+
+            # Project stock at arrival
+            projected_stock = warehouse_m2 + pipeline_m2 - consumption_until_arrival
+
+            # If projected stock >= 0, pipeline covers demand
+            if projected_stock >= 0:
+                continue  # No request needed
+
+            # Will stockout — calculate need
+            future_gap = abs(projected_stock)
+
+            # Add buffer until next boat after target
+            if boats_after_target:
+                next_boat_arrival = boats_after_target[0].arrival_date
+                days_to_next = (next_boat_arrival - arrival_date).days
+                buffer_m2 = velocity_m2_day * Decimal(str(days_to_next))
+            else:
+                buffer_m2 = velocity_m2_day * Decimal("30")  # 30-day buffer fallback
+
+            calculated_need = future_gap + buffer_m2
+            gap_pallets = max(1, int(calculated_need / M2_PER_PALLET))
+
+            # Apply 1 container minimum with low-volume detection
+            request_pallets, request_m2, minimum_applied, minimum_note, is_low_volume, low_volume_reason, should_request, skip_reason, days_to_consume = self._apply_container_minimum(
+                gap_m2=calculated_need,
+                gap_pallets=gap_pallets,
+                velocity_m2_day=velocity_m2_day
+            )
+
+            # Format estimated ready display
+            estimated_ready_display = f"{estimated_ready_date_global.strftime('%b %d')} → {target_boat.vessel_name}"
 
             factory_request_items.append(FactoryRequestItem(
                 product_id=p.product_id,
@@ -2024,32 +2118,53 @@ class OrderBuilderService:
                 in_transit_m2=in_transit_m2,
                 factory_available_m2=factory_available_m2,
                 in_production_m2=in_production_m2,
-                suggested_m2=suggested_m2,
-                gap_m2=gap_m2,
+                suggested_m2=calculated_need,
+                gap_m2=future_gap,
                 gap_pallets=gap_pallets,
-                request_m2=request_m2,  # Enforced minimum if < 14 pallets
+                request_m2=request_m2,
                 request_pallets=request_pallets,
-                estimated_ready="",  # Removed timing guess
+                estimated_ready=estimated_ready_display,
+                avg_production_days=avg_production_days,
+                estimated_ready_date=estimated_ready_date_global,
+                target_boat=target_boat.vessel_name,
+                target_boat_departure=target_boat.departure_date,
+                arrival_date=arrival_date,
+                days_until_arrival=days_until_arrival,
+                velocity_m2_day=velocity_m2_day,
+                consumption_until_arrival_m2=consumption_until_arrival,
+                pipeline_m2=pipeline_m2,
+                projected_stock_at_arrival_m2=projected_stock,
+                calculated_need_m2=calculated_need,
+                days_to_consume_container=days_to_consume,
+                is_low_volume=is_low_volume,
+                low_volume_reason=low_volume_reason,
+                should_request=should_request,
+                skip_reason=skip_reason if not should_request else None,
                 urgency=p.urgency,
                 score=score,
-                is_selected=True,  # Pre-select all recommended items
+                is_selected=should_request,
                 minimum_applied=minimum_applied,
                 minimum_note=minimum_note,
             ))
 
-        # Sort by urgency/score
+        # Sort: should_request=True first, then by urgency/score
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
         factory_request_items.sort(
-            key=lambda x: (urgency_order.get(x.urgency, 4), -x.score)
+            key=lambda x: (
+                0 if x.should_request else 1,  # Recommended first
+                urgency_order.get(x.urgency, 4),
+                -x.score
+            )
         )
 
-        total_request_m2 = sum(item.request_m2 for item in factory_request_items)
-        total_request_pallets = sum(item.request_pallets for item in factory_request_items)
+        # Calculate totals (only for items that should be requested)
+        recommended_items = [item for item in factory_request_items if item.should_request]
+        total_request_m2 = sum(item.request_m2 for item in recommended_items)
+        total_request_pallets = sum(item.request_pallets for item in recommended_items)
 
         # Monthly limit tracking (60k m²)
         monthly_limit = Decimal("60000")
 
-        # Get current month's requests from production schedule
         try:
             capacity = self.production_schedule_service.get_production_capacity()
             already_requested = capacity.already_requested_m2
@@ -2059,17 +2174,15 @@ class OrderBuilderService:
         remaining_m2 = monthly_limit - already_requested
         utilization_pct = (already_requested / monthly_limit * 100) if monthly_limit > 0 else Decimal("0")
 
-        # Estimate when production would be ready
-        today = date.today()
-        estimated_ready_date = today + timedelta(days=45)  # ~45 days average
-        estimated_ready_str = estimated_ready_date.strftime("%B %Y")  # e.g., "March 2026"
+        # Estimated ready string (dynamic)
+        if target_boat_global:
+            estimated_ready_str = f"{estimated_ready_date_global.strftime('%b %d')} → {target_boat_global.vessel_name}"
+        else:
+            estimated_ready_str = f"~{avg_production_days} days"
 
-        # Calculate submit deadline (end of current week, Friday)
-        days_until_friday = (4 - today.weekday()) % 7
-        if days_until_friday == 0 and today.weekday() > 4:
-            days_until_friday = 7  # If past Friday, next Friday
-        submit_deadline = today + timedelta(days=days_until_friday + 7)  # Next week Friday
-        submit_deadline_display = f"Submit by {submit_deadline.strftime('%b')} {submit_deadline.day}"
+        # Calculate submit deadline (next Monday for factory schedule)
+        submit_deadline = next_monday
+        submit_deadline_display = f"Submit by {submit_deadline.strftime('%a, %b %d')}"
 
         factory_request_summary = FactoryRequestSummary(
             product_count=len(factory_request_items),
@@ -2094,6 +2207,110 @@ class OrderBuilderService:
         )
 
         return warehouse_summary, add_to_production_summary, factory_request_summary
+
+    def _apply_container_minimum(
+        self,
+        gap_m2: Decimal,
+        gap_pallets: int,
+        velocity_m2_day: Decimal
+    ) -> tuple[int, Decimal, bool, Optional[str], bool, Optional[str], bool, Optional[str], Optional[int]]:
+        """
+        Apply 1 container minimum rule with low-volume detection.
+
+        Factory requires minimum 1 container (14 pallets = 1,881.6 m²) PER PRODUCT.
+        Products that would take > 1 year to consume 1 container are flagged as low-volume.
+
+        Args:
+            gap_m2: Calculated gap in m²
+            gap_pallets: Gap converted to pallets
+            velocity_m2_day: Daily velocity for this product
+
+        Returns:
+            Tuple of:
+            - request_pallets: Pallets to request
+            - request_m2: m² to request
+            - minimum_applied: True if rounded up to minimum
+            - minimum_note: Explanation if minimum applied
+            - is_low_volume: True if product is low-volume
+            - low_volume_reason: Explanation for low-volume flag
+            - should_request: True if should include in request
+            - skip_reason: Why skipped (if should_request=False)
+            - days_to_consume_container: Days to consume 1 container
+        """
+        # Calculate days to consume 1 container
+        days_to_consume: Optional[int] = None
+        if velocity_m2_day > 0:
+            days_to_consume = int(MIN_CONTAINER_M2 / velocity_m2_day)
+        else:
+            days_to_consume = None  # No velocity = infinite
+
+        # Case 1: Need >= 1 container
+        if gap_pallets >= PALLETS_PER_CONTAINER:
+            # Round UP to whole containers
+            containers_needed = math.ceil(gap_pallets / PALLETS_PER_CONTAINER)
+            request_pallets = containers_needed * PALLETS_PER_CONTAINER
+            request_m2 = Decimal(str(request_pallets)) * M2_PER_PALLET
+            return (
+                request_pallets,
+                request_m2,
+                False,  # minimum_applied
+                None,  # minimum_note
+                False,  # is_low_volume
+                None,  # low_volume_reason
+                True,  # should_request
+                None,  # skip_reason
+                days_to_consume
+            )
+
+        # Case 2: Need < 1 container — check if low-volume
+        if velocity_m2_day <= 0:
+            # No velocity = definitely low-volume (or no sales data)
+            return (
+                0,
+                Decimal("0"),
+                False,
+                None,
+                True,  # is_low_volume
+                "No sales velocity data. 1 container would sit indefinitely.",
+                False,  # should_request
+                "Low volume — no velocity data",
+                None
+            )
+
+        if days_to_consume and days_to_consume > LOW_VOLUME_THRESHOLD_DAYS:
+            # Low-volume: would take > 1 year to consume 1 container
+            years = days_to_consume / 365
+            return (
+                0,
+                Decimal("0"),
+                False,
+                None,
+                True,  # is_low_volume
+                f"At {float(velocity_m2_day):.1f} m²/day, 1 container would last {days_to_consume} days (~{years:.1f} years). Special order only.",
+                False,  # should_request
+                f"Low volume — 1 container lasts {years:.1f} years",
+                days_to_consume
+            )
+
+        # Case 3: Will consume 1 container within 1 year — request it
+        request_pallets = PALLETS_PER_CONTAINER
+        request_m2 = MIN_CONTAINER_M2
+        minimum_note = (
+            f"Calculated need: {int(gap_m2)} m² → "
+            f"Rounded to 1 container minimum ({int(MIN_CONTAINER_M2)} m²). "
+            f"Will consume in ~{days_to_consume} days."
+        )
+        return (
+            request_pallets,
+            request_m2,
+            True,  # minimum_applied
+            minimum_note,
+            False,  # is_low_volume
+            None,
+            True,  # should_request
+            None,
+            days_to_consume
+        )
 
     def _empty_response(self, mode: OrderBuilderMode) -> OrderBuilderResponse:
         """Return empty response when no boats available."""

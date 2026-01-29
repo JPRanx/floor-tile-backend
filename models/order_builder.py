@@ -614,8 +614,32 @@ class FactoryRequestItem(BaseSchema):
     request_m2: Decimal = Field(default=Decimal("0"), description="User-adjustable request")
     request_pallets: int = Field(default=0)
 
-    # Timing
-    estimated_ready: str = Field(default="30-60 days", description="Estimated production time")
+    # Timing (legacy)
+    estimated_ready: str = Field(default="", description="Estimated production time display")
+
+    # Dynamic calculation fields
+    avg_production_days: int = Field(default=7, description="Average production time in days")
+    estimated_ready_date: Optional[date] = Field(None, description="When production will be ready")
+    target_boat: Optional[str] = Field(None, description="Boat this would catch")
+    target_boat_departure: Optional[date] = Field(None, description="Target boat departure date")
+    arrival_date: Optional[date] = Field(None, description="When product arrives Guatemala")
+    days_until_arrival: Optional[int] = Field(None, description="Days from today until arrival")
+
+    # Velocity and consumption
+    velocity_m2_day: Decimal = Field(default=Decimal("0"), description="Daily velocity in m²")
+    consumption_until_arrival_m2: Decimal = Field(default=Decimal("0"), description="Expected consumption until arrival")
+
+    # Projection
+    pipeline_m2: Decimal = Field(default=Decimal("0"), description="In-transit + scheduled production")
+    projected_stock_at_arrival_m2: Decimal = Field(default=Decimal("0"), description="Stock at arrival")
+    calculated_need_m2: Decimal = Field(default=Decimal("0"), description="Calculated need including buffer")
+
+    # Low-volume detection (1 container / 365 days threshold)
+    days_to_consume_container: Optional[int] = Field(None, description="Days to consume 1 container at current velocity")
+    is_low_volume: bool = Field(default=False, description="True if would take >1 year to consume 1 container")
+    low_volume_reason: Optional[str] = Field(None, description="Explanation for low-volume flag")
+    should_request: bool = Field(default=True, description="False if low-volume or pipeline covers")
+    skip_reason: Optional[str] = Field(None, description="Why request was skipped")
 
     # Priority
     urgency: str = Field(default="ok")

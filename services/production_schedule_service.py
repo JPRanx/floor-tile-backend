@@ -1449,6 +1449,76 @@ class ProductionScheduleService:
             logger.error("get_production_for_order_builder_failed", error=str(e))
             return {}
 
+    def get_average_production_time(self, fallback_days: int = 7) -> int:
+        """
+        Calculate average production time from completed items.
+
+        Uses actual_completion_date - scheduled_start_date for completed items.
+        Falls back to estimated_delivery_date - scheduled_start_date if actual not available.
+
+        Args:
+            fallback_days: Default if no data available (default 7 days)
+
+        Returns:
+            Average production time in days
+        """
+        logger.debug("calculating_average_production_time")
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("scheduled_start_date, scheduled_end_date, estimated_delivery_date, actual_completion_date, status")
+                .eq("status", "completed")
+                .not_.is_("scheduled_start_date", "null")
+                .execute()
+            )
+
+            if not result.data:
+                logger.info("no_completed_production_data", fallback=fallback_days)
+                return fallback_days
+
+            total_days = 0
+            valid_count = 0
+
+            for row in result.data:
+                start_date = row.get("scheduled_start_date")
+                if not start_date:
+                    continue
+
+                # Parse start date
+                if isinstance(start_date, str):
+                    start_date = date.fromisoformat(start_date)
+
+                # Try actual completion date first, then estimated delivery, then scheduled end
+                end_date = None
+                for field in ["actual_completion_date", "estimated_delivery_date", "scheduled_end_date"]:
+                    val = row.get(field)
+                    if val:
+                        end_date = date.fromisoformat(val) if isinstance(val, str) else val
+                        break
+
+                if end_date and end_date >= start_date:
+                    days = (end_date - start_date).days
+                    if days > 0 and days < 90:  # Sanity check: 1-90 days
+                        total_days += days
+                        valid_count += 1
+
+            if valid_count > 0:
+                avg_days = total_days // valid_count
+                logger.info(
+                    "average_production_time_calculated",
+                    avg_days=avg_days,
+                    sample_size=valid_count
+                )
+                return max(1, avg_days)  # At least 1 day
+
+            logger.info("no_valid_production_time_data", fallback=fallback_days)
+            return fallback_days
+
+        except Exception as e:
+            logger.error("get_average_production_time_failed", error=str(e))
+            return fallback_days
+
 
 # Singleton instance
 _schedule_service: Optional[ProductionScheduleService] = None

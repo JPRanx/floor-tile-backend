@@ -255,6 +255,88 @@ class BoatScheduleService:
 
         return next_departure, second_departure
 
+    def get_first_boat_after(
+        self,
+        ready_date: date,
+        limit: int = 5
+    ) -> Optional[BoatScheduleResponse]:
+        """
+        Get the first boat departing after a given date.
+
+        Used for factory request calculations to determine which boat
+        a production request would catch.
+
+        Args:
+            ready_date: Date when production will be ready
+            limit: Max boats to check (for efficiency)
+
+        Returns:
+            First boat departing after ready_date, or None
+        """
+        logger.debug("getting_first_boat_after", ready_date=str(ready_date))
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("status", "available")
+                .gt("departure_date", ready_date.isoformat())
+                .order("departure_date", desc=False)
+                .limit(limit)
+                .execute()
+            )
+
+            if result.data:
+                boat = BoatScheduleResponse.from_db(result.data[0])
+                logger.debug(
+                    "first_boat_after_found",
+                    ready_date=str(ready_date),
+                    boat_departure=str(boat.departure_date),
+                    boat_name=boat.vessel_name
+                )
+                return boat
+
+            logger.debug("no_boat_after_date", ready_date=str(ready_date))
+            return None
+
+        except Exception as e:
+            logger.error("get_first_boat_after_failed", error=str(e))
+            return None
+
+    def get_boats_after(
+        self,
+        ready_date: date,
+        limit: int = 3
+    ) -> list[BoatScheduleResponse]:
+        """
+        Get boats departing after a given date.
+
+        Args:
+            ready_date: Date when production will be ready
+            limit: Max boats to return
+
+        Returns:
+            List of boats departing after ready_date
+        """
+        logger.debug("getting_boats_after", ready_date=str(ready_date), limit=limit)
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("status", "available")
+                .gt("departure_date", ready_date.isoformat())
+                .order("departure_date", desc=False)
+                .limit(limit)
+                .execute()
+            )
+
+            return [BoatScheduleResponse.from_db(row) for row in result.data]
+
+        except Exception as e:
+            logger.error("get_boats_after_failed", error=str(e))
+            return []
+
     # ===================
     # WRITE OPERATIONS
     # ===================
