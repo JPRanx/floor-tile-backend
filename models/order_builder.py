@@ -621,6 +621,16 @@ class FactoryRequestItem(BaseSchema):
     urgency: str = Field(default="ok")
     score: int = Field(default=0)
 
+    # Minimum enforcement (1 container = 14 pallets = 1,881.6 m²)
+    minimum_applied: bool = Field(
+        default=False,
+        description="True if quantity was rounded up to 1 container minimum"
+    )
+    minimum_note: Optional[str] = Field(
+        None,
+        description="Note explaining minimum enforcement, e.g. 'Rounded up to 1 container minimum'"
+    )
+
     # Selection (pre-selected by default for recommended items)
     is_selected: bool = Field(default=True, description="Whether item is selected for export")
 

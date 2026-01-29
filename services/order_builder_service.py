@@ -2003,6 +2003,19 @@ class OrderBuilderService:
 
             score = p.score.total if p.score else 0
 
+            # Enforce 1 container minimum (14 pallets = 1,881.6 m²)
+            # Factory won't process orders smaller than 1 container
+            minimum_applied = False
+            minimum_note = None
+            request_pallets = gap_pallets
+            request_m2 = gap_m2
+
+            if gap_pallets > 0 and gap_pallets < PALLETS_PER_CONTAINER:
+                request_pallets = PALLETS_PER_CONTAINER
+                request_m2 = Decimal(str(PALLETS_PER_CONTAINER)) * M2_PER_PALLET
+                minimum_applied = True
+                minimum_note = f"Rounded up to 1 container minimum ({gap_pallets}p → {PALLETS_PER_CONTAINER}p)"
+
             factory_request_items.append(FactoryRequestItem(
                 product_id=p.product_id,
                 sku=p.sku,
@@ -2014,12 +2027,14 @@ class OrderBuilderService:
                 suggested_m2=suggested_m2,
                 gap_m2=gap_m2,
                 gap_pallets=gap_pallets,
-                request_m2=gap_m2,  # Default to gap amount
-                request_pallets=gap_pallets,
+                request_m2=request_m2,  # Enforced minimum if < 14 pallets
+                request_pallets=request_pallets,
                 estimated_ready="",  # Removed timing guess
                 urgency=p.urgency,
                 score=score,
                 is_selected=True,  # Pre-select all recommended items
+                minimum_applied=minimum_applied,
+                minimum_note=minimum_note,
             ))
 
         # Sort by urgency/score
