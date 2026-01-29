@@ -1860,7 +1860,7 @@ class OrderBuilderService:
         # Get boat schedules for matching production ready dates
         available_boats = self.boat_service.get_available(limit=5)
         boat_schedules = [
-            (b.name, b.departure_date, b.order_deadline)
+            (b.vessel_name, b.departure_date, b.order_deadline)
             for b in available_boats
         ]
 
@@ -1898,7 +1898,8 @@ class OrderBuilderService:
                 continue
 
             # Calculate how much more to add
-            suggested_m2 = p.suggested_m2 or Decimal("0")
+            # suggested_pallets is what Order Builder recommends, convert to m2
+            suggested_m2 = Decimal(str(p.suggested_pallets)) * M2_PER_PALLET
             requested_m2 = p.production_requested_m2 or Decimal("0")
             additional_m2 = suggested_m2 - requested_m2
 
@@ -1977,7 +1978,8 @@ class OrderBuilderService:
             # Total available = warehouse + transit + SIESA + production
             total_available = warehouse_m2 + in_transit_m2 + factory_available_m2 + in_production_m2
 
-            suggested_m2 = p.suggested_m2 or Decimal("0")
+            # suggested_pallets is what Order Builder recommends, convert to m2
+            suggested_m2 = Decimal(str(p.suggested_pallets)) * M2_PER_PALLET
             gap_m2 = suggested_m2 - total_available
 
             # Skip if no gap or already has enough
