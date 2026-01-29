@@ -691,11 +691,12 @@ class OrderBuilderResponse(BaseSchema):
         description="Recommended BLs based on TRUE NEED (what you need, regardless of factory stock)"
     )
     # Available BL count (what can ship now based on factory stock)
+    # Can be 0 if no factory stock available
     available_bls: int = Field(
-        default=1,
-        ge=1,
+        default=0,
+        ge=0,
         le=5,
-        description="BLs that can ship now based on factory stock availability"
+        description="BLs that can ship now based on factory stock availability (0 = none available)"
     )
     recommended_bls_reason: str = Field(
         default="",
