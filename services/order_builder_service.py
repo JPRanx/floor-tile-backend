@@ -226,10 +226,16 @@ class OrderBuilderService:
         warehouse_summary, add_to_production_summary, factory_request_summary = \
             self._calculate_section_summaries(all_products, boat, num_bls)
 
+        # Step 9: Calculate recommended BL count (based on true need) and available BLs
+        recommended_bls, available_bls, recommended_bls_reason = self._calculate_recommended_bls(all_products)
+
         result = OrderBuilderResponse(
             boat=boat,
             next_boat=next_boat,
             num_bls=num_bls,
+            recommended_bls=recommended_bls,
+            available_bls=available_bls,
+            recommended_bls_reason=recommended_bls_reason,
             high_priority=high_priority,
             consider=consider,
             well_covered=well_covered,
@@ -1424,6 +1430,70 @@ class OrderBuilderService:
             alerts=[],  # Populated later
         )
 
+    def _calculate_recommended_bls(
+        self,
+        products: list[OrderBuilderProduct]
+    ) -> tuple[int, int, str]:
+        """
+        Calculate recommended BL count based on TRUE NEED and AVAILABLE stock.
+
+        TRUE NEED = coverage_gap - in_transit - in_production
+        (What you need, regardless of current factory stock)
+
+        AVAILABLE = factory_available
+        (What can ship right now from SIESA)
+
+        Returns:
+            tuple[int, int, str]: (recommended_bls, available_bls, reason_string)
+        """
+        # Calculate TRUE NEED: gap - transit - production
+        total_true_need_m2 = Decimal("0")
+        total_factory_available_m2 = Decimal("0")
+
+        for p in products:
+            # Coverage gap is the base need
+            gap = Decimal(str(p.coverage_gap_m2 or 0))
+            # Subtract what's already coming
+            in_transit = Decimal(str(p.in_transit_m2 or 0))
+            in_production = Decimal(str(p.production_requested_m2 or 0))
+            # True need = gap - transit - production (floor at 0)
+            true_need = max(Decimal("0"), gap - in_transit - in_production)
+            total_true_need_m2 += true_need
+
+            # Factory available is what can ship now
+            factory_available = Decimal(str(p.factory_available_m2 or 0))
+            total_factory_available_m2 += factory_available
+
+        # Calculate recommended BLs based on TRUE NEED
+        if total_true_need_m2 > 0:
+            need_pallets = math.ceil(float(total_true_need_m2) / float(M2_PER_PALLET))
+            need_containers = math.ceil(need_pallets / PALLETS_PER_CONTAINER)
+            recommended_bls = max(1, min(5, math.ceil(need_containers / MAX_CONTAINERS_PER_BL)))
+        else:
+            recommended_bls = 1
+            need_containers = 0
+
+        # Calculate available BLs based on factory stock
+        if total_factory_available_m2 > 0:
+            available_pallets = math.ceil(float(total_factory_available_m2) / float(M2_PER_PALLET))
+            available_containers = math.ceil(available_pallets / PALLETS_PER_CONTAINER)
+            available_bls = max(1, min(5, math.ceil(available_containers / MAX_CONTAINERS_PER_BL)))
+        else:
+            available_bls = 0
+            available_containers = 0
+
+        # Build reason string showing BOTH need and available
+        if total_true_need_m2 <= 0:
+            reason = "No coverage gap (stock is adequate)"
+        elif total_factory_available_m2 <= 0:
+            reason = f"Need: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Available: 0 (SIESA empty)"
+        elif available_bls >= recommended_bls:
+            reason = f"Need: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Available: {available_bls} BLs ({total_factory_available_m2:,.0f} m²) ✓"
+        else:
+            reason = f"Need: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Available: {available_bls} BLs ({total_factory_available_m2:,.0f} m²)"
+
+        return recommended_bls, available_bls, reason
+
     def _generate_alerts(
         self,
         products: list[OrderBuilderProduct],
@@ -2037,7 +2107,9 @@ class OrderBuilderService:
         return OrderBuilderResponse(
             boat=dummy_boat,
             next_boat=None,
-            mode=mode,
+            num_bls=num_bls,
+            recommended_bls=1,
+            recommended_bls_reason="No boats scheduled",
             high_priority=[],
             consider=[],
             well_covered=[],

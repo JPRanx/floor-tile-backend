@@ -683,6 +683,25 @@ class OrderBuilderResponse(BaseSchema):
     # BL count (determines capacity)
     num_bls: int = Field(default=1, ge=1, le=5, description="Number of BLs (1-5). Capacity = num_bls × 5 × 14 pallets")
 
+    # Recommended BL count (based on TRUE NEED: coverage gap - in transit - in production)
+    recommended_bls: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description="Recommended BLs based on TRUE NEED (what you need, regardless of factory stock)"
+    )
+    # Available BL count (what can ship now based on factory stock)
+    available_bls: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description="BLs that can ship now based on factory stock availability"
+    )
+    recommended_bls_reason: str = Field(
+        default="",
+        description="Explanation showing need vs available, e.g. 'Need: 3 BLs (12,000 m²) • Available: 2 BLs (8,000 m²)'"
+    )
+
     # Products grouped by priority (existing)
     high_priority: list[OrderBuilderProduct] = Field(default_factory=list)
     consider: list[OrderBuilderProduct] = Field(default_factory=list)
