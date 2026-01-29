@@ -22,9 +22,24 @@ from models.production_schedule import (
     UnmappedProduct,
     MatchSuggestion,
     UploadResult,
+    # Excel-based parsing
+    ProductionStatus,
+    ProductionScheduleCreate,
+    ProductionScheduleDBResponse,
+    ProductionSummary,
+    ProductionCapacity,
+    ProductionImportResult,
+    CanAddMoreAlert,
 )
 from services.product_service import get_product_service
 from exceptions import DatabaseError
+
+# Excel parsing
+try:
+    from openpyxl import load_workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
 
 # Optional: fuzzy matching
 try:
@@ -34,6 +49,33 @@ except ImportError:
     FUZZY_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
+
+# Accent normalization map for Spanish characters
+ACCENT_MAP = {
+    'Á': 'A', 'á': 'a',
+    'É': 'E', 'é': 'e',
+    'Í': 'I', 'í': 'i',
+    'Ó': 'O', 'ó': 'o',
+    'Ú': 'U', 'ú': 'u',
+    'Ñ': 'N', 'ñ': 'n',
+    'Ü': 'U', 'ü': 'u',
+}
+
+
+def normalize_accents(text: str) -> str:
+    """
+    Remove Spanish accents for matching purposes.
+
+    Examples:
+        NOGAL CAFÉ BTE → NOGAL CAFE BTE
+        CARACOLÍ → CARACOLI
+        ALMENDRO MARRÓN → ALMENDRO MARRON
+    """
+    if not text:
+        return text
+    for accented, normalized in ACCENT_MAP.items():
+        text = text.replace(accented, normalized)
+    return text
 
 
 class ProductionScheduleService:
@@ -761,6 +803,651 @@ class ProductionScheduleService:
         except Exception as e:
             logger.error("map_factory_code_failed", error=str(e))
             raise DatabaseError("update", str(e))
+
+    # ===================
+    # EXCEL-BASED PARSING (Programa de Produccion)
+    # ===================
+    # These methods handle the Excel-based production schedule with color-coded status
+
+    # Color constants for Excel parsing
+    COLOR_GREEN = 'FF00B050'      # Completed
+    COLOR_LIGHT_BLUE = 'FF00B0F0'  # In Progress
+    COLOR_ORANGE = 'FFFFC000'      # Attention (treat as scheduled)
+
+    def parse_production_excel(
+        self,
+        file_path: str,
+        source_month: str = None
+    ) -> list[ProductionScheduleCreate]:
+        """
+        Parse Programa de Produccion Excel file.
+
+        Extracts Guatemala export data (m2 Primera exportacion) with status
+        detection from cell colors:
+        - Green = completed
+        - Light Blue = in_progress
+        - White/None = scheduled (CAN ADD MORE!)
+
+        Args:
+            file_path: Path to Excel file
+            source_month: Month identifier (e.g., 'ENERO-26')
+
+        Returns:
+            List of ProductionScheduleCreate records
+        """
+        if not OPENPYXL_AVAILABLE:
+            raise ImportError("openpyxl is required for Excel parsing")
+
+        logger.info("parsing_production_excel", file_path=file_path)
+
+        # Load workbook - need both data and formatting
+        wb_data = load_workbook(file_path, data_only=True)
+        wb_format = load_workbook(file_path, data_only=False)
+
+        # Find the monthly sheet (e.g., "ENERO-26")
+        sheet_name = None
+        for name in wb_data.sheetnames:
+            if "-26" in name or "-25" in name:  # Year suffix
+                sheet_name = name
+                break
+
+        if not sheet_name:
+            # Fallback to first sheet that looks like a month
+            for name in wb_data.sheetnames:
+                if any(month in name.upper() for month in [
+                    'ENERO', 'FEBRERO', 'MARZO', 'ABRIL', 'MAYO', 'JUNIO',
+                    'JULIO', 'AGOSTO', 'SEPTIEMBRE', 'OCTUBRE', 'NOVIEMBRE', 'DICIEMBRE'
+                ]):
+                    sheet_name = name
+                    break
+
+        if not sheet_name:
+            sheet_name = wb_data.sheetnames[1] if len(wb_data.sheetnames) > 1 else wb_data.sheetnames[0]
+
+        ws_data = wb_data[sheet_name]
+        ws_format = wb_format[sheet_name]
+
+        if source_month is None:
+            source_month = sheet_name
+
+        logger.info("parsing_sheet", sheet_name=sheet_name)
+
+        records = []
+        import os
+        filename = os.path.basename(file_path)
+
+        # Parse Plant 1 (columns 5, 11, 17, 19)
+        # Item Code = col 5, Referencia = col 11, Programa = col 17, Real = col 19
+        # Dates: Fecha Inicio = col 1, Fecha Fin = col 2, Est Entrega = col 3
+        plant1_records = self._parse_plant_data(
+            ws_data, ws_format,
+            plant="plant_1",
+            item_col=5,
+            ref_col=11,
+            programa_col=17,
+            real_col=19,
+            start_row=18,
+            end_row=50,
+            source_file=filename,
+            source_month=source_month,
+            fecha_inicio_col=1,
+            fecha_fin_col=2,
+            fecha_entrega_col=3,
+        )
+        records.extend(plant1_records)
+
+        # Parse Plant 2 (columns 20, 28, 34, 36)
+        # Item Code = col 20, Referencia = col 28, Programa = col 34, Real = col 36
+        # Dates: Fecha Inicio = col 23, Fecha Fin = col 24 (no delivery column for Plant 2)
+        plant2_records = self._parse_plant_data(
+            ws_data, ws_format,
+            plant="plant_2",
+            item_col=20,
+            ref_col=28,
+            programa_col=34,
+            real_col=36,
+            start_row=18,
+            end_row=50,
+            source_file=filename,
+            source_month=source_month,
+            fecha_inicio_col=23,
+            fecha_fin_col=24,
+            fecha_entrega_col=None,  # Plant 2 doesn't have delivery date column
+        )
+        records.extend(plant2_records)
+
+        logger.info(
+            "excel_parsed",
+            total_records=len(records),
+            plant1_count=len(plant1_records),
+            plant2_count=len(plant2_records)
+        )
+
+        return records
+
+    def _parse_plant_data(
+        self,
+        ws_data,
+        ws_format,
+        plant: str,
+        item_col: int,
+        ref_col: int,
+        programa_col: int,
+        real_col: int,
+        start_row: int,
+        end_row: int,
+        source_file: str,
+        source_month: str,
+        fecha_inicio_col: int = None,
+        fecha_fin_col: int = None,
+        fecha_entrega_col: int = None,
+    ) -> list[ProductionScheduleCreate]:
+        """Parse data for one plant from Excel worksheet.
+
+        Args:
+            fecha_inicio_col: Column for Fecha Inicio (start date)
+            fecha_fin_col: Column for Fecha Fin (end date)
+            fecha_entrega_col: Column for Fecha estimada entrega (delivery date)
+        """
+        from datetime import datetime as dt
+
+        records = []
+
+        for row_num in range(start_row, end_row + 1):
+            ref_value = ws_data.cell(row=row_num, column=ref_col).value
+            programa_value = ws_data.cell(row=row_num, column=programa_col).value
+            real_value = ws_data.cell(row=row_num, column=real_col).value
+
+            # Skip rows without referencia or without Guatemala data
+            if ref_value is None:
+                continue
+
+            # Convert to string for filtering
+            ref_str = str(ref_value).strip()
+
+            # Skip invalid references
+            if '=' in ref_str:  # Formula
+                continue
+            if ref_str in ['MANTENIMIENTO DE PLANTA', 'REPROCESO', 'TOTAL', 'SUBTOTAL']:
+                continue
+            if ref_str.isdigit():  # Pure numbers (likely formula results like row counts)
+                continue
+            if len(ref_str) < 3:  # Too short to be a valid product name
+                continue
+
+            # Only process rows with Guatemala export data
+            if programa_value is None and real_value is None:
+                continue
+
+            # Get item code
+            item_code = ws_data.cell(row=row_num, column=item_col).value
+            item_code_str = str(item_code) if item_code else None
+
+            # Detect status from cell color
+            status = self._get_status_from_color(
+                ws_format.cell(row=row_num, column=ref_col)
+            )
+
+            # Parse m² values
+            programa_m2 = Decimal(str(programa_value)) if programa_value else Decimal("0")
+            real_m2 = Decimal(str(real_value)) if real_value else Decimal("0")
+
+            # Parse date columns
+            scheduled_start_date = None
+            scheduled_end_date = None
+            estimated_delivery_date = None
+
+            if fecha_inicio_col:
+                val = ws_data.cell(row=row_num, column=fecha_inicio_col).value
+                if isinstance(val, dt):
+                    scheduled_start_date = val.date()
+                elif isinstance(val, date):
+                    scheduled_start_date = val
+
+            if fecha_fin_col:
+                val = ws_data.cell(row=row_num, column=fecha_fin_col).value
+                if isinstance(val, dt):
+                    scheduled_end_date = val.date()
+                elif isinstance(val, date):
+                    scheduled_end_date = val
+
+            if fecha_entrega_col:
+                val = ws_data.cell(row=row_num, column=fecha_entrega_col).value
+                if isinstance(val, dt):
+                    estimated_delivery_date = val.date()
+                elif isinstance(val, date):
+                    estimated_delivery_date = val
+
+            records.append(ProductionScheduleCreate(
+                factory_item_code=item_code_str,
+                referencia=str(ref_value).strip(),
+                plant=plant,
+                requested_m2=programa_m2,
+                completed_m2=real_m2,
+                status=status,
+                scheduled_start_date=scheduled_start_date,
+                scheduled_end_date=scheduled_end_date,
+                estimated_delivery_date=estimated_delivery_date,
+                source_file=source_file,
+                source_month=source_month,
+                source_row=row_num,
+            ))
+
+        return records
+
+    def _get_status_from_color(self, cell) -> ProductionStatus:
+        """Determine production status from cell background color."""
+        fill = cell.fill
+        if fill.fill_type is None or fill.fill_type == 'none':
+            return ProductionStatus.SCHEDULED  # White = CAN ADD MORE!
+
+        fg = fill.fgColor
+        if fg is None:
+            return ProductionStatus.SCHEDULED
+
+        if fg.type == 'rgb' and fg.rgb:
+            rgb = fg.rgb
+            if rgb == self.COLOR_GREEN:
+                return ProductionStatus.COMPLETED
+            elif rgb == self.COLOR_LIGHT_BLUE:
+                return ProductionStatus.IN_PROGRESS
+            elif rgb == self.COLOR_ORANGE:
+                return ProductionStatus.SCHEDULED  # Orange = needs attention but not started
+
+        return ProductionStatus.SCHEDULED
+
+    def import_from_excel(
+        self,
+        records: list[ProductionScheduleCreate],
+        match_products: bool = True
+    ) -> ProductionImportResult:
+        """
+        Import parsed Excel records to database.
+
+        Args:
+            records: List of ProductionScheduleCreate from parse_production_excel()
+            match_products: Whether to attempt SKU matching
+
+        Returns:
+            ProductionImportResult with counts and warnings
+        """
+        if not records:
+            return ProductionImportResult(
+                filename="",
+                source_month="",
+                total_rows_parsed=0,
+                rows_with_guatemala_data=0,
+                warnings=["No records to import"]
+            )
+
+        logger.info("importing_excel_records", count=len(records))
+
+        # Get source info from first record
+        filename = records[0].source_file or ""
+        source_month = records[0].source_month or ""
+
+        # Track results
+        inserted = 0
+        updated = 0
+        skipped = 0
+        matched = 0
+        unmatched_refs = set()
+        warnings = []
+
+        # Status counts
+        status_counts = {
+            ProductionStatus.COMPLETED: 0,
+            ProductionStatus.IN_PROGRESS: 0,
+            ProductionStatus.SCHEDULED: 0,
+        }
+        total_requested = Decimal("0")
+        total_completed = Decimal("0")
+
+        # Get products for matching
+        products_by_sku = {}
+        if match_products:
+            try:
+                all_products = self.product_service.get_all_active_tiles()
+                for p in all_products:
+                    # Index by SKU and normalized forms (accent-normalized)
+                    sku = getattr(p, 'sku', None)
+                    if sku:
+                        sku_upper = sku.upper()
+                        sku_no_accent = normalize_accents(sku_upper)
+                        # Index by original SKU
+                        products_by_sku[sku_upper] = p
+                        # Index by accent-normalized SKU
+                        products_by_sku[sku_no_accent] = p
+                        # Also index without BTE suffix
+                        no_bte = sku_upper.replace(' BTE', '').replace('BTE', '').strip()
+                        no_bte_no_accent = normalize_accents(no_bte)
+                        products_by_sku[no_bte] = p
+                        products_by_sku[no_bte_no_accent] = p
+            except Exception as e:
+                warnings.append(f"Could not load products for matching: {e}")
+
+        for record in records:
+            try:
+                # Attempt to match product
+                product_id = None
+                sku = None
+
+                if match_products and record.referencia:
+                    ref_upper = record.referencia.upper()
+                    ref_no_accent = normalize_accents(ref_upper)
+                    ref_no_bte = ref_upper.replace(' BTE', '').replace('BTE', '').strip()
+                    ref_no_bte_no_accent = normalize_accents(ref_no_bte)
+
+                    # Try matching in order: exact, no accent, no BTE, no accent + no BTE
+                    product = (
+                        products_by_sku.get(ref_upper) or
+                        products_by_sku.get(ref_no_accent) or
+                        products_by_sku.get(ref_no_bte) or
+                        products_by_sku.get(ref_no_bte_no_accent)
+                    )
+                    if product:
+                        product_id = product.id
+                        sku = getattr(product, 'sku', None)
+                        matched += 1
+                    else:
+                        unmatched_refs.add(record.referencia)
+
+                # Build upsert data
+                upsert_data = {
+                    "factory_item_code": record.factory_item_code,
+                    "referencia": record.referencia,
+                    "sku": sku,
+                    "product_id": product_id,
+                    "plant": record.plant,
+                    "requested_m2": float(record.requested_m2),
+                    "completed_m2": float(record.completed_m2),
+                    "status": record.status.value,
+                    "scheduled_start_date": record.scheduled_start_date.isoformat() if record.scheduled_start_date else None,
+                    "scheduled_end_date": record.scheduled_end_date.isoformat() if record.scheduled_end_date else None,
+                    "estimated_delivery_date": record.estimated_delivery_date.isoformat() if record.estimated_delivery_date else None,
+                    "source_file": record.source_file,
+                    "source_month": record.source_month,
+                    "source_row": record.source_row,
+                }
+
+                # Upsert (use referencia + plant + source_month as unique key)
+                result = self.db.table(self.table).upsert(
+                    upsert_data,
+                    on_conflict="referencia,plant,source_month"
+                ).execute()
+
+                if result.data:
+                    inserted += 1  # Could be insert or update
+
+                # Update totals
+                status_counts[record.status] += 1
+                total_requested += record.requested_m2
+                total_completed += record.completed_m2
+
+            except Exception as e:
+                logger.warning(
+                    "import_record_failed",
+                    referencia=record.referencia,
+                    error=str(e)
+                )
+                skipped += 1
+                warnings.append(f"Failed to import {record.referencia}: {e}")
+
+        logger.info(
+            "excel_import_complete",
+            inserted=inserted,
+            matched=matched,
+            unmatched=len(unmatched_refs),
+            skipped=skipped
+        )
+
+        return ProductionImportResult(
+            filename=filename,
+            source_month=source_month,
+            total_rows_parsed=len(records),
+            rows_with_guatemala_data=len(records),
+            inserted=inserted,
+            updated=updated,
+            skipped=skipped,
+            matched_to_products=matched,
+            unmatched_referencias=list(unmatched_refs),
+            completed_count=status_counts[ProductionStatus.COMPLETED],
+            in_progress_count=status_counts[ProductionStatus.IN_PROGRESS],
+            scheduled_count=status_counts[ProductionStatus.SCHEDULED],
+            total_requested_m2=total_requested,
+            total_completed_m2=total_completed,
+            warnings=warnings,
+        )
+
+    def get_production_summary(self) -> list[ProductionSummary]:
+        """
+        Get production summary by status.
+
+        Returns breakdown of completed, in_progress, and scheduled items.
+        """
+        logger.debug("getting_production_summary")
+
+        try:
+            result = self.db.table(self.table).select(
+                "status, requested_m2, completed_m2"
+            ).execute()
+
+            # Aggregate by status
+            summaries = {
+                "completed": {"count": 0, "requested": Decimal("0"), "completed": Decimal("0")},
+                "in_progress": {"count": 0, "requested": Decimal("0"), "completed": Decimal("0")},
+                "scheduled": {"count": 0, "requested": Decimal("0"), "completed": Decimal("0")},
+            }
+
+            for row in result.data:
+                status = row.get("status", "scheduled")
+                if status in summaries:
+                    summaries[status]["count"] += 1
+                    summaries[status]["requested"] += Decimal(str(row.get("requested_m2", 0)))
+                    summaries[status]["completed"] += Decimal(str(row.get("completed_m2", 0)))
+
+            action_hints = {
+                "completed": "READY TO SHIP",
+                "in_progress": "MANUFACTURING",
+                "scheduled": "CAN ADD MORE",
+            }
+
+            return [
+                ProductionSummary(
+                    status=ProductionStatus(status),
+                    item_count=data["count"],
+                    total_requested_m2=data["requested"],
+                    total_completed_m2=data["completed"],
+                    total_remaining_m2=data["requested"] - data["completed"],
+                    action_hint=action_hints[status],
+                )
+                for status, data in summaries.items()
+                if data["count"] > 0
+            ]
+
+        except Exception as e:
+            logger.error("get_production_summary_failed", error=str(e))
+            return []
+
+    def get_can_add_more_items(self) -> list[ProductionScheduleDBResponse]:
+        """
+        Get items in 'scheduled' status that can have more quantity added.
+
+        These are items where production hasn't started yet.
+
+        Returns:
+            List of ProductionScheduleDBResponse with can_add_more=True
+        """
+        logger.debug("getting_can_add_more_items")
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("status", "scheduled")
+                .order("referencia")
+                .execute()
+            )
+
+            return [
+                ProductionScheduleDBResponse.from_db(row)
+                for row in result.data
+            ]
+
+        except Exception as e:
+            logger.error("get_can_add_more_items_failed", error=str(e))
+            return []
+
+    def get_capacity(self, monthly_limit_m2: Decimal = Decimal("60000")) -> ProductionCapacity:
+        """
+        Get factory request capacity tracking.
+
+        Args:
+            monthly_limit_m2: Monthly quota (default 60,000 m² for Guatemala)
+
+        Returns:
+            ProductionCapacity with utilization breakdown
+        """
+        logger.debug("getting_production_capacity")
+
+        try:
+            result = self.db.table(self.table).select(
+                "status, requested_m2, referencia"
+            ).execute()
+
+            completed_m2 = Decimal("0")
+            in_progress_m2 = Decimal("0")
+            scheduled_m2 = Decimal("0")
+            can_add_items = []
+
+            for row in result.data:
+                requested = Decimal(str(row.get("requested_m2", 0)))
+                status = row.get("status", "scheduled")
+
+                if status == "completed":
+                    completed_m2 += requested
+                elif status == "in_progress":
+                    in_progress_m2 += requested
+                elif status == "scheduled":
+                    scheduled_m2 += requested
+                    can_add_items.append(row.get("referencia", "Unknown"))
+
+            total_requested = completed_m2 + in_progress_m2 + scheduled_m2
+            available = max(Decimal("0"), monthly_limit_m2 - total_requested)
+            utilization = (total_requested / monthly_limit_m2 * 100) if monthly_limit_m2 > 0 else Decimal("0")
+
+            return ProductionCapacity(
+                monthly_limit_m2=monthly_limit_m2,
+                already_requested_m2=total_requested,
+                available_to_request_m2=available,
+                utilization_pct=utilization,
+                completed_m2=completed_m2,
+                in_progress_m2=in_progress_m2,
+                scheduled_m2=scheduled_m2,
+                can_add_more_items=can_add_items,
+            )
+
+        except Exception as e:
+            logger.error("get_production_capacity_failed", error=str(e))
+            return ProductionCapacity()
+
+    def get_production_by_sku(self) -> dict[str, ProductionScheduleDBResponse]:
+        """
+        Get production status for all products, indexed by SKU.
+
+        Used by Order Builder to enrich product data with production status.
+        For products with multiple production entries (e.g., in different plants),
+        returns the most recent entry.
+
+        Returns:
+            Dict mapping SKU to ProductionScheduleDBResponse
+        """
+        logger.debug("getting_production_by_sku")
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .not_.is_("sku", "null")
+                .order("updated_at", desc=True)
+                .execute()
+            )
+
+            # Build map, taking first (most recent) entry per SKU
+            production_map: dict[str, ProductionScheduleDBResponse] = {}
+            for row in result.data:
+                sku = row.get("sku")
+                if sku and sku not in production_map:
+                    production_map[sku] = ProductionScheduleDBResponse.from_db(row)
+
+            logger.info(
+                "production_by_sku_retrieved",
+                total_records=len(result.data),
+                unique_skus=len(production_map)
+            )
+
+            return production_map
+
+        except Exception as e:
+            logger.error("get_production_by_sku_failed", error=str(e))
+            return {}
+
+    def get_production_for_order_builder(
+        self,
+        skus: list[str]
+    ) -> dict[str, ProductionScheduleDBResponse]:
+        """
+        Get production status for specific SKUs (batch lookup).
+
+        More efficient than get_production_by_sku when you only need
+        production data for specific products.
+
+        Args:
+            skus: List of SKUs to look up
+
+        Returns:
+            Dict mapping SKU to ProductionScheduleDBResponse
+        """
+        if not skus:
+            return {}
+
+        logger.debug("getting_production_for_order_builder", sku_count=len(skus))
+
+        try:
+            # Normalize SKUs for matching
+            normalized_skus = [normalize_accents(sku.upper()) for sku in skus]
+
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .not_.is_("sku", "null")
+                .order("updated_at", desc=True)
+                .execute()
+            )
+
+            # Build map with accent-normalized lookup
+            production_map: dict[str, ProductionScheduleDBResponse] = {}
+            for row in result.data:
+                sku = row.get("sku")
+                if sku:
+                    sku_normalized = normalize_accents(sku.upper())
+                    # Check if this SKU matches any requested SKU
+                    for original_sku, norm_sku in zip(skus, normalized_skus):
+                        if sku_normalized == norm_sku and original_sku not in production_map:
+                            production_map[original_sku] = ProductionScheduleDBResponse.from_db(row)
+                            break
+
+            logger.info(
+                "production_for_order_builder_retrieved",
+                requested=len(skus),
+                found=len(production_map)
+            )
+
+            return production_map
+
+        except Exception as e:
+            logger.error("get_production_for_order_builder_failed", error=str(e))
+            return {}
 
 
 # Singleton instance

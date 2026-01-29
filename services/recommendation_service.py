@@ -60,7 +60,7 @@ class RecommendationService:
 
         # Settings (from environment config, not database)
         self.lead_time = settings.lead_time_days  # 45 days
-        self.warehouse_capacity_pallets = settings.warehouse_max_pallets  # 740
+        self.warehouse_capacity_pallets = settings.warehouse_max_pallets  # 672
         self.warehouse_capacity_m2 = Decimal(str(self.warehouse_capacity_pallets)) * M2_PER_PALLET
         self.sales_weeks = settings.velocity_window_weeks  # 12 weeks default
         self.low_volume_min_records = settings.low_volume_min_records  # 2 records minimum

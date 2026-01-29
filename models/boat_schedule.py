@@ -27,6 +27,11 @@ class RouteType(str, Enum):
 
 
 # Constants
+# Order deadline: 30 days before departure to finalize order
+# (allows time for factory confirmation, logistics, etc.)
+ORDER_DEADLINE_DAYS = 30
+
+# Booking buffer: 3 days before departure for final booking
 BOOKING_BUFFER_DAYS = 3  # Days before departure to book
 
 
@@ -96,6 +101,11 @@ class BoatScheduleCreate(BaseSchema):
                     f"date difference ({calculated_days} days)"
                 )
         return self
+
+    @property
+    def order_deadline(self) -> date:
+        """Calculate order deadline (departure - 30 days)."""
+        return self.departure_date - timedelta(days=ORDER_DEADLINE_DAYS)
 
     @property
     def booking_deadline(self) -> date:
@@ -178,13 +188,16 @@ class BoatScheduleResponse(BaseSchema, TimestampMixin):
     origin_port: str = Field(..., description="Origin port")
     destination_port: str = Field(..., description="Destination port")
     route_type: Optional[RouteType] = Field(None, description="Route type")
-    booking_deadline: date = Field(..., description="Last date to book")
+    order_deadline: date = Field(..., description="Recommended order deadline (30 days before departure)")
+    booking_deadline: date = Field(..., description="Last date to book cargo (3 days before departure)")
     status: BoatStatus = Field(..., description="Current status")
     source_file: Optional[str] = Field(None, description="Source filename")
 
     # Computed fields for UI
     days_until_departure: Optional[int] = Field(None, description="Days until departure")
+    days_until_order_deadline: Optional[int] = Field(None, description="Days until order deadline (can be negative)")
     days_until_deadline: Optional[int] = Field(None, description="Days until booking deadline")
+    past_order_deadline: bool = Field(default=False, description="True if past recommended order deadline")
 
     @classmethod
     def from_db(cls, row: dict, today: Optional[date] = None) -> "BoatScheduleResponse":
@@ -196,8 +209,13 @@ class BoatScheduleResponse(BaseSchema, TimestampMixin):
         deadline = cls._parse_date(row["booking_deadline"])
         arrival = cls._parse_date(row["arrival_date"])
 
+        # Calculate order deadline (30 days before departure)
+        order_deadline = departure - timedelta(days=ORDER_DEADLINE_DAYS)
+
         days_until_departure = (departure - today).days if departure >= today else None
+        days_until_order_deadline = (order_deadline - today).days  # Can be negative
         days_until_deadline = (deadline - today).days if deadline >= today else None
+        past_order_deadline = today > order_deadline
 
         return cls(
             id=str(row["id"]),
@@ -209,13 +227,16 @@ class BoatScheduleResponse(BaseSchema, TimestampMixin):
             origin_port=row["origin_port"],
             destination_port=row["destination_port"],
             route_type=row.get("route_type"),
+            order_deadline=order_deadline,
             booking_deadline=deadline,
             status=row["status"],
             source_file=row.get("source_file"),
             created_at=row["created_at"],
             updated_at=row.get("updated_at"),
             days_until_departure=days_until_departure,
-            days_until_deadline=days_until_deadline
+            days_until_order_deadline=days_until_order_deadline,
+            days_until_deadline=days_until_deadline,
+            past_order_deadline=past_order_deadline
         )
 
     @staticmethod

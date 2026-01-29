@@ -328,3 +328,287 @@ class ProductFactoryStatus(BaseSchema):
         None,
         description="Human-readable timing status"
     )
+
+
+# ===================
+# EXCEL-BASED PRODUCTION SCHEDULE (Programa de Produccion)
+# ===================
+# These models support the Excel-based production schedule parsing
+# with color-coded status detection (white=scheduled, blue=in_progress, green=completed)
+
+
+class ProductionStatus(str, Enum):
+    """
+    Production status derived from Excel cell colors.
+
+    Key insight: 'scheduled' items CAN HAVE MORE QUANTITY ADDED before production starts!
+    """
+    SCHEDULED = "scheduled"          # White/no fill - NOT STARTED, CAN ADD MORE!
+    IN_PROGRESS = "in_progress"      # Light blue - currently manufacturing
+    COMPLETED = "completed"          # Green - finished, ready to ship
+
+
+class ProductionScheduleCreate(BaseSchema):
+    """
+    Create a production schedule record from Excel parsing.
+
+    Used when importing data from Programa de Produccion Excel files.
+    """
+
+    factory_item_code: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Factory internal item code (e.g., 5549)"
+    )
+    referencia: str = Field(
+        ...,
+        max_length=255,
+        description="Product reference name from factory (e.g., SAMAN BEIGE BTE)"
+    )
+    sku: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Matched SKU from our system"
+    )
+    product_id: Optional[str] = Field(
+        None,
+        description="Linked product UUID"
+    )
+
+    # Production data
+    plant: str = Field(
+        ...,
+        description="Plant identifier: 'plant_1' or 'plant_2'"
+    )
+    requested_m2: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description="m2 Primera exportacion under Programa - what Guatemala requested"
+    )
+    completed_m2: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        description="m2 Primera exportacion under Real - what factory completed"
+    )
+
+    # Status
+    status: ProductionStatus = Field(
+        default=ProductionStatus.SCHEDULED,
+        description="Status from cell color: scheduled=white, in_progress=blue, completed=green"
+    )
+
+    # Dates
+    scheduled_start_date: Optional[date] = Field(
+        None, description="Fecha Inicio from Excel"
+    )
+    scheduled_end_date: Optional[date] = Field(
+        None, description="Fecha Fin from Excel"
+    )
+    estimated_delivery_date: Optional[date] = Field(
+        None, description="Fecha estimada entrega from Excel"
+    )
+
+    # Source tracking
+    source_file: Optional[str] = Field(
+        None, description="Original filename"
+    )
+    source_month: Optional[str] = Field(
+        None, description="Month identifier (e.g., ENERO-26)"
+    )
+    source_row: Optional[int] = Field(
+        None, description="Row number in Excel for debugging"
+    )
+
+
+class ProductionScheduleDBResponse(BaseSchema, TimestampMixin):
+    """
+    Production schedule record from database.
+
+    Includes computed fields for Order Builder integration.
+    """
+
+    id: str = Field(..., description="Record UUID")
+    factory_item_code: Optional[str] = None
+    referencia: str
+    sku: Optional[str] = None
+    product_id: Optional[str] = None
+
+    # Production data
+    plant: str
+    requested_m2: Decimal
+    completed_m2: Decimal
+    remaining_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="requested_m2 - completed_m2"
+    )
+
+    # Status
+    status: ProductionStatus
+    can_add_more: bool = Field(
+        default=False,
+        description="True if status='scheduled' - production hasn't started yet"
+    )
+
+    # Dates
+    scheduled_start_date: Optional[date] = None
+    scheduled_end_date: Optional[date] = None
+    estimated_delivery_date: Optional[date] = None
+    actual_completion_date: Optional[date] = None
+
+    # Source
+    source_file: Optional[str] = None
+    source_month: Optional[str] = None
+
+    @classmethod
+    def from_db(cls, row: dict) -> "ProductionScheduleDBResponse":
+        """Create response from database row with computed fields."""
+        requested = Decimal(str(row.get("requested_m2", 0)))
+        completed = Decimal(str(row.get("completed_m2", 0)))
+        status = row.get("status", "scheduled")
+
+        return cls(
+            id=str(row["id"]),
+            factory_item_code=row.get("factory_item_code"),
+            referencia=row["referencia"],
+            sku=row.get("sku"),
+            product_id=str(row["product_id"]) if row.get("product_id") else None,
+            plant=row["plant"],
+            requested_m2=requested,
+            completed_m2=completed,
+            remaining_m2=requested - completed,
+            status=ProductionStatus(status),
+            can_add_more=(status == "scheduled"),
+            scheduled_start_date=row.get("scheduled_start_date"),
+            scheduled_end_date=row.get("scheduled_end_date"),
+            estimated_delivery_date=row.get("estimated_delivery_date"),
+            actual_completion_date=row.get("actual_completion_date"),
+            source_file=row.get("source_file"),
+            source_month=row.get("source_month"),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+        )
+
+
+class ProductionSummary(BaseSchema):
+    """
+    Summary of production by status.
+
+    Used for dashboard and capacity planning.
+    """
+
+    status: ProductionStatus
+    item_count: int
+    total_requested_m2: Decimal
+    total_completed_m2: Decimal
+    total_remaining_m2: Decimal
+    action_hint: str = Field(
+        ...,
+        description="Action suggestion: 'CAN ADD MORE', 'MANUFACTURING', 'READY TO SHIP'"
+    )
+
+
+class ProductionCapacity(BaseSchema):
+    """
+    Factory request capacity tracking.
+
+    Guatemala has a 60,000 m² monthly quota.
+    """
+
+    monthly_limit_m2: Decimal = Field(
+        default=Decimal("60000"),
+        description="Monthly quota for Guatemala requests"
+    )
+    already_requested_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Sum of all requested_m2 for current month"
+    )
+    available_to_request_m2: Decimal = Field(
+        default=Decimal("60000"),
+        description="monthly_limit - already_requested"
+    )
+    utilization_pct: Decimal = Field(
+        default=Decimal("0"),
+        description="Percentage of monthly quota used"
+    )
+
+    # Breakdown by status
+    completed_m2: Decimal = Field(default=Decimal("0"))
+    in_progress_m2: Decimal = Field(default=Decimal("0"))
+    scheduled_m2: Decimal = Field(default=Decimal("0"))
+
+    # Items that can have more added
+    can_add_more_items: list[str] = Field(
+        default_factory=list,
+        description="Referencias of items in 'scheduled' status"
+    )
+
+
+class ProductionImportResult(BaseSchema):
+    """Result of importing production schedule from Excel."""
+
+    filename: str
+    source_month: str
+
+    # Counts
+    total_rows_parsed: int
+    rows_with_guatemala_data: int  # Rows with Primera exportacion data
+
+    # Import results
+    inserted: int = 0
+    updated: int = 0
+    skipped: int = 0
+
+    # Product mapping
+    matched_to_products: int = 0
+    unmatched_referencias: list[str] = Field(default_factory=list)
+
+    # Status breakdown
+    completed_count: int = 0
+    in_progress_count: int = 0
+    scheduled_count: int = 0
+
+    # Totals
+    total_requested_m2: Decimal = Decimal("0")
+    total_completed_m2: Decimal = Decimal("0")
+
+    # Warnings
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CanAddMoreAlert(BaseSchema):
+    """
+    Alert for Order Builder when a product can have more added to factory request.
+
+    Key business value: Identify products in 'scheduled' status where we could
+    request additional quantity before production starts.
+    """
+
+    product_id: Optional[str] = None
+    sku: Optional[str] = None
+    referencia: str
+
+    # Current factory request
+    current_requested_m2: Decimal
+    current_status: ProductionStatus
+
+    # Order Builder suggestion
+    order_builder_suggested_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="What Order Builder thinks we need"
+    )
+
+    # Gap analysis
+    gap_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="order_builder_suggested - current_requested"
+    )
+    should_add_more: bool = Field(
+        default=False,
+        description="True if gap > 0 and status='scheduled'"
+    )
+
+    # Alert message
+    alert_message: Optional[str] = Field(
+        None,
+        description="Human-readable alert: 'Add 1,000 m² before production starts!'"
+    )

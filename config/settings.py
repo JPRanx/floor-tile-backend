@@ -126,16 +126,16 @@ class Settings(BaseSettings):
     # WAREHOUSE CONSTRAINTS
     # ===================
     warehouse_max_pallets: int = Field(
-        default=740,
+        default=672,
         ge=100,
         le=2000,
-        description="Maximum pallet capacity in warehouse"
+        description="Maximum pallet capacity in warehouse (Guatemala: 672 pallets)"
     )
     warehouse_max_m2: int = Field(
-        default=100000,
+        default=90317,
         ge=10000,
         le=500000,
-        description="Maximum m² capacity in warehouse"
+        description="Maximum m² capacity in warehouse (Guatemala: 90,316.80 m²)"
     )
     
     # ===================

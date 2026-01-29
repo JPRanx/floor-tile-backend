@@ -323,6 +323,40 @@ class OrderBuilderProduct(BaseSchema):
         description="Human-readable factory fill status"
     )
 
+    # === PRODUCTION SCHEDULE STATUS (from production_schedule table) ===
+    # These fields track items from the "Programa de Produccion" Excel
+    production_status: str = Field(
+        default="not_scheduled",
+        description="Production status: 'scheduled', 'in_progress', 'completed', 'not_scheduled'"
+    )
+    production_requested_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="m² requested from factory (Programa column)"
+    )
+    production_completed_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="m² already completed (Real column)"
+    )
+    production_can_add_more: bool = Field(
+        default=False,
+        description="True if status='scheduled' - production hasn't started, CAN ADD MORE!"
+    )
+    production_estimated_ready: Optional[date] = Field(
+        default=None,
+        description="When production expected to complete"
+    )
+
+    # === PRE-PRODUCTION ALERT ===
+    # Alert when user should add more to a scheduled production request
+    production_add_more_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Additional m² suggested to add before production starts"
+    )
+    production_add_more_alert: Optional[str] = Field(
+        default=None,
+        description="Alert message if user should add more: 'Add 1,000 m² before production starts!'"
+    )
+
     # Trend data (from Intelligence system)
     urgency: str = Field(default="ok", description="critical, urgent, soon, ok")
     days_of_stock: Optional[int] = Field(None, description="Days of stock at current velocity")
@@ -392,6 +426,9 @@ class OrderBuilderBoat(BaseSchema):
     days_until_departure: int
     days_until_arrival: int = Field(..., description="Days until boat arrives at port")
     days_until_warehouse: int = Field(..., description="Days until product in warehouse (arrival + port + trucking)")
+    order_deadline: date = Field(..., description="Recommended order deadline (30 days before departure)")
+    days_until_order_deadline: int = Field(..., description="Days until order deadline (can be negative)")
+    past_order_deadline: bool = Field(default=False, description="True if past recommended order deadline")
     booking_deadline: date
     days_until_deadline: int
     max_containers: int = Field(default=5, description="3-5, default 5")
@@ -424,9 +461,9 @@ class OrderBuilderSummary(BaseSchema):
     boat_max_containers: int = Field(default=5)
     boat_remaining_containers: int = Field(default=5)
 
-    # Warehouse capacity
+    # Warehouse capacity (Guatemala: 90,316.80 m² = 672 pallets)
     warehouse_current_pallets: int = Field(default=0)
-    warehouse_capacity: int = Field(default=740)
+    warehouse_capacity: int = Field(default=672)
     warehouse_after_delivery: int = Field(default=0)
     warehouse_utilization_after: Decimal = Field(default=Decimal("0"), description="Percentage 0-100")
 
@@ -522,6 +559,120 @@ class ConstraintAnalysis(BaseSchema):
     )
 
 
+# ===================
+# SECTION SUMMARIES (Three-Section Order Builder)
+# ===================
+
+class AddToProductionItem(BaseSchema):
+    """Item that can have more quantity added to scheduled production."""
+
+    product_id: str
+    sku: str
+    description: Optional[str] = None
+    referencia: str = Field(..., description="Factory reference name")
+
+    # Current production request
+    current_requested_m2: Decimal = Field(..., description="What's already scheduled")
+
+    # Order Builder suggestion
+    suggested_total_m2: Decimal = Field(..., description="What Order Builder suggests total")
+    suggested_additional_m2: Decimal = Field(..., description="Additional to add")
+    suggested_additional_pallets: int = Field(default=0)
+
+    # Timing
+    estimated_ready_date: Optional[date] = Field(None, description="When production ready")
+    target_boat: Optional[str] = Field(None, description="Which boat this could ship on")
+    target_boat_departure: Optional[date] = None
+
+    # Priority
+    score: int = Field(default=0, description="Priority score from Order Builder")
+    is_critical: bool = Field(default=False, description="Score >= 85")
+
+
+class FactoryRequestItem(BaseSchema):
+    """Item that needs a new factory production request."""
+
+    product_id: str
+    sku: str
+    description: Optional[str] = None
+
+    # Current coverage
+    warehouse_m2: Decimal = Field(default=Decimal("0"))
+    in_transit_m2: Decimal = Field(default=Decimal("0"))
+    factory_available_m2: Decimal = Field(default=Decimal("0"))
+    in_production_m2: Decimal = Field(default=Decimal("0"))
+
+    # Need
+    suggested_m2: Decimal = Field(..., description="What Order Builder suggests")
+    gap_m2: Decimal = Field(..., description="Gap after all sources")
+    gap_pallets: int = Field(default=0)
+
+    # Request
+    request_m2: Decimal = Field(default=Decimal("0"), description="User-adjustable request")
+    request_pallets: int = Field(default=0)
+
+    # Timing
+    estimated_ready: str = Field(default="30-60 days", description="Estimated production time")
+
+    # Priority
+    urgency: str = Field(default="ok")
+    score: int = Field(default=0)
+
+
+class WarehouseOrderSummary(BaseSchema):
+    """Summary for Section 1: Warehouse Order (ship now)."""
+
+    product_count: int = Field(default=0)
+    selected_count: int = Field(default=0)
+    total_m2: Decimal = Field(default=Decimal("0"))
+    total_pallets: int = Field(default=0)
+    total_containers: int = Field(default=0)
+    total_weight_kg: Decimal = Field(default=Decimal("0"))
+
+    # BL allocation
+    bl_count: int = Field(default=1)
+
+    # Boat
+    boat_name: Optional[str] = None
+    boat_departure: Optional[date] = None
+
+
+class AddToProductionSummary(BaseSchema):
+    """Summary for Section 2: Add to Production (piggyback on scheduled items)."""
+
+    product_count: int = Field(default=0, description="Items that can have more added")
+    total_additional_m2: Decimal = Field(default=Decimal("0"))
+    total_additional_pallets: int = Field(default=0)
+
+    # Items eligible for adding more
+    items: list[AddToProductionItem] = Field(default_factory=list)
+
+    # Timing
+    estimated_ready_range: str = Field(default="4-7 days")
+
+    # Alert flag
+    has_critical_items: bool = Field(default=False, description="Any item with score >= 85")
+
+
+class FactoryRequestSummary(BaseSchema):
+    """Summary for Section 3: New Factory Request."""
+
+    product_count: int = Field(default=0)
+    total_request_m2: Decimal = Field(default=Decimal("0"))
+    total_request_pallets: int = Field(default=0)
+
+    # Items needing new requests
+    items: list[FactoryRequestItem] = Field(default_factory=list)
+
+    # Quota tracking (Guatemala: 60k m²/month)
+    limit_m2: Decimal = Field(default=Decimal("60000"))
+    utilization_pct: Decimal = Field(default=Decimal("0"))
+    remaining_m2: Decimal = Field(default=Decimal("60000"))
+
+    # Timing
+    estimated_ready: str = Field(default="March 2026")
+
+
 class OrderBuilderResponse(BaseSchema):
     """Complete Order Builder API response."""
 
@@ -532,7 +683,7 @@ class OrderBuilderResponse(BaseSchema):
     # BL count (determines capacity)
     num_bls: int = Field(default=1, ge=1, le=5, description="Number of BLs (1-5). Capacity = num_bls × 5 × 14 pallets")
 
-    # Products grouped by priority
+    # Products grouped by priority (existing)
     high_priority: list[OrderBuilderProduct] = Field(default_factory=list)
     consider: list[OrderBuilderProduct] = Field(default_factory=list)
     well_covered: list[OrderBuilderProduct] = Field(default_factory=list)
@@ -540,6 +691,17 @@ class OrderBuilderResponse(BaseSchema):
 
     # Summary
     summary: OrderBuilderSummary
+
+    # === NEW: Three-Section Summaries ===
+    warehouse_order_summary: Optional[WarehouseOrderSummary] = Field(
+        None, description="Section 1: Ship from SIESA stock now"
+    )
+    add_to_production_summary: Optional[AddToProductionSummary] = Field(
+        None, description="Section 2: Add to scheduled production (fast)"
+    )
+    factory_request_summary: Optional[FactoryRequestSummary] = Field(
+        None, description="Section 3: New factory requests (future)"
+    )
 
     # Constraint analysis (explains capacity limits)
     constraint_analysis: Optional[ConstraintAnalysis] = Field(

@@ -58,6 +58,12 @@ from models.order_builder import (
     ProductScore,
     ProductReasoningDisplay,
     DominantFactor,
+    # Section summaries (Three-Section Order Builder)
+    WarehouseOrderSummary,
+    AddToProductionSummary,
+    AddToProductionItem,
+    FactoryRequestSummary,
+    FactoryRequestItem,
 )
 from models.recommendation import RecommendationPriority
 
@@ -67,7 +73,7 @@ logger = structlog.get_logger(__name__)
 M2_PER_PALLET = Decimal("134.4")
 PALLETS_PER_CONTAINER = 14
 MAX_CONTAINERS_PER_BL = 5  # Each BL can hold up to 5 containers
-WAREHOUSE_CAPACITY = 740  # pallets
+WAREHOUSE_CAPACITY = 672  # pallets (90,316.80 m² Guatemala warehouse)
 
 
 class OrderBuilderService:
@@ -94,6 +100,7 @@ class OrderBuilderService:
         self,
         boat_id: Optional[str] = None,
         num_bls: int = 1,
+        excluded_skus: Optional[list[str]] = None,
     ) -> OrderBuilderResponse:
         """
         Get complete Order Builder data.
@@ -102,6 +109,8 @@ class OrderBuilderService:
             boat_id: Optional specific boat ID. If None, uses next available.
             num_bls: Number of BLs (1-5). Determines capacity: num_bls × 5 × 14 pallets.
                      Default 1 (70 pallets) for backward compatibility.
+            excluded_skus: Optional list of SKUs to exclude from optimization.
+                          Used when user removes products and wants to recalculate.
 
         Returns:
             OrderBuilderResponse with all data needed for the UI
@@ -109,12 +118,16 @@ class OrderBuilderService:
         # Clamp num_bls to valid range
         num_bls = max(1, min(5, num_bls))
 
+        # Normalize excluded_skus
+        excluded_set = set(excluded_skus) if excluded_skus else set()
+
         timings = {}
         t0 = time.time()
         logger.info(
             "getting_order_builder",
             boat_id=boat_id,
-            num_bls=num_bls
+            num_bls=num_bls,
+            excluded_count=len(excluded_set)
         )
 
         # Step 1: Get boat info
@@ -131,6 +144,7 @@ class OrderBuilderService:
             default_departure = today + timedelta(days=DEFAULT_LEAD_TIME_DAYS)
             default_arrival = default_departure + timedelta(days=25)  # ~25 days transit
             default_warehouse = DEFAULT_LEAD_TIME_DAYS + 25 + WAREHOUSE_BUFFER_DAYS  # departure + transit + buffer
+            default_order_deadline = default_departure - timedelta(days=30)
 
             boat = OrderBuilderBoat(
                 boat_id="",
@@ -140,6 +154,9 @@ class OrderBuilderService:
                 days_until_departure=DEFAULT_LEAD_TIME_DAYS,
                 days_until_arrival=DEFAULT_LEAD_TIME_DAYS + 25,  # departure + transit
                 days_until_warehouse=default_warehouse,
+                order_deadline=default_order_deadline,
+                days_until_order_deadline=(default_order_deadline - today).days,
+                past_order_deadline=today > default_order_deadline,
                 booking_deadline=today,
                 days_until_deadline=0,
                 max_containers=5,
@@ -149,6 +166,20 @@ class OrderBuilderService:
         t1 = time.time()
         recommendations = self.recommendation_service.get_recommendations()
         timings["2_recommendations"] = round(time.time() - t1, 2)
+
+        # Step 2a: Filter out excluded SKUs (for recalculate)
+        if excluded_set:
+            original_count = len(recommendations.recommendations)
+            recommendations.recommendations = [
+                rec for rec in recommendations.recommendations
+                if rec.sku not in excluded_set
+            ]
+            logger.info(
+                "excluded_skus_filtered",
+                excluded_count=len(excluded_set),
+                original_count=original_count,
+                filtered_count=len(recommendations.recommendations)
+            )
 
         # Step 2b: Get trend data for products
         t2 = time.time()
@@ -191,6 +222,10 @@ class OrderBuilderService:
         well_covered = [p for p in all_products if p.priority == "WELL_COVERED"]
         your_call = [p for p in all_products if p.priority == "YOUR_CALL"]
 
+        # Step 8: Calculate three-section summaries
+        warehouse_summary, add_to_production_summary, factory_request_summary = \
+            self._calculate_section_summaries(all_products, boat, num_bls)
+
         result = OrderBuilderResponse(
             boat=boat,
             next_boat=next_boat,
@@ -200,6 +235,10 @@ class OrderBuilderService:
             well_covered=well_covered,
             your_call=your_call,
             summary=summary,
+            # Three-section summaries
+            warehouse_order_summary=warehouse_summary,
+            add_to_production_summary=add_to_production_summary,
+            factory_request_summary=factory_request_summary,
             constraint_analysis=constraint_analysis,
             summary_reasoning=summary_reasoning,
         )
@@ -260,6 +299,11 @@ class OrderBuilderService:
         days_until_arrival = (boat_data.arrival_date - today).days
         days_until_deadline = (boat_data.booking_deadline - today).days
 
+        # Order deadline is 30 days before departure (from boat_data)
+        order_deadline = boat_data.order_deadline
+        days_until_order_deadline = (order_deadline - today).days  # Can be negative
+        past_order_deadline = today > order_deadline
+
         # days_until_warehouse = arrival + port buffer + trucking
         # This is the TRUE lead time for coverage calculation
         days_until_warehouse = days_until_arrival + WAREHOUSE_BUFFER_DAYS
@@ -272,6 +316,9 @@ class OrderBuilderService:
             days_until_departure=max(0, days_until_departure),
             days_until_arrival=max(0, days_until_arrival),
             days_until_warehouse=max(0, days_until_warehouse),
+            order_deadline=order_deadline,
+            days_until_order_deadline=days_until_order_deadline,
+            past_order_deadline=past_order_deadline,
             booking_deadline=boat_data.booking_deadline,
             days_until_deadline=max(0, days_until_deadline),
             max_containers=5,  # Default, could be configurable per boat
@@ -755,6 +802,18 @@ class OrderBuilderService:
         except Exception as e:
             logger.warning("factory_availability_lookup_failed", error=str(e))
 
+        # Get production schedule data (from Programa de Produccion Excel)
+        # This shows what's scheduled/in_progress/completed at the factory
+        production_schedule_map = {}
+        try:
+            production_schedule_map = self.production_schedule_service.get_production_by_sku()
+            logger.debug(
+                "production_schedule_loaded",
+                products_with_production=len(production_schedule_map)
+            )
+        except Exception as e:
+            logger.warning("production_schedule_lookup_failed", error=str(e))
+
         for rec in recommendations:
             # Get trend data for this product
             trend = trend_data.get(rec.sku, {})
@@ -914,6 +973,32 @@ class OrderBuilderService:
                 factory_fill_status = "needs_production"
                 factory_fill_message = f"Request production — need {int(shortfall):,} m² more"
 
+            # Get production schedule status (from Programa de Produccion Excel)
+            # This shows what's currently scheduled/in_progress/completed
+            prod_schedule = production_schedule_map.get(rec.sku)
+            production_status = "not_scheduled"
+            production_requested_m2 = Decimal("0")
+            production_completed_m2 = Decimal("0")
+            production_can_add_more = False
+            production_estimated_ready = None
+            production_add_more_m2 = Decimal("0")
+            production_add_more_alert = None
+
+            if prod_schedule:
+                production_status = prod_schedule.status.value if hasattr(prod_schedule.status, 'value') else str(prod_schedule.status)
+                production_requested_m2 = prod_schedule.requested_m2 or Decimal("0")
+                production_completed_m2 = prod_schedule.completed_m2 or Decimal("0")
+                production_can_add_more = prod_schedule.can_add_more
+                production_estimated_ready = prod_schedule.estimated_delivery_date
+
+                # Calculate pre-production alert if:
+                # 1. Status is 'scheduled' (production hasn't started)
+                # 2. Suggested m² is greater than what's already requested
+                if production_can_add_more and suggested_m2 > production_requested_m2:
+                    gap_m2 = suggested_m2 - production_requested_m2
+                    production_add_more_m2 = gap_m2
+                    production_add_more_alert = f"Add {int(gap_m2):,} m² before production starts!"
+
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
@@ -946,6 +1031,14 @@ class OrderBuilderService:
                 factory_lot_count=factory_lot_count,
                 factory_fill_status=factory_fill_status,
                 factory_fill_message=factory_fill_message,
+                # Production schedule status (from Programa de Produccion Excel)
+                production_status=production_status,
+                production_requested_m2=production_requested_m2,
+                production_completed_m2=production_completed_m2,
+                production_can_add_more=production_can_add_more,
+                production_estimated_ready=production_estimated_ready,
+                production_add_more_m2=production_add_more_m2,
+                production_add_more_alert=production_add_more_alert,
                 # Trend fields
                 urgency=urgency,
                 days_of_stock=days_of_stock,
@@ -1671,6 +1764,234 @@ class OrderBuilderService:
             highest_risk_days=highest_risk_days,
         )
 
+    def _calculate_section_summaries(
+        self,
+        all_products: list[OrderBuilderProduct],
+        boat: OrderBuilderBoat,
+        num_bls: int,
+    ) -> tuple[WarehouseOrderSummary, AddToProductionSummary, FactoryRequestSummary]:
+        """
+        Calculate summaries for the three-section Order Builder view.
+
+        Section 1: Warehouse Order — Products with SIESA stock available now
+        Section 2: Add to Production — Items in scheduled production that can have more added
+        Section 3: Factory Request — Products needing new production requests
+
+        Args:
+            all_products: All Order Builder products with production/factory data
+            boat: Target boat info
+            num_bls: Number of BLs (determines capacity)
+
+        Returns:
+            Tuple of (warehouse_summary, add_to_production_summary, factory_request_summary)
+        """
+        logger.debug("calculating_section_summaries", product_count=len(all_products))
+
+        # Get boat schedules for matching production ready dates
+        available_boats = self.boat_service.get_available(limit=5)
+        boat_schedules = [
+            (b.name, b.departure_date, b.order_deadline)
+            for b in available_boats
+        ]
+
+        # === SECTION 1: WAREHOUSE ORDER ===
+        # Products where factory_available_m2 > 0 (can ship from SIESA now)
+        warehouse_products = [
+            p for p in all_products
+            if p.factory_available_m2 and p.factory_available_m2 > 0
+        ]
+
+        selected_warehouse = [p for p in warehouse_products if p.is_selected]
+        warehouse_total_pallets = sum(p.selected_pallets for p in selected_warehouse)
+        warehouse_total_m2 = Decimal(str(warehouse_total_pallets)) * M2_PER_PALLET
+        warehouse_total_containers = math.ceil(warehouse_total_pallets / PALLETS_PER_CONTAINER)
+        warehouse_total_weight = warehouse_total_m2 * Decimal("25.5")  # ~25.5 kg/m²
+
+        warehouse_summary = WarehouseOrderSummary(
+            product_count=len(warehouse_products),
+            selected_count=len(selected_warehouse),
+            total_m2=warehouse_total_m2,
+            total_pallets=warehouse_total_pallets,
+            total_containers=warehouse_total_containers,
+            total_weight_kg=warehouse_total_weight,
+            bl_count=num_bls,
+            boat_name=boat.name,
+            boat_departure=boat.departure_date,
+        )
+
+        # === SECTION 2: ADD TO PRODUCTION ===
+        # Products where production_can_add_more=True AND suggested > requested
+        add_to_production_items: list[AddToProductionItem] = []
+
+        for p in all_products:
+            if not p.production_can_add_more:
+                continue
+
+            # Calculate how much more to add
+            suggested_m2 = p.suggested_m2 or Decimal("0")
+            requested_m2 = p.production_requested_m2 or Decimal("0")
+            additional_m2 = suggested_m2 - requested_m2
+
+            if additional_m2 <= 0:
+                continue
+
+            additional_pallets = int(additional_m2 / M2_PER_PALLET)
+            if additional_pallets <= 0:
+                continue
+
+            # Find matching boat based on estimated ready date
+            target_boat_name = None
+            target_boat_departure = None
+            estimated_ready = p.production_estimated_ready
+
+            if estimated_ready and boat_schedules:
+                # Find first boat whose order deadline is after the ready date
+                for b_name, b_departure, b_deadline in boat_schedules:
+                    if estimated_ready <= b_deadline:
+                        target_boat_name = b_name
+                        target_boat_departure = b_departure
+                        break
+
+            # Get score from product
+            score = p.score.total if p.score else 0
+            is_critical = score >= 85
+
+            # Get referencia from production data (or use SKU)
+            referencia = p.sku  # Default to SKU
+
+            add_to_production_items.append(AddToProductionItem(
+                product_id=p.product_id,
+                sku=p.sku,
+                description=p.description,
+                referencia=referencia,
+                current_requested_m2=requested_m2,
+                suggested_total_m2=suggested_m2,
+                suggested_additional_m2=additional_m2,
+                suggested_additional_pallets=additional_pallets,
+                estimated_ready_date=estimated_ready,
+                target_boat=target_boat_name,
+                target_boat_departure=target_boat_departure,
+                score=score,
+                is_critical=is_critical,
+            ))
+
+        # Sort by score (critical first)
+        add_to_production_items.sort(key=lambda x: x.score, reverse=True)
+
+        total_additional_m2 = sum(item.suggested_additional_m2 for item in add_to_production_items)
+        total_additional_pallets = sum(item.suggested_additional_pallets for item in add_to_production_items)
+        has_critical = any(item.is_critical for item in add_to_production_items)
+
+        add_to_production_summary = AddToProductionSummary(
+            product_count=len(add_to_production_items),
+            total_additional_m2=total_additional_m2,
+            total_additional_pallets=total_additional_pallets,
+            items=add_to_production_items,
+            estimated_ready_range="4-7 days",
+            has_critical_items=has_critical,
+        )
+
+        # === SECTION 3: FACTORY REQUEST ===
+        # Products where:
+        # - production_status = 'not_scheduled' AND gap > 0, OR
+        # - Even if in production, suggested > (factory_available + production_requested)
+        factory_request_items: list[FactoryRequestItem] = []
+
+        for p in all_products:
+            # Calculate total available coverage
+            warehouse_m2 = p.current_stock_m2 or Decimal("0")
+            in_transit_m2 = p.in_transit_m2 or Decimal("0")
+            factory_available_m2 = p.factory_available_m2 or Decimal("0")
+            in_production_m2 = p.production_requested_m2 or Decimal("0")
+
+            # Total available = warehouse + transit + SIESA + production
+            total_available = warehouse_m2 + in_transit_m2 + factory_available_m2 + in_production_m2
+
+            suggested_m2 = p.suggested_m2 or Decimal("0")
+            gap_m2 = suggested_m2 - total_available
+
+            # Skip if no gap or already has enough
+            if gap_m2 <= 0:
+                continue
+
+            # Skip items that are in scheduled production (they go in Section 2)
+            # Only include not_scheduled OR completed items with gaps
+            if p.production_status == "scheduled" and p.production_can_add_more:
+                continue
+
+            gap_pallets = int(gap_m2 / M2_PER_PALLET)
+            if gap_pallets <= 0:
+                continue
+
+            score = p.score.total if p.score else 0
+
+            factory_request_items.append(FactoryRequestItem(
+                product_id=p.product_id,
+                sku=p.sku,
+                description=p.description,
+                warehouse_m2=warehouse_m2,
+                in_transit_m2=in_transit_m2,
+                factory_available_m2=factory_available_m2,
+                in_production_m2=in_production_m2,
+                suggested_m2=suggested_m2,
+                gap_m2=gap_m2,
+                gap_pallets=gap_pallets,
+                request_m2=gap_m2,  # Default to gap amount
+                request_pallets=gap_pallets,
+                estimated_ready="30-60 days",
+                urgency=p.urgency,
+                score=score,
+            ))
+
+        # Sort by urgency/score
+        urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
+        factory_request_items.sort(
+            key=lambda x: (urgency_order.get(x.urgency, 4), -x.score)
+        )
+
+        total_request_m2 = sum(item.request_m2 for item in factory_request_items)
+        total_request_pallets = sum(item.request_pallets for item in factory_request_items)
+
+        # Monthly limit tracking (60k m²)
+        monthly_limit = Decimal("60000")
+
+        # Get current month's requests from production schedule
+        try:
+            capacity = self.production_schedule_service.get_production_capacity()
+            already_requested = capacity.already_requested_m2
+        except Exception:
+            already_requested = Decimal("0")
+
+        remaining_m2 = monthly_limit - already_requested
+        utilization_pct = (already_requested / monthly_limit * 100) if monthly_limit > 0 else Decimal("0")
+
+        # Estimate when production would be ready
+        today = date.today()
+        estimated_ready_date = today + timedelta(days=45)  # ~45 days average
+        estimated_ready_str = estimated_ready_date.strftime("%B %Y")  # e.g., "March 2026"
+
+        factory_request_summary = FactoryRequestSummary(
+            product_count=len(factory_request_items),
+            total_request_m2=total_request_m2,
+            total_request_pallets=total_request_pallets,
+            items=factory_request_items,
+            limit_m2=monthly_limit,
+            utilization_pct=utilization_pct,
+            remaining_m2=remaining_m2,
+            estimated_ready=estimated_ready_str,
+        )
+
+        logger.info(
+            "section_summaries_calculated",
+            warehouse_products=len(warehouse_products),
+            add_to_production_items=len(add_to_production_items),
+            factory_request_items=len(factory_request_items),
+            add_to_production_total_m2=float(total_additional_m2),
+            factory_request_total_m2=float(total_request_m2),
+        )
+
+        return warehouse_summary, add_to_production_summary, factory_request_summary
+
     def _empty_response(self, mode: OrderBuilderMode) -> OrderBuilderResponse:
         """Return empty response when no boats available."""
         today = date.today()
@@ -1682,6 +2003,9 @@ class OrderBuilderService:
             days_until_departure=0,
             days_until_arrival=0,
             days_until_warehouse=0,
+            order_deadline=today - timedelta(days=30),
+            days_until_order_deadline=-30,
+            past_order_deadline=True,
             booking_deadline=today,
             days_until_deadline=0,
             max_containers=5,

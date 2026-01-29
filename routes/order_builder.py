@@ -107,6 +107,61 @@ def get_order_builder(
     return result
 
 
+class RecalculateRequest(BaseModel):
+    """Request body for recalculating order with exclusions."""
+    boat_id: Optional[str] = None
+    num_bls: int = 1
+    excluded_skus: List[str] = []
+
+
+@router.post("/recalculate", response_model=OrderBuilderResponse)
+def recalculate_order(request: RecalculateRequest) -> OrderBuilderResponse:
+    """
+    Recalculate Order Builder with excluded products.
+
+    Use this endpoint when user removes products and wants to
+    re-optimize the order using freed capacity.
+
+    This performs a FULL re-optimization:
+    - All products are re-scored (except excluded)
+    - Capacity is re-distributed optimally
+    - New recommendations may appear that were previously deferred
+
+    Request body:
+    {
+        "boat_id": "uuid",           // Optional - uses next available if not provided
+        "num_bls": 3,                // Number of BLs (1-5)
+        "excluded_skus": [           // Products to exclude from optimization
+            "TOLU GRIS BTE",
+            "ALMENDRO BEIGE BTE"
+        ]
+    }
+    """
+    start_time = time.time()
+    logger.info(
+        "order_builder_recalculate_request",
+        boat_id=request.boat_id,
+        num_bls=request.num_bls,
+        excluded_count=len(request.excluded_skus),
+        excluded_skus=request.excluded_skus[:5]  # Log first 5 for debugging
+    )
+
+    service = get_order_builder_service()
+    result = service.get_order_builder(
+        boat_id=request.boat_id,
+        num_bls=request.num_bls,
+        excluded_skus=request.excluded_skus
+    )
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "order_builder_recalculate_complete",
+        elapsed_seconds=round(elapsed, 2),
+        excluded_count=len(request.excluded_skus)
+    )
+    return result
+
+
 @router.post("/confirm", response_model=ConfirmOrderResponse, status_code=status.HTTP_201_CREATED)
 def confirm_order(request: ConfirmOrderRequest) -> ConfirmOrderResponse:
     """
