@@ -1954,13 +1954,8 @@ class OrderBuilderService:
         total_additional_pallets = sum(item.suggested_additional_pallets for item in add_to_production_items)
         has_critical = any(item.is_critical for item in add_to_production_items)
 
-        # Calculate action deadline (next Monday)
-        today = date.today()
-        days_until_monday = (7 - today.weekday()) % 7
-        if days_until_monday == 0:
-            days_until_monday = 7  # If today is Monday, next Monday
-        action_deadline = today + timedelta(days=days_until_monday)
-        action_deadline_display = f"{action_deadline.strftime('%A')}, {action_deadline.strftime('%b')} {action_deadline.day}"  # "Monday, Feb 3"
+        # No deadline for Add to Production — user can add before production starts
+        # The deadline concept was removed as production scheduling is flexible
 
         add_to_production_summary = AddToProductionSummary(
             product_count=len(add_to_production_items),
@@ -1969,8 +1964,8 @@ class OrderBuilderService:
             items=add_to_production_items,
             estimated_ready_range="4-7 days",
             has_critical_items=has_critical,
-            action_deadline=action_deadline,
-            action_deadline_display=action_deadline_display,
+            action_deadline=None,  # No deadline — can add before production starts
+            action_deadline_display="",  # Empty — no deadline to display
         )
 
         # === SECTION 3: FACTORY REQUEST ===
