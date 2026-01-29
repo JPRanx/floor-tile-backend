@@ -1944,6 +1944,7 @@ class OrderBuilderService:
                 target_boat_departure=target_boat_departure,
                 score=score,
                 is_critical=is_critical,
+                is_selected=True,  # Pre-select all recommended items
             ))
 
         # Sort by score (critical first)
@@ -1953,6 +1954,14 @@ class OrderBuilderService:
         total_additional_pallets = sum(item.suggested_additional_pallets for item in add_to_production_items)
         has_critical = any(item.is_critical for item in add_to_production_items)
 
+        # Calculate action deadline (next Monday)
+        today = date.today()
+        days_until_monday = (7 - today.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7  # If today is Monday, next Monday
+        action_deadline = today + timedelta(days=days_until_monday)
+        action_deadline_display = f"{action_deadline.strftime('%A')}, {action_deadline.strftime('%b')} {action_deadline.day}"  # "Monday, Feb 3"
+
         add_to_production_summary = AddToProductionSummary(
             product_count=len(add_to_production_items),
             total_additional_m2=total_additional_m2,
@@ -1960,6 +1969,8 @@ class OrderBuilderService:
             items=add_to_production_items,
             estimated_ready_range="4-7 days",
             has_critical_items=has_critical,
+            action_deadline=action_deadline,
+            action_deadline_display=action_deadline_display,
         )
 
         # === SECTION 3: FACTORY REQUEST ===
@@ -2010,9 +2021,10 @@ class OrderBuilderService:
                 gap_pallets=gap_pallets,
                 request_m2=gap_m2,  # Default to gap amount
                 request_pallets=gap_pallets,
-                estimated_ready="30-60 days",
+                estimated_ready="",  # Removed timing guess
                 urgency=p.urgency,
                 score=score,
+                is_selected=True,  # Pre-select all recommended items
             ))
 
         # Sort by urgency/score
@@ -2042,6 +2054,13 @@ class OrderBuilderService:
         estimated_ready_date = today + timedelta(days=45)  # ~45 days average
         estimated_ready_str = estimated_ready_date.strftime("%B %Y")  # e.g., "March 2026"
 
+        # Calculate submit deadline (end of current week, Friday)
+        days_until_friday = (4 - today.weekday()) % 7
+        if days_until_friday == 0 and today.weekday() > 4:
+            days_until_friday = 7  # If past Friday, next Friday
+        submit_deadline = today + timedelta(days=days_until_friday + 7)  # Next week Friday
+        submit_deadline_display = f"Submit by {submit_deadline.strftime('%b')} {submit_deadline.day}"
+
         factory_request_summary = FactoryRequestSummary(
             product_count=len(factory_request_items),
             total_request_m2=total_request_m2,
@@ -2051,6 +2070,8 @@ class OrderBuilderService:
             utilization_pct=utilization_pct,
             remaining_m2=remaining_m2,
             estimated_ready=estimated_ready_str,
+            submit_deadline=submit_deadline,
+            submit_deadline_display=submit_deadline_display,
         )
 
         logger.info(

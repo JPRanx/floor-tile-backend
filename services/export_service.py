@@ -17,6 +17,12 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 import structlog
 
 from models.bl_allocation import BLAllocationReport
+from models.order_builder import (
+    OrderBuilderResponse,
+    OrderBuilderProduct,
+    AddToProductionItem,
+    FactoryRequestItem,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -465,6 +471,482 @@ class ExportService:
             "bl_allocation_excel_generated",
             num_bls=report.num_bls,
             total_containers=report.total_containers,
+        )
+
+        # Save to BytesIO
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return output
+
+    def generate_order_report(
+        self,
+        response: OrderBuilderResponse,
+        selected_warehouse_products: List[OrderBuilderProduct],
+        selected_add_items: List[AddToProductionItem],
+        selected_factory_items: List[FactoryRequestItem],
+    ) -> BytesIO:
+        """
+        Generate comprehensive Order Builder report explaining WHY recommendations were made.
+
+        Creates Excel with 6 sheets:
+        1. EXECUTIVE SUMMARY - High-level order overview
+        2. SHIP NOW - Warehouse order details
+        3. ADD TO PRODUCTION - Items to add to scheduled production
+        4. FACTORY REQUEST - New production requests
+        5. WHY SHIP NOW - Reasoning for each ship now item
+        6. WHY ADD / REQUEST - Reasoning for add/factory items
+
+        Args:
+            response: Full OrderBuilderResponse from the API
+            selected_warehouse_products: Products selected for warehouse order
+            selected_add_items: Items selected for add to production
+            selected_factory_items: Items selected for factory request
+
+        Returns:
+            BytesIO containing the Excel file
+        """
+        logger.info(
+            "generating_order_report",
+            warehouse_count=len(selected_warehouse_products),
+            add_count=len(selected_add_items),
+            factory_count=len(selected_factory_items),
+        )
+
+        wb = Workbook()
+
+        # Styles
+        bold_font = Font(bold=True)
+        title_font = Font(bold=True, size=16)
+        section_font = Font(bold=True, size=12)
+        thin_border = Border(bottom=Side(style="thin", color="000000"))
+        header_fill = PatternFill(start_color="E0E8FF", end_color="E0E8FF", fill_type="solid")
+        critical_fill = PatternFill(start_color="FFE0E0", end_color="FFE0E0", fill_type="solid")
+        urgent_fill = PatternFill(start_color="FFF0E0", end_color="FFF0E0", fill_type="solid")
+        ok_fill = PatternFill(start_color="E0FFE0", end_color="E0FFE0", fill_type="solid")
+
+        # ===== SHEET 1: EXECUTIVE SUMMARY =====
+        ws_summary = wb.active
+        ws_summary.title = "EXECUTIVE SUMMARY"
+
+        ws_summary.column_dimensions["A"].width = 40
+        ws_summary.column_dimensions["B"].width = 25
+        ws_summary.column_dimensions["C"].width = 25
+
+        row = 1
+        ws_summary[f"A{row}"] = "ORDER BUILDER REPORT"
+        ws_summary[f"A{row}"].font = title_font
+        row += 2
+
+        # Boat info
+        ws_summary[f"A{row}"] = "Target Boat:"
+        ws_summary[f"B{row}"] = response.boat.name
+        row += 1
+        ws_summary[f"A{row}"] = "Departure Date:"
+        ws_summary[f"B{row}"] = response.boat.departure_date.strftime("%Y-%m-%d")
+        row += 1
+        ws_summary[f"A{row}"] = "Days Until Departure:"
+        ws_summary[f"B{row}"] = response.boat.days_until_departure
+        row += 1
+        ws_summary[f"A{row}"] = "Booking Deadline:"
+        ws_summary[f"B{row}"] = response.boat.booking_deadline.strftime("%Y-%m-%d")
+        row += 1
+        ws_summary[f"A{row}"] = "Days Until Deadline:"
+        ws_summary[f"B{row}"] = response.boat.days_until_deadline
+        if response.boat.days_until_deadline <= 7:
+            ws_summary[f"B{row}"].fill = urgent_fill
+        row += 2
+
+        # Summary metrics
+        ws_summary[f"A{row}"] = "ORDER SUMMARY"
+        ws_summary[f"A{row}"].font = section_font
+        ws_summary[f"A{row}"].fill = header_fill
+        ws_summary[f"B{row}"].fill = header_fill
+        row += 1
+
+        # Ship Now totals
+        ship_now_pallets = sum(p.selected_pallets for p in selected_warehouse_products)
+        ship_now_m2 = Decimal(str(ship_now_pallets)) * M2_PER_PALLET_FACTORY
+        ws_summary[f"A{row}"] = "Ship Now (Warehouse Order):"
+        ws_summary[f"B{row}"] = f"{ship_now_m2:,.0f} m² ({ship_now_pallets} pallets)"
+        row += 1
+
+        # Add to Production totals
+        add_pallets = sum(item.suggested_additional_pallets for item in selected_add_items)
+        add_m2 = sum(item.suggested_additional_m2 for item in selected_add_items)
+        ws_summary[f"A{row}"] = "Add to Production:"
+        ws_summary[f"B{row}"] = f"{add_m2:,.0f} m² ({add_pallets} pallets)"
+        row += 1
+
+        # Factory Request totals
+        factory_pallets = sum(item.request_pallets for item in selected_factory_items)
+        factory_m2 = sum(item.request_m2 for item in selected_factory_items)
+        ws_summary[f"A{row}"] = "Factory Request:"
+        ws_summary[f"B{row}"] = f"{factory_m2:,.0f} m² ({factory_pallets} pallets)"
+        row += 2
+
+        # BL info
+        ws_summary[f"A{row}"] = "BL ALLOCATION"
+        ws_summary[f"A{row}"].font = section_font
+        ws_summary[f"A{row}"].fill = header_fill
+        ws_summary[f"B{row}"].fill = header_fill
+        row += 1
+        ws_summary[f"A{row}"] = "Selected BLs:"
+        ws_summary[f"B{row}"] = response.num_bls
+        row += 1
+        ws_summary[f"A{row}"] = "Recommended BLs (Need):"
+        ws_summary[f"B{row}"] = response.recommended_bls
+        row += 1
+        ws_summary[f"A{row}"] = "Available BLs (Stock):"
+        ws_summary[f"B{row}"] = response.available_bls
+        row += 1
+        ws_summary[f"A{row}"] = "BL Capacity:"
+        ws_summary[f"B{row}"] = f"{response.num_bls * 70} pallets ({response.num_bls * 5} containers)"
+        row += 2
+
+        # Urgency breakdown
+        ws_summary[f"A{row}"] = "URGENCY BREAKDOWN"
+        ws_summary[f"A{row}"].font = section_font
+        ws_summary[f"A{row}"].fill = header_fill
+        ws_summary[f"B{row}"].fill = header_fill
+        row += 1
+
+        critical_count = len([p for p in selected_warehouse_products if p.score and p.score.total >= 85])
+        urgent_count = len([p for p in selected_warehouse_products if p.score and 70 <= p.score.total < 85])
+        other_count = len(selected_warehouse_products) - critical_count - urgent_count
+
+        ws_summary[f"A{row}"] = "Critical (Score ≥ 85):"
+        ws_summary[f"B{row}"] = critical_count
+        ws_summary[f"B{row}"].fill = critical_fill
+        row += 1
+        ws_summary[f"A{row}"] = "Urgent (Score 70-84):"
+        ws_summary[f"B{row}"] = urgent_count
+        ws_summary[f"B{row}"].fill = urgent_fill
+        row += 1
+        ws_summary[f"A{row}"] = "Other:"
+        ws_summary[f"B{row}"] = other_count
+        row += 2
+
+        # Key actions
+        ws_summary[f"A{row}"] = "KEY ACTIONS"
+        ws_summary[f"A{row}"].font = section_font
+        ws_summary[f"A{row}"].fill = header_fill
+        ws_summary[f"B{row}"].fill = header_fill
+        row += 1
+
+        if response.add_to_production_summary and response.add_to_production_summary.action_deadline_display:
+            ws_summary[f"A{row}"] = "Add to Production Deadline:"
+            ws_summary[f"B{row}"] = response.add_to_production_summary.action_deadline_display
+            ws_summary[f"B{row}"].fill = urgent_fill
+            row += 1
+
+        if response.factory_request_summary and response.factory_request_summary.submit_deadline_display:
+            ws_summary[f"A{row}"] = "Factory Request Deadline:"
+            ws_summary[f"B{row}"] = response.factory_request_summary.submit_deadline_display
+            row += 1
+
+        # ===== SHEET 2: SHIP NOW =====
+        ws_ship = wb.create_sheet(title="SHIP NOW")
+        ws_ship.column_dimensions["A"].width = 30
+        ws_ship.column_dimensions["B"].width = 12
+        ws_ship.column_dimensions["C"].width = 12
+        ws_ship.column_dimensions["D"].width = 15
+        ws_ship.column_dimensions["E"].width = 12
+        ws_ship.column_dimensions["F"].width = 15
+
+        row = 1
+        ws_ship[f"A{row}"] = "SHIP NOW - WAREHOUSE ORDER"
+        ws_ship[f"A{row}"].font = title_font
+        row += 2
+
+        # Headers
+        headers = ["SKU", "Pallets", "M²", "SIESA Stock", "Score", "Urgency"]
+        for i, header in enumerate(headers):
+            col = chr(65 + i)
+            ws_ship[f"{col}{row}"] = header
+            ws_ship[f"{col}{row}"].font = bold_font
+            ws_ship[f"{col}{row}"].border = thin_border
+            ws_ship[f"{col}{row}"].fill = header_fill
+        row += 1
+
+        # Products
+        for p in selected_warehouse_products:
+            ws_ship[f"A{row}"] = p.sku
+            ws_ship[f"B{row}"] = p.selected_pallets
+            ws_ship[f"C{row}"] = round(float(Decimal(p.selected_pallets) * M2_PER_PALLET_FACTORY))
+            ws_ship[f"C{row}"].number_format = "#,##0"
+            ws_ship[f"D{row}"] = round(float(p.factory_available_m2))
+            ws_ship[f"D{row}"].number_format = "#,##0"
+            ws_ship[f"E{row}"] = p.score.total if p.score else 0
+            ws_ship[f"F{row}"] = p.urgency.upper()
+
+            # Color by urgency
+            if p.urgency == "critical":
+                for col in ["A", "B", "C", "D", "E", "F"]:
+                    ws_ship[f"{col}{row}"].fill = critical_fill
+            elif p.urgency == "urgent":
+                for col in ["A", "B", "C", "D", "E", "F"]:
+                    ws_ship[f"{col}{row}"].fill = urgent_fill
+
+            row += 1
+
+        # Totals
+        row += 1
+        ws_ship[f"A{row}"] = "TOTAL"
+        ws_ship[f"A{row}"].font = bold_font
+        ws_ship[f"B{row}"] = ship_now_pallets
+        ws_ship[f"B{row}"].font = bold_font
+        ws_ship[f"C{row}"] = round(float(ship_now_m2))
+        ws_ship[f"C{row}"].font = bold_font
+        ws_ship[f"C{row}"].number_format = "#,##0"
+
+        # ===== SHEET 3: ADD TO PRODUCTION =====
+        ws_add = wb.create_sheet(title="ADD TO PRODUCTION")
+        ws_add.column_dimensions["A"].width = 30
+        ws_add.column_dimensions["B"].width = 15
+        ws_add.column_dimensions["C"].width = 15
+        ws_add.column_dimensions["D"].width = 15
+        ws_add.column_dimensions["E"].width = 15
+        ws_add.column_dimensions["F"].width = 12
+
+        row = 1
+        ws_add[f"A{row}"] = "ADD TO PRODUCTION"
+        ws_add[f"A{row}"].font = title_font
+        row += 1
+
+        if response.add_to_production_summary and response.add_to_production_summary.action_deadline_display:
+            ws_add[f"A{row}"] = f"⚠️ ACTION REQUIRED - {response.add_to_production_summary.action_deadline_display}"
+            ws_add[f"A{row}"].font = Font(bold=True, color="CC6600")
+        row += 2
+
+        # Headers
+        headers = ["SKU", "Current Sched.", "Suggested Add", "Total", "Target Boat", "Score"]
+        for i, header in enumerate(headers):
+            col = chr(65 + i)
+            ws_add[f"{col}{row}"] = header
+            ws_add[f"{col}{row}"].font = bold_font
+            ws_add[f"{col}{row}"].border = thin_border
+            ws_add[f"{col}{row}"].fill = header_fill
+        row += 1
+
+        # Items
+        for item in selected_add_items:
+            ws_add[f"A{row}"] = item.sku
+            ws_add[f"B{row}"] = round(float(item.current_requested_m2))
+            ws_add[f"B{row}"].number_format = "#,##0"
+            ws_add[f"C{row}"] = round(float(item.suggested_additional_m2))
+            ws_add[f"C{row}"].number_format = "#,##0"
+            ws_add[f"D{row}"] = round(float(item.suggested_total_m2))
+            ws_add[f"D{row}"].number_format = "#,##0"
+            ws_add[f"E{row}"] = item.target_boat or "TBD"
+            ws_add[f"F{row}"] = item.score
+
+            if item.is_critical:
+                for col in ["A", "B", "C", "D", "E", "F"]:
+                    ws_add[f"{col}{row}"].fill = critical_fill
+
+            row += 1
+
+        # Totals
+        row += 1
+        ws_add[f"A{row}"] = "TOTAL TO ADD"
+        ws_add[f"A{row}"].font = bold_font
+        ws_add[f"C{row}"] = round(float(add_m2))
+        ws_add[f"C{row}"].font = bold_font
+        ws_add[f"C{row}"].number_format = "#,##0"
+
+        # ===== SHEET 4: FACTORY REQUEST =====
+        ws_factory = wb.create_sheet(title="FACTORY REQUEST")
+        ws_factory.column_dimensions["A"].width = 30
+        ws_factory.column_dimensions["B"].width = 12
+        ws_factory.column_dimensions["C"].width = 12
+        ws_factory.column_dimensions["D"].width = 12
+        ws_factory.column_dimensions["E"].width = 12
+        ws_factory.column_dimensions["F"].width = 12
+
+        row = 1
+        ws_factory[f"A{row}"] = "NEW FACTORY REQUEST"
+        ws_factory[f"A{row}"].font = title_font
+        row += 1
+
+        if response.factory_request_summary and response.factory_request_summary.submit_deadline_display:
+            ws_factory[f"A{row}"] = response.factory_request_summary.submit_deadline_display
+            ws_factory[f"A{row}"].font = Font(bold=True)
+        row += 2
+
+        # Headers
+        headers = ["SKU", "Gap M²", "Gap Pallets", "SIESA", "In Transit", "Urgency"]
+        for i, header in enumerate(headers):
+            col = chr(65 + i)
+            ws_factory[f"{col}{row}"] = header
+            ws_factory[f"{col}{row}"].font = bold_font
+            ws_factory[f"{col}{row}"].border = thin_border
+            ws_factory[f"{col}{row}"].fill = header_fill
+        row += 1
+
+        # Items
+        for item in selected_factory_items:
+            ws_factory[f"A{row}"] = item.sku
+            ws_factory[f"B{row}"] = round(float(item.gap_m2))
+            ws_factory[f"B{row}"].number_format = "#,##0"
+            ws_factory[f"C{row}"] = item.gap_pallets
+            ws_factory[f"D{row}"] = round(float(item.factory_available_m2))
+            ws_factory[f"D{row}"].number_format = "#,##0"
+            ws_factory[f"E{row}"] = round(float(item.in_transit_m2))
+            ws_factory[f"E{row}"].number_format = "#,##0"
+            ws_factory[f"F{row}"] = item.urgency.upper()
+
+            if item.urgency == "critical":
+                for col in ["A", "B", "C", "D", "E", "F"]:
+                    ws_factory[f"{col}{row}"].fill = critical_fill
+            elif item.urgency == "urgent":
+                for col in ["A", "B", "C", "D", "E", "F"]:
+                    ws_factory[f"{col}{row}"].fill = urgent_fill
+
+            row += 1
+
+        # Totals
+        row += 1
+        ws_factory[f"A{row}"] = "TOTAL REQUEST"
+        ws_factory[f"A{row}"].font = bold_font
+        ws_factory[f"B{row}"] = round(float(factory_m2))
+        ws_factory[f"B{row}"].font = bold_font
+        ws_factory[f"B{row}"].number_format = "#,##0"
+        ws_factory[f"C{row}"] = factory_pallets
+        ws_factory[f"C{row}"].font = bold_font
+
+        # ===== SHEET 5: WHY SHIP NOW =====
+        ws_why_ship = wb.create_sheet(title="WHY SHIP NOW")
+        ws_why_ship.column_dimensions["A"].width = 25
+        ws_why_ship.column_dimensions["B"].width = 45
+        ws_why_ship.column_dimensions["C"].width = 35
+        ws_why_ship.column_dimensions["D"].width = 15
+
+        row = 1
+        ws_why_ship[f"A{row}"] = "WHY SHIP NOW - REASONING"
+        ws_why_ship[f"A{row}"].font = title_font
+        row += 2
+
+        # Headers
+        headers = ["SKU", "Why This Product", "Why This Quantity", "Dominant Factor"]
+        for i, header in enumerate(headers):
+            col = chr(65 + i)
+            ws_why_ship[f"{col}{row}"] = header
+            ws_why_ship[f"{col}{row}"].font = bold_font
+            ws_why_ship[f"{col}{row}"].border = thin_border
+            ws_why_ship[f"{col}{row}"].fill = header_fill
+        row += 1
+
+        # Products with reasoning
+        for p in selected_warehouse_products:
+            ws_why_ship[f"A{row}"] = p.sku
+
+            if p.reasoning_display:
+                ws_why_ship[f"B{row}"] = p.reasoning_display.why_product_sentence
+                ws_why_ship[f"C{row}"] = p.reasoning_display.why_quantity_sentence
+                ws_why_ship[f"D{row}"] = p.reasoning_display.dominant_factor.upper()
+            else:
+                # Fallback reasoning
+                days = p.days_of_stock or 0
+                if days <= 0:
+                    ws_why_ship[f"B{row}"] = f"OUT OF STOCK - immediate restock needed"
+                elif days <= 14:
+                    ws_why_ship[f"B{row}"] = f"LOW STOCK - only {days} days remaining"
+                else:
+                    ws_why_ship[f"B{row}"] = f"Stock replenishment - {days} days coverage"
+
+                gap_m2 = p.coverage_gap_m2 or 0
+                ws_why_ship[f"C{row}"] = f"Gap of {gap_m2:,.0f} m² to cover until next boat"
+                ws_why_ship[f"D{row}"] = "STOCKOUT" if days <= 14 else "COVERAGE"
+
+            # Color by urgency
+            if p.urgency == "critical":
+                for col in ["A", "B", "C", "D"]:
+                    ws_why_ship[f"{col}{row}"].fill = critical_fill
+            elif p.urgency == "urgent":
+                for col in ["A", "B", "C", "D"]:
+                    ws_why_ship[f"{col}{row}"].fill = urgent_fill
+
+            row += 1
+
+        # ===== SHEET 6: WHY ADD / REQUEST =====
+        ws_why_other = wb.create_sheet(title="WHY ADD-REQUEST")
+        ws_why_other.column_dimensions["A"].width = 25
+        ws_why_other.column_dimensions["B"].width = 15
+        ws_why_other.column_dimensions["C"].width = 50
+        ws_why_other.column_dimensions["D"].width = 12
+
+        row = 1
+        ws_why_other[f"A{row}"] = "WHY ADD TO PRODUCTION / FACTORY REQUEST"
+        ws_why_other[f"A{row}"].font = title_font
+        row += 2
+
+        # Headers
+        headers = ["SKU", "Type", "Reason", "Score"]
+        for i, header in enumerate(headers):
+            col = chr(65 + i)
+            ws_why_other[f"{col}{row}"] = header
+            ws_why_other[f"{col}{row}"].font = bold_font
+            ws_why_other[f"{col}{row}"].border = thin_border
+            ws_why_other[f"{col}{row}"].fill = header_fill
+        row += 1
+
+        # Add to Production items
+        for item in selected_add_items:
+            ws_why_other[f"A{row}"] = item.sku
+            ws_why_other[f"B{row}"] = "ADD"
+            ws_why_other[f"B{row}"].fill = urgent_fill
+
+            reason = (
+                f"Production already scheduled ({item.current_requested_m2:,.0f} m²). "
+                f"Adding {item.suggested_additional_m2:,.0f} m² more to meet demand. "
+            )
+            if item.target_boat:
+                reason += f"Ready for {item.target_boat}."
+
+            ws_why_other[f"C{row}"] = reason
+            ws_why_other[f"D{row}"] = item.score
+
+            if item.is_critical:
+                ws_why_other[f"A{row}"].fill = critical_fill
+                ws_why_other[f"D{row}"].fill = critical_fill
+
+            row += 1
+
+        # Factory Request items
+        for item in selected_factory_items:
+            ws_why_other[f"A{row}"] = item.sku
+            ws_why_other[f"B{row}"] = "REQUEST"
+
+            # Build reason
+            sources = []
+            if item.factory_available_m2 > 0:
+                sources.append(f"SIESA: {item.factory_available_m2:,.0f}")
+            if item.in_transit_m2 > 0:
+                sources.append(f"In-transit: {item.in_transit_m2:,.0f}")
+            if item.in_production_m2 > 0:
+                sources.append(f"In-production: {item.in_production_m2:,.0f}")
+
+            reason = f"Not in production schedule. Gap: {item.gap_m2:,.0f} m². "
+            if sources:
+                reason += f"Available: {', '.join(sources)}. "
+            reason += f"Urgency: {item.urgency.upper()}"
+
+            ws_why_other[f"C{row}"] = reason
+            ws_why_other[f"D{row}"] = item.score
+
+            if item.urgency == "critical":
+                ws_why_other[f"A{row}"].fill = critical_fill
+                ws_why_other[f"B{row}"].fill = critical_fill
+
+            row += 1
+
+        logger.info(
+            "order_report_generated",
+            warehouse_count=len(selected_warehouse_products),
+            add_count=len(selected_add_items),
+            factory_count=len(selected_factory_items),
         )
 
         # Save to BytesIO

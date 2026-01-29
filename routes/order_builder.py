@@ -17,6 +17,9 @@ import structlog
 
 from models.order_builder import (
     OrderBuilderResponse,
+    OrderBuilderProduct,
+    AddToProductionItem,
+    FactoryRequestItem,
     ConfirmOrderRequest,
     ConfirmOrderResponse,
     DemandForecastResponse,
@@ -60,6 +63,22 @@ class ExportOrderRequest(BaseModel):
     """Request body for order export."""
     products: List[ExportProductItem]
     boat_departure: date
+
+
+class GenerateReportItem(BaseModel):
+    """Single item for report generation."""
+    product_id: str
+    sku: str
+    pallets: int
+
+
+class GenerateReportRequest(BaseModel):
+    """Request body for generating comprehensive order report."""
+    boat_id: Optional[str] = None
+    num_bls: int = 1
+    warehouse_items: List[GenerateReportItem] = []
+    add_to_production_items: List[GenerateReportItem] = []
+    factory_request_items: List[GenerateReportItem] = []
 
 
 @router.get("", response_model=OrderBuilderResponse)
@@ -703,5 +722,115 @@ def export_bl_allocation(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+    )
+
+
+@router.post("/generate-report")
+def generate_report(request: GenerateReportRequest) -> StreamingResponse:
+    """
+    Generate comprehensive order report explaining WHY recommendations were made.
+
+    Creates Excel with 6 sheets:
+    1. EXECUTIVE SUMMARY - High-level order overview
+    2. SHIP NOW - Warehouse order details
+    3. ADD TO PRODUCTION - Items to add to scheduled production
+    4. FACTORY REQUEST - New production requests
+    5. WHY SHIP NOW - Reasoning for each ship now item
+    6. WHY ADD / REQUEST - Reasoning for add/factory items
+
+    Request body:
+    {
+        "boat_id": "uuid" (optional),
+        "num_bls": 3,
+        "warehouse_items": [{"product_id": "...", "sku": "...", "pallets": 14}],
+        "add_to_production_items": [{"product_id": "...", "sku": "...", "pallets": 7}],
+        "factory_request_items": [{"product_id": "...", "sku": "...", "pallets": 5}]
+    }
+
+    Returns: Excel file download with comprehensive reasoning report
+    """
+    logger.info(
+        "generate_report_request",
+        boat_id=request.boat_id,
+        num_bls=request.num_bls,
+        warehouse_count=len(request.warehouse_items),
+        add_count=len(request.add_to_production_items),
+        factory_count=len(request.factory_request_items),
+    )
+
+    # Get order builder data for full product info and reasoning
+    order_builder_service = get_order_builder_service()
+    order_data = order_builder_service.get_order_builder(
+        boat_id=request.boat_id,
+        num_bls=request.num_bls,
+    )
+
+    # Get all products for matching
+    all_products = (
+        order_data.high_priority +
+        order_data.consider +
+        order_data.well_covered +
+        order_data.your_call
+    )
+    products_by_id = {p.product_id: p for p in all_products}
+
+    # Match warehouse items to full product data
+    selected_warehouse: List[OrderBuilderProduct] = []
+    for item in request.warehouse_items:
+        if item.product_id in products_by_id:
+            product = products_by_id[item.product_id]
+            product.selected_pallets = item.pallets
+            product.is_selected = True
+            selected_warehouse.append(product)
+
+    # Match add to production items
+    selected_add: List[AddToProductionItem] = []
+    if order_data.add_to_production_summary:
+        items_by_id = {i.product_id: i for i in order_data.add_to_production_summary.items}
+        for item in request.add_to_production_items:
+            if item.product_id in items_by_id:
+                add_item = items_by_id[item.product_id]
+                add_item.suggested_additional_pallets = item.pallets
+                add_item.suggested_additional_m2 = Decimal(str(item.pallets)) * M2_PER_PALLET_FACTORY
+                selected_add.append(add_item)
+
+    # Match factory request items
+    selected_factory: List[FactoryRequestItem] = []
+    if order_data.factory_request_summary:
+        items_by_id = {i.product_id: i for i in order_data.factory_request_summary.items}
+        for item in request.factory_request_items:
+            if item.product_id in items_by_id:
+                factory_item = items_by_id[item.product_id]
+                factory_item.request_pallets = item.pallets
+                factory_item.request_m2 = Decimal(str(item.pallets)) * M2_PER_PALLET_FACTORY
+                selected_factory.append(factory_item)
+
+    # Generate report
+    export_service = get_export_service()
+    excel_file = export_service.generate_order_report(
+        response=order_data,
+        selected_warehouse_products=selected_warehouse,
+        selected_add_items=selected_add,
+        selected_factory_items=selected_factory,
+    )
+
+    # Generate filename
+    report_departure_str = order_data.boat.departure_date.strftime("%Y%m%d")
+    report_filename = f"ORDER_REPORT_{report_departure_str}.xlsx"
+
+    logger.info(
+        "generate_report_complete",
+        filename=report_filename,
+        warehouse_count=len(selected_warehouse),
+        add_count=len(selected_add),
+        factory_count=len(selected_factory),
+    )
+
+    return StreamingResponse(
+        excel_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{report_filename}"'
         }
     )

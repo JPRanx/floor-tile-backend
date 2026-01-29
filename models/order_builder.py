@@ -588,6 +588,9 @@ class AddToProductionItem(BaseSchema):
     score: int = Field(default=0, description="Priority score from Order Builder")
     is_critical: bool = Field(default=False, description="Score >= 85")
 
+    # Selection (pre-selected by default for recommended items)
+    is_selected: bool = Field(default=True, description="Whether item is selected for export")
+
 
 class FactoryRequestItem(BaseSchema):
     """Item that needs a new factory production request."""
@@ -617,6 +620,9 @@ class FactoryRequestItem(BaseSchema):
     # Priority
     urgency: str = Field(default="ok")
     score: int = Field(default=0)
+
+    # Selection (pre-selected by default for recommended items)
+    is_selected: bool = Field(default=True, description="Whether item is selected for export")
 
 
 class WarehouseOrderSummary(BaseSchema):
@@ -653,6 +659,14 @@ class AddToProductionSummary(BaseSchema):
     # Alert flag
     has_critical_items: bool = Field(default=False, description="Any item with score >= 85")
 
+    # ACTION REQUIRED deadline (dynamic, e.g., "Monday, Feb 3")
+    action_deadline: Optional[date] = Field(
+        None, description="Deadline to submit additions (next Monday typically)"
+    )
+    action_deadline_display: str = Field(
+        default="", description="Human-readable deadline, e.g. 'Monday, Feb 3'"
+    )
+
 
 class FactoryRequestSummary(BaseSchema):
     """Summary for Section 3: New Factory Request."""
@@ -669,8 +683,16 @@ class FactoryRequestSummary(BaseSchema):
     utilization_pct: Decimal = Field(default=Decimal("0"))
     remaining_m2: Decimal = Field(default=Decimal("60000"))
 
-    # Timing
-    estimated_ready: str = Field(default="March 2026")
+    # Timing (removed the "30-60 days" guess)
+    estimated_ready: str = Field(default="", description="Estimated ready month, e.g. 'March 2026'")
+
+    # Submit deadline (dynamic, for new requests)
+    submit_deadline: Optional[date] = Field(
+        None, description="Deadline to submit new factory requests"
+    )
+    submit_deadline_display: str = Field(
+        default="", description="Human-readable deadline, e.g. 'Submit by Feb 10'"
+    )
 
 
 class OrderBuilderResponse(BaseSchema):
