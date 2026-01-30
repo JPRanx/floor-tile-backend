@@ -2121,6 +2121,10 @@ class OrderBuilderService:
                     estimated_ready=f"~{avg_production_days} days",
                     avg_production_days=avg_production_days,
                     velocity_m2_day=velocity_m2_day,
+                    # Buffer transparency (no target boat found)
+                    buffer_days_applied=settings.production_buffer_days,
+                    buffer_note="No target boat found - using fallback calculation",
+                    # Low volume detection
                     days_to_consume_container=days_to_consume,
                     is_low_volume=is_low_volume,
                     low_volume_reason=low_volume_reason,
@@ -2176,6 +2180,18 @@ class OrderBuilderService:
             # Format estimated ready display
             estimated_ready_display = f"{estimated_ready_date_global.strftime('%b %d')} → {target_boat.vessel_name}"
 
+            # Calculate buffer transparency
+            buffer_days = settings.production_buffer_days
+            safe_ready = estimated_ready_date_global + timedelta(days=buffer_days)
+            ready_str = estimated_ready_date_global.strftime("%b %d")
+            safe_str = safe_ready.strftime("%b %d")
+            deadline_str = target_boat.order_deadline.strftime("%b %d")
+            buffer_note = (
+                f"{buffer_days}-day buffer applied. "
+                f"Ready {ready_str} + {buffer_days} = {safe_str}. "
+                f"Deadline {deadline_str}"
+            )
+
             factory_request_items.append(FactoryRequestItem(
                 product_id=p.product_id,
                 sku=p.sku,
@@ -2194,8 +2210,14 @@ class OrderBuilderService:
                 estimated_ready_date=estimated_ready_date_global,
                 target_boat=target_boat.vessel_name,
                 target_boat_departure=target_boat.departure_date,
+                target_boat_order_deadline=target_boat.order_deadline,
                 arrival_date=arrival_date,
                 days_until_arrival=days_until_arrival,
+                # Buffer transparency
+                buffer_days_applied=buffer_days,
+                safe_ready_date=safe_ready,
+                buffer_note=buffer_note,
+                # Velocity and consumption
                 velocity_m2_day=velocity_m2_day,
                 consumption_until_arrival_m2=consumption_until_arrival,
                 pipeline_m2=pipeline_m2,

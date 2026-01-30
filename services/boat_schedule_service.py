@@ -11,6 +11,7 @@ from io import BytesIO
 import structlog
 
 from config import get_supabase_client
+from config.settings import settings
 from models.boat_schedule import (
     BoatScheduleCreate,
     BoatScheduleUpdate,
@@ -19,6 +20,7 @@ from models.boat_schedule import (
     BoatStatus,
     BoatUploadResult,
     BOOKING_BUFFER_DAYS,
+    ORDER_DEADLINE_DAYS,
 )
 from parsers.tiba_parser import parse_tiba_excel, BoatScheduleRecord
 from exceptions import (
@@ -258,29 +260,56 @@ class BoatScheduleService:
     def get_first_boat_after(
         self,
         ready_date: date,
+        buffer_days: Optional[int] = None,
         limit: int = 5
     ) -> Optional[BoatScheduleResponse]:
         """
-        Get the first boat departing after a given date.
+        Get the first boat whose ORDER DEADLINE is safely after a given date.
 
         Used for factory request calculations to determine which boat
-        a production request would catch.
+        a production request would catch. Matches against order_deadline
+        (not departure_date) to ensure we have time to prepare booking docs.
+
+        Applies a safety buffer (default from settings.production_buffer_days)
+        to account for production schedule slippage.
+
+        Formula: order_deadline > (ready_date + buffer)
+        Since order_deadline = departure - ORDER_DEADLINE_DAYS:
+        departure > ready_date + ORDER_DEADLINE_DAYS + buffer
 
         Args:
             ready_date: Date when production will be ready
+            buffer_days: Safety buffer days (default from settings)
             limit: Max boats to check (for efficiency)
 
         Returns:
-            First boat departing after ready_date, or None
+            First boat with order_deadline > (ready_date + buffer), or None
         """
-        logger.debug("getting_first_boat_after", ready_date=str(ready_date))
+        # Use settings buffer if not specified
+        if buffer_days is None:
+            buffer_days = settings.production_buffer_days
+
+        # Calculate safe ready date (ready + buffer)
+        safe_ready_date = ready_date + timedelta(days=buffer_days)
+
+        # To find order_deadline > safe_ready_date, we need:
+        # departure > safe_ready_date + ORDER_DEADLINE_DAYS
+        min_departure = safe_ready_date + timedelta(days=ORDER_DEADLINE_DAYS)
+
+        logger.debug(
+            "getting_first_boat_after",
+            ready_date=str(ready_date),
+            buffer_days=buffer_days,
+            safe_ready_date=str(safe_ready_date),
+            min_departure=str(min_departure)
+        )
 
         try:
             result = (
                 self.db.table(self.table)
                 .select("*")
                 .eq("status", "available")
-                .gt("departure_date", ready_date.isoformat())
+                .gt("departure_date", min_departure.isoformat())
                 .order("departure_date", desc=False)
                 .limit(limit)
                 .execute()
@@ -291,12 +320,19 @@ class BoatScheduleService:
                 logger.debug(
                     "first_boat_after_found",
                     ready_date=str(ready_date),
+                    buffer_days=buffer_days,
+                    safe_ready_date=str(safe_ready_date),
                     boat_departure=str(boat.departure_date),
+                    boat_order_deadline=str(boat.order_deadline),
                     boat_name=boat.vessel_name
                 )
                 return boat
 
-            logger.debug("no_boat_after_date", ready_date=str(ready_date))
+            logger.debug(
+                "no_boat_after_date",
+                ready_date=str(ready_date),
+                safe_ready_date=str(safe_ready_date)
+            )
             return None
 
         except Exception as e:
@@ -306,26 +342,52 @@ class BoatScheduleService:
     def get_boats_after(
         self,
         ready_date: date,
+        buffer_days: Optional[int] = None,
         limit: int = 3
     ) -> list[BoatScheduleResponse]:
         """
-        Get boats departing after a given date.
+        Get boats whose ORDER DEADLINE is safely after a given date.
+
+        Matches against order_deadline (not departure_date) to ensure
+        we have time to prepare booking documents.
+
+        Applies a safety buffer (default from settings.production_buffer_days)
+        to account for production schedule slippage.
 
         Args:
             ready_date: Date when production will be ready
+            buffer_days: Safety buffer days (default from settings)
             limit: Max boats to return
 
         Returns:
-            List of boats departing after ready_date
+            List of boats with order_deadline > (ready_date + buffer)
         """
-        logger.debug("getting_boats_after", ready_date=str(ready_date), limit=limit)
+        # Use settings buffer if not specified
+        if buffer_days is None:
+            buffer_days = settings.production_buffer_days
+
+        # Calculate safe ready date (ready + buffer)
+        safe_ready_date = ready_date + timedelta(days=buffer_days)
+
+        # To find order_deadline > safe_ready_date, we need:
+        # departure > safe_ready_date + ORDER_DEADLINE_DAYS
+        min_departure = safe_ready_date + timedelta(days=ORDER_DEADLINE_DAYS)
+
+        logger.debug(
+            "getting_boats_after",
+            ready_date=str(ready_date),
+            buffer_days=buffer_days,
+            safe_ready_date=str(safe_ready_date),
+            min_departure=str(min_departure),
+            limit=limit
+        )
 
         try:
             result = (
                 self.db.table(self.table)
                 .select("*")
                 .eq("status", "available")
-                .gt("departure_date", ready_date.isoformat())
+                .gt("departure_date", min_departure.isoformat())
                 .order("departure_date", desc=False)
                 .limit(limit)
                 .execute()

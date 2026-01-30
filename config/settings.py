@@ -121,6 +121,16 @@ class Settings(BaseSettings):
         le=20,
         description="Maximum containers per boat shipment"
     )
+
+    # ===================
+    # PRODUCTION SCHEDULING
+    # ===================
+    production_buffer_days: int = Field(
+        default=5,
+        ge=0,
+        le=30,
+        description="Safety buffer days between production ready and boat order deadline. Accounts for schedule slippage."
+    )
     
     # ===================
     # WAREHOUSE CONSTRAINTS

@@ -27,9 +27,9 @@ class RouteType(str, Enum):
 
 
 # Constants
-# Order deadline: 30 days before departure to finalize order
+# Order deadline: 20 days before departure to finalize order
 # (allows time for factory confirmation, logistics, etc.)
-ORDER_DEADLINE_DAYS = 30
+ORDER_DEADLINE_DAYS = 20
 
 # Booking buffer: 3 days before departure for final booking
 BOOKING_BUFFER_DAYS = 3  # Days before departure to book

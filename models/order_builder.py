@@ -630,8 +630,14 @@ class FactoryRequestItem(BaseSchema):
     estimated_ready_date: Optional[date] = Field(None, description="When production will be ready")
     target_boat: Optional[str] = Field(None, description="Boat this would catch")
     target_boat_departure: Optional[date] = Field(None, description="Target boat departure date")
+    target_boat_order_deadline: Optional[date] = Field(None, description="Target boat order deadline")
     arrival_date: Optional[date] = Field(None, description="When product arrives Guatemala")
     days_until_arrival: Optional[int] = Field(None, description="Days from today until arrival")
+
+    # Buffer transparency (shows why this boat was selected)
+    buffer_days_applied: int = Field(default=5, description="Safety buffer days applied to calculation")
+    safe_ready_date: Optional[date] = Field(None, description="Ready date + buffer = safe ready date")
+    buffer_note: Optional[str] = Field(None, description="Explanation e.g. '5-day buffer applied. Ready Mar 18 + 5 = Mar 23. Deadline Mar 25'")
 
     # Velocity and consumption
     velocity_m2_day: Decimal = Field(default=Decimal("0"), description="Daily velocity in m²")

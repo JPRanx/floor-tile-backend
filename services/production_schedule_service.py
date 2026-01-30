@@ -11,7 +11,7 @@ from decimal import Decimal
 from collections import defaultdict
 import structlog
 
-from config import get_supabase_client
+from config import get_supabase_client, settings
 from models.production_schedule import (
     ParsedProductionSchedule,
     ProductionScheduleResponse,
@@ -1201,6 +1201,14 @@ class ProductionScheduleService:
             skipped=skipped
         )
 
+        # Save history snapshot for slip tracking
+        try:
+            history_saved = self.save_history_snapshot(records, source_file=filename)
+            logger.info("history_snapshot_saved_on_import", records_saved=history_saved)
+        except Exception as e:
+            warnings.append(f"Failed to save history snapshot: {e}")
+            logger.warning("history_snapshot_save_failed", error=str(e))
+
         return ProductionImportResult(
             filename=filename,
             source_month=source_month,
@@ -1518,6 +1526,215 @@ class ProductionScheduleService:
         except Exception as e:
             logger.error("get_average_production_time_failed", error=str(e))
             return fallback_days
+
+
+    # ===================
+    # HISTORY TRACKING
+    # ===================
+
+    def save_history_snapshot(
+        self,
+        records: list[ProductionScheduleCreate],
+        source_file: Optional[str] = None
+    ) -> int:
+        """
+        Save a snapshot of production schedule to history table.
+
+        Called during Excel import to track schedule changes over time.
+        Enables calculation of delivery slip statistics.
+
+        Args:
+            records: List of ProductionScheduleCreate from parse_production_excel()
+            source_file: Source filename for tracking
+
+        Returns:
+            Number of history records saved
+        """
+        today = date.today()
+        saved = 0
+
+        for record in records:
+            try:
+                # Try to find product_id from SKU
+                product_id = None
+                if record.referencia:
+                    try:
+                        products = self.product_service.get_all_active_tiles()
+                        ref_normalized = normalize_accents(record.referencia.upper())
+                        for p in products:
+                            sku = getattr(p, 'sku', '')
+                            if normalize_accents(sku.upper()) == ref_normalized:
+                                product_id = p.id
+                                break
+                    except Exception:
+                        pass
+
+                upsert_data = {
+                    "sku": record.referencia,
+                    "product_id": product_id,
+                    "factory_item_code": record.factory_item_code,
+                    "snapshot_date": today.isoformat(),
+                    "source_file": source_file,
+                    "scheduled_start_date": record.scheduled_start_date.isoformat() if record.scheduled_start_date else None,
+                    "scheduled_end_date": record.scheduled_end_date.isoformat() if record.scheduled_end_date else None,
+                    "estimated_delivery_date": record.estimated_delivery_date.isoformat() if record.estimated_delivery_date else None,
+                    "status": record.status.value,
+                    "requested_m2": float(record.requested_m2),
+                    "completed_m2": float(record.completed_m2),
+                }
+
+                self.db.table("production_schedule_history").upsert(
+                    upsert_data,
+                    on_conflict="sku,snapshot_date"
+                ).execute()
+                saved += 1
+
+            except Exception as e:
+                logger.warning(
+                    "save_history_snapshot_failed",
+                    sku=record.referencia,
+                    error=str(e)
+                )
+
+        logger.info(
+            "history_snapshot_saved",
+            snapshot_date=str(today),
+            records_saved=saved
+        )
+
+        return saved
+
+    def record_completion(
+        self,
+        sku: str,
+        actual_date: date
+    ) -> Optional[int]:
+        """
+        Record actual completion date and calculate slip.
+
+        Called when production status changes to 'completed'.
+
+        Args:
+            sku: Product SKU (referencia)
+            actual_date: Actual completion date
+
+        Returns:
+            Slip days (positive = late, negative = early), or None if no estimate found
+        """
+        logger.debug("recording_completion", sku=sku, actual_date=str(actual_date))
+
+        try:
+            # Find the most recent estimate for this SKU
+            result = (
+                self.db.table("production_schedule_history")
+                .select("id, estimated_delivery_date")
+                .eq("sku", sku)
+                .not_.is_("estimated_delivery_date", "null")
+                .order("snapshot_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+            if not result.data:
+                logger.debug("no_estimate_found_for_completion", sku=sku)
+                return None
+
+            row = result.data[0]
+            estimated = date.fromisoformat(row["estimated_delivery_date"])
+            slip_days = (actual_date - estimated).days
+
+            # Update the history record
+            self.db.table("production_schedule_history").update({
+                "actual_completion_date": actual_date.isoformat(),
+                "slip_days": slip_days,
+                "status": "completed"
+            }).eq("id", row["id"]).execute()
+
+            logger.info(
+                "completion_recorded",
+                sku=sku,
+                estimated=str(estimated),
+                actual=str(actual_date),
+                slip_days=slip_days
+            )
+
+            return slip_days
+
+        except Exception as e:
+            logger.error("record_completion_failed", sku=sku, error=str(e))
+            return None
+
+    def get_slip_statistics(self) -> dict:
+        """
+        Calculate slip statistics from historical data.
+
+        Used to potentially adjust production_buffer_days dynamically.
+
+        Returns:
+            Dict with slip statistics:
+            - total_completed: Number of items with slip data
+            - avg_slip_days: Average slip (positive = late)
+            - p90_slip_days: 90th percentile slip
+            - max_slip_days: Maximum slip
+            - min_slip_days: Minimum slip (negative = early)
+            - recommended_buffer: Suggested buffer based on P90
+        """
+        logger.debug("calculating_slip_statistics")
+
+        try:
+            result = (
+                self.db.table("production_schedule_history")
+                .select("slip_days")
+                .not_.is_("slip_days", "null")
+                .execute()
+            )
+
+            if not result.data:
+                return {
+                    "total_completed": 0,
+                    "avg_slip_days": 0,
+                    "p90_slip_days": 0,
+                    "max_slip_days": 0,
+                    "min_slip_days": 0,
+                    "recommended_buffer": settings.production_buffer_days,
+                    "note": "No historical slip data available yet"
+                }
+
+            slip_values = [row["slip_days"] for row in result.data]
+            slip_values.sort()
+
+            total = len(slip_values)
+            avg_slip = sum(slip_values) / total
+            p90_index = int(total * 0.9)
+            p90_slip = slip_values[min(p90_index, total - 1)]
+
+            # Recommended buffer: at least 5 days, or P90 slip rounded up
+            import math
+            recommended = max(5, math.ceil(p90_slip))
+
+            stats = {
+                "total_completed": total,
+                "avg_slip_days": round(avg_slip, 1),
+                "p90_slip_days": p90_slip,
+                "max_slip_days": max(slip_values),
+                "min_slip_days": min(slip_values),
+                "recommended_buffer": recommended
+            }
+
+            logger.info("slip_statistics_calculated", **stats)
+            return stats
+
+        except Exception as e:
+            logger.error("get_slip_statistics_failed", error=str(e))
+            return {
+                "total_completed": 0,
+                "avg_slip_days": 0,
+                "p90_slip_days": 0,
+                "max_slip_days": 0,
+                "min_slip_days": 0,
+                "recommended_buffer": settings.production_buffer_days,
+                "error": str(e)
+            }
 
 
 # Singleton instance
