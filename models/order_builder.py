@@ -461,9 +461,9 @@ class OrderBuilderSummary(BaseSchema):
     boat_max_containers: int = Field(default=5)
     boat_remaining_containers: int = Field(default=5)
 
-    # Warehouse capacity (Guatemala: 90,316.80 m² = 672 pallets)
+    # Warehouse capacity — service populates from settings.warehouse_max_pallets
     warehouse_current_pallets: int = Field(default=0)
-    warehouse_capacity: int = Field(default=672)
+    warehouse_capacity: int = Field(default=672, description="See settings.warehouse_max_pallets")
     warehouse_after_delivery: int = Field(default=0)
     warehouse_utilization_after: Decimal = Field(default=Decimal("0"), description="Percentage 0-100")
 

@@ -31,12 +31,12 @@ from models.recommendation import (
 )
 from services.boat_schedule_service import get_boat_schedule_service
 from services.production_schedule_service import get_production_schedule_service
+from config.shipping import M2_PER_PALLET
 
 logger = structlog.get_logger(__name__)
 
 
-# Constants (actual factory pallet dimensions)
-M2_PER_PALLET = Decimal("134.4")
+# Constants
 Z_SCORE = Decimal("1.645")  # 95% service level
 OVER_STOCK_THRESHOLD = Decimal("-5")  # Pallets over target to warn
 

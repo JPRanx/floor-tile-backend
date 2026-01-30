@@ -23,12 +23,13 @@ from models.order_builder import (
     AddToProductionItem,
     FactoryRequestItem,
 )
+from config.shipping import M2_PER_PALLET, CONTAINER_MAX_PALLETS
 
 logger = structlog.get_logger(__name__)
 
-# Factory constants (actual factory pallet dimensions)
-M2_PER_PALLET_FACTORY = Decimal("134.4")
-PALLETS_PER_CONTAINER = 14
+# Use config.shipping constants
+M2_PER_PALLET_FACTORY = M2_PER_PALLET  # Alias for factory-facing code
+PALLETS_PER_CONTAINER = CONTAINER_MAX_PALLETS  # Alias for readability
 
 # Spanish month names
 MONTHS_ES = {

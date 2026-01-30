@@ -13,13 +13,13 @@ from typing import List, Optional
 from pydantic import Field
 
 from models.base import BaseSchema
+from config.shipping import M2_PER_PALLET, CONTAINER_MAX_PALLETS
 
 
 # Constants
 CRITICAL_THRESHOLD = 85  # Score >= 85 is critical
 MAX_CONTAINERS_PER_BL = 5
-PALLETS_PER_CONTAINER = 14
-M2_PER_PALLET = Decimal("134.4")
+PALLETS_PER_CONTAINER = CONTAINER_MAX_PALLETS  # Alias for readability
 
 
 class BLProductAllocation(BaseSchema):

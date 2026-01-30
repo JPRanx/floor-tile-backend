@@ -42,14 +42,15 @@ from services.customer_pattern_service import get_customer_pattern_service
 from services.trend_service import get_trend_service
 from services.bl_allocation_service import get_bl_allocation_service
 from exceptions import FactoryOrderPVExistsError, DatabaseError
+from config.shipping import M2_PER_PALLET
 from collections import defaultdict
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/order-builder", tags=["Order Builder"])
 
-# Factory constant for pallet conversion (actual factory pallet dimensions)
-M2_PER_PALLET_FACTORY = Decimal("134.4")
+# Use config.shipping constant
+M2_PER_PALLET_FACTORY = M2_PER_PALLET  # Alias for factory-facing code
 
 
 # Request models for export

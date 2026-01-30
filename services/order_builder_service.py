@@ -19,7 +19,7 @@ from config.shipping import (
     CONTAINER_MAX_WEIGHT_KG,
     CONTAINER_MAX_PALLETS,
     DEFAULT_WEIGHT_PER_M2_KG,
-    M2_PER_PALLET as SHIPPING_M2_PER_PALLET,
+    M2_PER_PALLET,
     WAREHOUSE_BUFFER_DAYS,
     ORDERING_CYCLE_DAYS,
     LIQUIDATION_DECLINING_TREND_PCT_MAX,
@@ -69,11 +69,11 @@ from models.recommendation import RecommendationPriority
 
 logger = structlog.get_logger(__name__)
 
-# Constants (actual factory pallet dimensions)
-M2_PER_PALLET = Decimal("134.4")
-PALLETS_PER_CONTAINER = 14
+# Use config.shipping constants via imports above
+# M2_PER_PALLET, CONTAINER_MAX_PALLETS imported from config.shipping
+PALLETS_PER_CONTAINER = CONTAINER_MAX_PALLETS  # Alias for readability
 MAX_CONTAINERS_PER_BL = 5  # Each BL can hold up to 5 containers
-WAREHOUSE_CAPACITY = 672  # pallets (90,316.80 m² Guatemala warehouse)
+WAREHOUSE_CAPACITY = settings.warehouse_max_pallets  # From config.settings
 
 # Factory request constants
 MIN_CONTAINER_M2 = M2_PER_PALLET * PALLETS_PER_CONTAINER  # 1,881.6 m²
@@ -1890,7 +1890,7 @@ class OrderBuilderService:
         warehouse_total_pallets = sum(p.selected_pallets for p in selected_warehouse)
         warehouse_total_m2 = Decimal(str(warehouse_total_pallets)) * M2_PER_PALLET
         warehouse_total_containers = math.ceil(warehouse_total_pallets / PALLETS_PER_CONTAINER)
-        warehouse_total_weight = warehouse_total_m2 * Decimal("25.5")  # ~25.5 kg/m²
+        warehouse_total_weight = warehouse_total_m2 * DEFAULT_WEIGHT_PER_M2_KG
 
         warehouse_summary = WarehouseOrderSummary(
             product_count=len(warehouse_products),
