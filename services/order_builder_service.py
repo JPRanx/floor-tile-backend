@@ -67,6 +67,8 @@ from models.order_builder import (
     # Unable to ship alerts
     UnableToShipItem,
     UnableToShipSummary,
+    # Availability breakdown
+    AvailabilityBreakdown,
 )
 from models.recommendation import RecommendationPriority
 
@@ -210,7 +212,8 @@ class OrderBuilderService:
             recommendations.recommendations,
             boat.days_until_warehouse,  # Use warehouse arrival (not departure!)
             trend_data,
-            boat_departure=boat.departure_date if boat.boat_id else None  # Pass departure for factory status
+            boat_departure=boat.departure_date if boat.boat_id else None,  # Pass departure for factory status
+            order_deadline=boat.order_deadline  # Pass for availability breakdown calculation
         )
         timings["4_grouping"] = round(time.time() - t3, 2)
 
@@ -631,6 +634,75 @@ class OrderBuilderService:
         return PrimaryFactor.STABLE.value
 
     # ===================
+    # AVAILABILITY BREAKDOWN
+    # ===================
+
+    def _calculate_availability_breakdown(
+        self,
+        factory_available_m2: Decimal,
+        production_status: str,
+        production_completed_m2: Decimal,
+        production_estimated_ready: Optional[date],
+        order_deadline: date,
+        suggested_pallets: int,
+    ) -> AvailabilityBreakdown:
+        """
+        Calculate full availability breakdown for a product.
+
+        Args:
+            factory_available_m2: Current SIESA finished goods stock
+            production_status: 'scheduled', 'in_progress', 'completed', 'not_scheduled'
+            production_completed_m2: M² already completed in production
+            production_estimated_ready: When production is expected to complete
+            order_deadline: When order must be placed for this boat
+            suggested_pallets: System's recommended order quantity
+
+        Returns:
+            AvailabilityBreakdown with all fields populated
+        """
+        suggested_m2 = Decimal(suggested_pallets) * M2_PER_PALLET
+
+        # SIESA: Current finished goods at factory
+        siesa_now = factory_available_m2
+
+        # Production completing before deadline
+        # Only count if production is in_progress or completed AND ready before deadline
+        production_completing = Decimal("0")
+
+        if production_status in ("in_progress", "completed"):
+            # If production is completed or will complete before deadline
+            if production_estimated_ready and production_estimated_ready <= order_deadline:
+                # Production will be ready - add completed m² to available
+                production_completing = production_completed_m2
+            elif production_status == "completed":
+                # Already completed, use it regardless of date
+                production_completing = production_completed_m2
+
+        # Total available
+        total_available = siesa_now + production_completing
+
+        # Gap analysis
+        can_fulfill = total_available >= suggested_m2
+        shortfall = max(Decimal("0"), suggested_m2 - total_available)
+
+        # Build shortfall note
+        shortfall_note = None
+        if shortfall > 0:
+            shortfall_note = f"{int(shortfall):,} m² needs future production"
+        elif production_completing > 0:
+            shortfall_note = f"Includes {int(production_completing):,} m² from production"
+
+        return AvailabilityBreakdown(
+            siesa_now_m2=siesa_now,
+            production_completing_m2=production_completing,
+            total_available_m2=total_available,
+            suggested_order_m2=suggested_m2,
+            shortfall_m2=shortfall,
+            can_fulfill=can_fulfill,
+            shortfall_note=shortfall_note,
+        )
+
+    # ===================
     # PRIORITY SCORING (Layer 2)
     # ===================
 
@@ -819,7 +891,8 @@ class OrderBuilderService:
         recommendations: list,
         days_to_cover: int,
         trend_data: dict[str, dict],
-        boat_departure: Optional[date] = None
+        boat_departure: Optional[date] = None,
+        order_deadline: Optional[date] = None
     ) -> dict[str, list[OrderBuilderProduct]]:
         """Convert recommendations to OrderBuilderProducts grouped by priority."""
         groups = {
@@ -1031,25 +1104,31 @@ class OrderBuilderService:
             factory_largest_lot_code = factory_avail.get("factory_largest_lot_code")
             factory_lot_count = factory_avail.get("factory_lot_count", 0)
 
-            # Calculate factory fill status based on suggested quantity
+            # Calculate factory fill status based on SIESA availability
+            # Priority: Check if stock exists FIRST, then compare to suggested quantity
             suggested_m2 = final_suggestion_m2
             if factory_available_m2 <= 0:
+                # No SIESA stock at all
                 factory_fill_status = "no_stock"
                 factory_fill_message = "No stock at factory"
             elif suggested_m2 <= 0:
-                factory_fill_status = "not_needed"
-                factory_fill_message = None
+                # Has stock but nothing suggested (over-stocked)
+                factory_fill_status = "available"
+                factory_fill_message = f"{int(factory_available_m2):,} m² available at SIESA"
             elif factory_largest_lot_m2 and suggested_m2 <= factory_largest_lot_m2:
+                # Can fill entire suggestion from single lot
                 factory_fill_status = "single_lot"
                 factory_fill_message = f"Can fill from single lot ({factory_largest_lot_code})"
             elif suggested_m2 <= factory_available_m2:
+                # Can fill entire suggestion but needs mixed lots
                 factory_fill_status = "mixed_lots"
                 largest_str = f"{int(factory_largest_lot_m2):,}" if factory_largest_lot_m2 else "?"
                 factory_fill_message = f"Will need mixed lots (largest: {largest_str} m²)"
             else:
+                # Has SOME stock but not enough for full suggestion
                 shortfall = suggested_m2 - factory_available_m2
-                factory_fill_status = "needs_production"
-                factory_fill_message = f"Request production — need {int(shortfall):,} m² more"
+                factory_fill_status = "partial_available"
+                factory_fill_message = f"{int(factory_available_m2):,} m² available, need {int(shortfall):,} m² more"
 
             # Get production schedule status (from Programa de Produccion Excel)
             # This shows what's currently scheduled/in_progress/completed
@@ -1090,6 +1169,18 @@ class OrderBuilderService:
                     base_gap=float(base_coverage_gap),
                     expected_orders=float(expected_customer_orders_m2),
                     adjusted_gap=float(adjusted_coverage_gap),
+                )
+
+            # Calculate availability breakdown (what's available for this boat)
+            availability_breakdown = None
+            if order_deadline:
+                availability_breakdown = self._calculate_availability_breakdown(
+                    factory_available_m2=factory_available_m2,
+                    production_status=production_status,
+                    production_completed_m2=production_completed_m2,
+                    production_estimated_ready=production_estimated_ready,
+                    order_deadline=order_deadline,
+                    suggested_pallets=suggested,
                 )
 
             product = OrderBuilderProduct(
@@ -1155,6 +1246,8 @@ class OrderBuilderService:
                 # Selection
                 is_selected=False,
                 selected_pallets=0,
+                # Availability breakdown (what's available for this boat)
+                availability_breakdown=availability_breakdown,
             )
 
             # Calculate priority score and display reasoning (Layer 2 & 4)

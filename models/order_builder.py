@@ -243,6 +243,48 @@ class OrderBuilderAlertType(str, Enum):
     SUGGESTION = "suggestion"
 
 
+class AvailabilityBreakdown(BaseSchema):
+    """Full breakdown of what's available for this boat."""
+
+    # Components
+    siesa_now_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Current SIESA finished goods stock"
+    )
+    production_completing_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Production ready before order deadline"
+    )
+
+    # Totals
+    total_available_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="siesa + production_completing"
+    )
+
+    # Order context
+    suggested_order_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="What system recommends"
+    )
+
+    # Gap analysis
+    shortfall_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="suggested - available (0 if available >= suggested)"
+    )
+    can_fulfill: bool = Field(
+        default=False,
+        description="True if available >= suggested"
+    )
+
+    # For display
+    shortfall_note: Optional[str] = Field(
+        None,
+        description="e.g., '135 m² needs future production'"
+    )
+
+
 class OrderBuilderProduct(BaseSchema):
     """Product in Order Builder with selection state."""
 
@@ -425,6 +467,12 @@ class OrderBuilderProduct(BaseSchema):
     selection_constraint_note: Optional[str] = Field(
         default=None,
         description="Note if selection was limited (e.g., 'Capped at SIESA available: 202 m²')"
+    )
+
+    # NEW: Full availability breakdown for this boat
+    availability_breakdown: Optional[AvailabilityBreakdown] = Field(
+        None,
+        description="Full breakdown of what's available for this boat"
     )
 
 
