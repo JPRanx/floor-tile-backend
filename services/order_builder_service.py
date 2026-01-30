@@ -64,6 +64,9 @@ from models.order_builder import (
     AddToProductionItem,
     FactoryRequestSummary,
     FactoryRequestItem,
+    # Unable to ship alerts
+    UnableToShipItem,
+    UnableToShipSummary,
 )
 from models.recommendation import RecommendationPriority
 
@@ -244,6 +247,9 @@ class OrderBuilderService:
         # Step 9: Calculate recommended BL count (based on true need) and available BLs
         recommended_bls, available_bls, recommended_bls_reason = self._calculate_recommended_bls(all_products)
 
+        # Step 10: Calculate "Unable to Ship" alerts
+        unable_to_ship = self._calculate_unable_to_ship_alerts(all_products, boat.order_deadline)
+
         result = OrderBuilderResponse(
             boat=boat,
             next_boat=next_boat,
@@ -262,6 +268,8 @@ class OrderBuilderService:
             factory_request_summary=factory_request_summary,
             constraint_analysis=constraint_analysis,
             summary_reasoning=summary_reasoning,
+            # Unable to ship alerts
+            unable_to_ship=unable_to_ship,
         )
 
         logger.info(
@@ -1338,48 +1346,112 @@ class OrderBuilderService:
         total_selected = 0
         all_products = []
 
-        # First pass: HIGH_PRIORITY (always include if room)
+        # Helper: Calculate max shippable pallets based on factory availability
+        def get_shippable_pallets(product) -> tuple[int, str]:
+            """
+            Returns (max_pallets, constraint_note).
+            Respects SIESA factory_available_m2 — can't ship more than what's at factory.
+            """
+            factory_m2 = float(product.factory_available_m2 or 0)
+            if factory_m2 <= 0:
+                return 0, "No SIESA stock available"
+
+            max_pallets = int(factory_m2 / float(M2_PER_PALLET))
+            if max_pallets <= 0:
+                return 0, f"SIESA stock too low ({int(factory_m2)} m²)"
+
+            return max_pallets, ""
+
+        # First pass: HIGH_PRIORITY (always include if room AND factory has stock)
         for p in products_by_priority.get("HIGH_PRIORITY", []):
-            pallets_needed = p.suggested_pallets  # Use suggestion (includes trend adjustment)
+            max_shippable, constraint_note = get_shippable_pallets(p)
+
+            # Can't ship if no factory stock
+            if max_shippable <= 0:
+                p.is_selected = False
+                p.selected_pallets = 0
+                p.selection_constraint_note = constraint_note
+                all_products.append(p)
+                continue
+
+            # Cap suggestion at what factory can ship
+            pallets_needed = min(p.suggested_pallets, max_shippable)
+
             if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
                 p.is_selected = True
                 p.selected_pallets = pallets_needed
                 total_selected += pallets_needed
+                if pallets_needed < p.suggested_pallets:
+                    p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
             elif pallets_needed > 0:
                 # Partial fill if there's room
                 remaining = max_pallets - total_selected
                 if remaining > 0:
+                    actual_pallets = min(remaining, max_shippable)
                     p.is_selected = True
-                    p.selected_pallets = remaining
-                    total_selected += remaining
+                    p.selected_pallets = actual_pallets
+                    total_selected += actual_pallets
+                    if actual_pallets < p.suggested_pallets:
+                        p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
             all_products.append(p)
 
-        # Second pass: CONSIDER (include if room available)
+        # Second pass: CONSIDER (include if room available AND factory has stock)
         for p in products_by_priority.get("CONSIDER", []):
-            pallets_needed = p.suggested_pallets  # Use suggestion (includes trend adjustment)
+            max_shippable, constraint_note = get_shippable_pallets(p)
+
+            # Can't ship if no factory stock
+            if max_shippable <= 0:
+                p.is_selected = False
+                p.selected_pallets = 0
+                p.selection_constraint_note = constraint_note
+                all_products.append(p)
+                continue
+
+            # Cap suggestion at what factory can ship
+            pallets_needed = min(p.suggested_pallets, max_shippable)
+
             if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
                 p.is_selected = True
                 p.selected_pallets = pallets_needed
                 total_selected += pallets_needed
+                if pallets_needed < p.suggested_pallets:
+                    p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
             elif pallets_needed > 0:
                 # Partial fill
                 remaining = max_pallets - total_selected
                 if remaining > 0:
+                    actual_pallets = min(remaining, max_shippable)
                     p.is_selected = True
-                    p.selected_pallets = remaining
-                    total_selected += remaining
+                    p.selected_pallets = actual_pallets
+                    total_selected += actual_pallets
+                    if actual_pallets < p.suggested_pallets:
+                        p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
             all_products.append(p)
 
-        # Third pass: WELL_COVERED (include if room left)
+        # Third pass: WELL_COVERED (include if room left AND factory has stock)
         for p in products_by_priority.get("WELL_COVERED", []):
+            max_shippable, constraint_note = get_shippable_pallets(p)
+
+            # Can't ship if no factory stock
+            if max_shippable <= 0:
+                p.is_selected = False
+                p.selected_pallets = 0
+                p.selection_constraint_note = constraint_note
+                all_products.append(p)
+                continue
+
             remaining = max_pallets - total_selected
             if remaining > 0:
                 # Add partial to help fill containers (use suggestion if available)
-                pallets_to_add = min(PALLETS_PER_CONTAINER, remaining, p.suggested_pallets or PALLETS_PER_CONTAINER)
+                # But cap at what factory can actually ship
+                pallets_to_add = min(PALLETS_PER_CONTAINER, remaining, p.suggested_pallets or PALLETS_PER_CONTAINER, max_shippable)
                 if pallets_to_add > 0:
                     p.is_selected = True
                     p.selected_pallets = pallets_to_add
                     total_selected += pallets_to_add
+                    if pallets_to_add < (p.suggested_pallets or PALLETS_PER_CONTAINER):
+                        if max_shippable < (p.suggested_pallets or PALLETS_PER_CONTAINER):
+                            p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
             all_products.append(p)
 
         # YOUR_CALL products - never auto-select
@@ -1918,6 +1990,126 @@ class OrderBuilderService:
             critical_count=critical_count,
             highest_risk_sku=highest_risk_sku,
             highest_risk_days=highest_risk_days,
+        )
+
+    def _calculate_unable_to_ship_alerts(
+        self,
+        all_products: list[OrderBuilderProduct],
+        order_deadline: date,
+    ) -> UnableToShipSummary:
+        """
+        Find products that NEED to be ordered but CAN'T ship due to logistical issues.
+
+        A product is "unable to ship" if:
+        1. Has coverage gap > 0 (we need it)
+        2. factory_available_m2 = 0 (nothing at SIESA)
+        3. NOT production_completing_before_deadline (nothing coming)
+
+        Args:
+            all_products: All Order Builder products
+            order_deadline: Boat order deadline date
+
+        Returns:
+            UnableToShipSummary with items and totals
+        """
+        items = []
+
+        for p in all_products:
+            # Skip if no coverage gap (don't need it)
+            if p.coverage_gap_m2 <= 0:
+                continue
+
+            # Skip if has SIESA stock (can ship)
+            if p.factory_available_m2 and p.factory_available_m2 > 0:
+                continue
+
+            # Skip if production completing before deadline
+            if p.factory_ready_before_boat:
+                continue
+
+            # This product needs attention!
+            reason, action = self._determine_unable_to_ship_reason(p, order_deadline)
+
+            # Calculate priority score
+            priority_score = 0
+            if p.score:
+                priority_score = p.score.total
+            elif p.priority == "HIGH_PRIORITY":
+                priority_score = 80
+            elif p.priority == "CONSIDER":
+                priority_score = 50
+
+            items.append(UnableToShipItem(
+                sku=p.sku,
+                description=p.description,
+                coverage_gap_m2=p.coverage_gap_m2,
+                coverage_gap_pallets=p.coverage_gap_pallets,
+                days_of_stock=p.days_of_stock,
+                stockout_date=p.stockout_date if hasattr(p, 'stockout_date') else None,
+                reason=reason,
+                production_status=p.production_status,
+                production_estimated_ready=p.production_estimated_ready,
+                suggested_action=action,
+                priority=p.priority,
+                priority_score=priority_score,
+            ))
+
+        # Sort by priority score (most urgent first)
+        items.sort(key=lambda x: x.priority_score, reverse=True)
+
+        # Calculate totals
+        total_gap_m2 = sum(item.coverage_gap_m2 for item in items)
+        total_gap_pallets = sum(item.coverage_gap_pallets for item in items)
+
+        # Generate summary message
+        if items:
+            message = f"{len(items)} products need attention ({total_gap_m2:,.0f} m²)"
+        else:
+            message = ""
+
+        return UnableToShipSummary(
+            count=len(items),
+            total_gap_m2=total_gap_m2,
+            total_gap_pallets=total_gap_pallets,
+            message=message,
+            items=items,
+        )
+
+    def _determine_unable_to_ship_reason(
+        self,
+        product: OrderBuilderProduct,
+        order_deadline: date,
+    ) -> tuple[str, str]:
+        """Determine why product can't ship and what to do."""
+
+        if product.production_status == 'completed':
+            return (
+                "Production completed but not at SIESA",
+                "Check if already shipped or sync SIESA data"
+            )
+
+        if product.production_status == 'in_progress':
+            ready_str = ""
+            if product.production_estimated_ready:
+                ready_str = f" (ready {product.production_estimated_ready})"
+            return (
+                f"Production in progress{ready_str}",
+                "Wait for production or expedite if urgent"
+            )
+
+        if product.production_status == 'scheduled':
+            ready_str = ""
+            if product.production_estimated_ready:
+                ready_str = f" (ready {product.production_estimated_ready})"
+            return (
+                f"Production scheduled{ready_str}",
+                "Wait for production or request expedite"
+            )
+
+        # Not scheduled at all
+        return (
+            "No SIESA stock and no production scheduled",
+            "Request new production immediately"
         )
 
     def _calculate_section_summaries(

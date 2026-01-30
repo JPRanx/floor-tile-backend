@@ -422,6 +422,10 @@ class OrderBuilderProduct(BaseSchema):
     # Selection state (editable by user)
     is_selected: bool = Field(default=False, description="Whether product is in order")
     selected_pallets: int = Field(default=0, description="Editable quantity")
+    selection_constraint_note: Optional[str] = Field(
+        default=None,
+        description="Note if selection was limited (e.g., 'Capped at SIESA available: 202 m²')"
+    )
 
 
 class OrderBuilderBoat(BaseSchema):
@@ -743,6 +747,39 @@ class FactoryRequestSummary(BaseSchema):
     )
 
 
+class UnableToShipItem(BaseSchema):
+    """Product that needs to be ordered but cannot ship due to logistical issues."""
+
+    sku: str = Field(..., description="Product SKU")
+    description: Optional[str] = Field(None, description="Product description")
+    coverage_gap_m2: Decimal = Field(..., description="How much we need in m²")
+    coverage_gap_pallets: int = Field(default=0, description="Gap in pallets")
+    days_of_stock: Optional[int] = Field(None, description="Days of stock remaining")
+    stockout_date: Optional[date] = Field(None, description="When we'll run out")
+
+    # Why we can't ship
+    reason: str = Field(..., description="Why we can't ship this product")
+    production_status: Optional[str] = Field(None, description="Production status")
+    production_estimated_ready: Optional[date] = Field(None, description="When production ready")
+
+    # What to do
+    suggested_action: str = Field(..., description="What user should do")
+
+    # Priority
+    priority: str = Field(default="HIGH_PRIORITY", description="Priority level")
+    priority_score: int = Field(default=0, description="Urgency score for sorting")
+
+
+class UnableToShipSummary(BaseSchema):
+    """Summary of products that cannot ship."""
+
+    count: int = Field(default=0, description="Number of products that can't ship")
+    total_gap_m2: Decimal = Field(default=Decimal("0"), description="Total m² needed but can't ship")
+    total_gap_pallets: int = Field(default=0, description="Total pallets needed but can't ship")
+    message: str = Field(default="", description="Summary message")
+    items: list[UnableToShipItem] = Field(default_factory=list)
+
+
 class OrderBuilderResponse(BaseSchema):
     """Complete Order Builder API response."""
 
@@ -801,6 +838,11 @@ class OrderBuilderResponse(BaseSchema):
     # Reasoning (explains WHY this order strategy)
     summary_reasoning: Optional[OrderSummaryReasoning] = Field(
         None, description="Order-level reasoning and strategy explanation"
+    )
+
+    # === NEW: Unable to Ship Alerts ===
+    unable_to_ship: Optional[UnableToShipSummary] = Field(
+        None, description="Products that need ordering but can't ship due to no SIESA stock"
     )
 
 
