@@ -339,6 +339,8 @@ class RecommendationService:
             gap_m2 = gap_pallets * M2_PER_PALLET
 
             # Check if over-stocked
+            # NOTE: Over-stocked products are STILL added to recommendations (with SKIP_ORDER action)
+            # so they appear in Order Builder and users can see SIESA stock available to ship
             if gap_pallets < OVER_STOCK_THRESHOLD:
                 warnings.append(RecommendationWarning(
                     product_id=alloc.product_id,
@@ -353,6 +355,80 @@ class RecommendationService:
                     },
                     in_transit_m2=round(in_transit_m2, 2) if in_transit_m2 > 0 else None,
                     in_transit_pallets=round(in_transit_pallets, 2) if in_transit_pallets > 0 else None,
+                ))
+                # Still add to recommendations for Order Builder visibility (shows SIESA stock)
+                product_sales = sales_by_product.get(alloc.product_id, [])
+                weekly_quantities = [s.quantity_m2 for s in product_sales]
+                customer_analysis = customer_analysis_map.get(alloc.product_id)
+                confidence, confidence_reason, velocity_cv, customer_metrics = self._calculate_confidence(
+                    weekly_sales=weekly_quantities,
+                    weeks_of_data=alloc.weeks_of_data,
+                    customer_analysis=customer_analysis,
+                )
+                total_demand_m2, coverage_gap_m2, coverage_gap_pallets = self._calculate_coverage_gap(
+                    daily_velocity=alloc.daily_velocity,
+                    available_m2=current_m2,
+                    days_to_cover=days_to_cover,
+                )
+
+                # Get stockout info
+                days_until_empty = None
+                stockout_date = None
+                if stockout and stockout.days_to_stockout is not None:
+                    days_until_empty = stockout.days_to_stockout
+                    stockout_date = today + timedelta(days=int(days_until_empty))
+
+                # Get production schedule info
+                prod_m2, prod_date, prod_before_stockout, prod_covers_gap = self._get_production_for_product(
+                    product_id=alloc.product_id,
+                    production_map=production_map,
+                    stockout_date=stockout_date,
+                    coverage_gap_m2=coverage_gap_m2,
+                )
+
+                excess_pallets = abs(int(gap_pallets))
+                recommendations.append(ProductRecommendation(
+                    product_id=alloc.product_id,
+                    sku=alloc.sku,
+                    category=alloc.category,
+                    rotation=alloc.rotation,
+                    target_pallets=round(target_pallets, 2),
+                    target_m2=round(target_m2, 2),
+                    warehouse_pallets=round(warehouse_pallets, 2),
+                    warehouse_m2=round(warehouse_m2, 2),
+                    in_transit_pallets=round(in_transit_pallets, 2),
+                    in_transit_m2=round(in_transit_m2, 2),
+                    current_pallets=round(current_pallets, 2),
+                    current_m2=round(current_m2, 2),
+                    gap_pallets=round(gap_pallets, 2),
+                    gap_m2=round(gap_m2, 2),
+                    days_to_cover=days_to_cover,
+                    total_demand_m2=total_demand_m2,
+                    coverage_gap_m2=coverage_gap_m2,
+                    coverage_gap_pallets=coverage_gap_pallets,
+                    daily_velocity=alloc.daily_velocity,
+                    days_until_empty=round(days_until_empty, 1) if days_until_empty else None,
+                    stockout_date=stockout_date,
+                    order_arrives_date=order_arrives,
+                    arrives_before_stockout=True,  # Over-stocked = won't stockout
+                    confidence=confidence,
+                    confidence_reason=confidence_reason,
+                    weeks_of_data=alloc.weeks_of_data,
+                    velocity_cv=velocity_cv,
+                    unique_customers=customer_metrics.get("unique_customers", 0),
+                    top_customer_name=customer_metrics.get("top_customer_name"),
+                    top_customer_share=customer_metrics.get("top_customer_share"),
+                    recurring_customers=customer_metrics.get("recurring_customers", 0),
+                    recurring_share=customer_metrics.get("recurring_share"),
+                    # Production schedule fields
+                    upcoming_production_m2=prod_m2,
+                    next_production_date=prod_date,
+                    production_before_stockout=prod_before_stockout,
+                    production_covers_gap=prod_covers_gap,
+                    priority=RecommendationPriority.WELL_COVERED,
+                    action_type=ActionType.SKIP_ORDER,
+                    action=f"{excess_pallets} pallets above target — skip this cycle",
+                    reason=f"Over-stocked by {excess_pallets} pallets. No order needed this cycle.",
                 ))
                 continue
 
