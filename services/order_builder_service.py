@@ -439,11 +439,13 @@ class OrderBuilderService:
 
     def _get_customer_demand_scores(self) -> dict[str, dict]:
         """
-        Calculate customer demand scores for products based on customers due soon.
+        Calculate customer demand scores and expected orders for products.
 
         Returns dict keyed by SKU with:
         - score: int (0-300+ based on tier weights and overdue status)
         - customers_count: int (number of customers expecting this product)
+        - expected_m2: Decimal (expected m² from customers due soon)
+        - customer_names: list[str] (names of expecting customers)
 
         Tier weights:
         - A-tier: 100 points
@@ -497,27 +499,41 @@ class OrderBuilderService:
                 # Score for this customer
                 customer_score = int(tier_weight * overdue_multiplier)
 
-                # Add score to each of their top products
+                # Add score and expected m² to each of their top products
                 for prod in customer.top_products[:5]:  # Top 5 products per customer
                     sku = prod.sku
                     if sku not in sku_demand:
-                        sku_demand[sku] = {"score": 0, "customers": set()}
+                        sku_demand[sku] = {
+                            "score": 0,
+                            "customers": set(),
+                            "expected_m2": Decimal("0"),
+                        }
 
                     sku_demand[sku]["score"] += customer_score
                     sku_demand[sku]["customers"].add(customer.customer_normalized)
 
-            # Convert sets to counts
+                    # Calculate expected m² for this product from this customer
+                    # Use customer's average order for this specific product
+                    if customer.order_count > 0 and prod.total_m2:
+                        avg_product_m2 = Decimal(str(prod.total_m2)) / customer.order_count
+                        sku_demand[sku]["expected_m2"] += avg_product_m2
+
+            # Convert sets to result
             result = {}
             for sku, data in sku_demand.items():
                 result[sku] = {
                     "score": data["score"],
-                    "customers_count": len(data["customers"])
+                    "customers_count": len(data["customers"]),
+                    "expected_m2": round(data["expected_m2"], 2),
+                    "customer_names": list(data["customers"])[:5],  # Top 5 names
                 }
 
+            total_expected = sum(d["expected_m2"] for d in result.values())
             logger.debug(
                 "customer_demand_scores_calculated",
                 products_with_demand=len(result),
-                top_score=max((d["score"] for d in result.values()), default=0)
+                top_score=max((d["score"] for d in result.values()), default=0),
+                total_expected_m2=float(total_expected),
             )
 
             return result
@@ -535,20 +551,35 @@ class OrderBuilderService:
         """
         Calculate trend-based adjustment to order quantity.
 
+        Growing: +5% to +20% (order more buffer for increasing demand)
+        Stable: 0% (no adjustment)
+        Declining: -5% to -20% (order less to avoid overstock)
+
         Returns (adjustment_m2, adjustment_pct)
         """
-        # Only adjust for upward trends (increase order)
-        if direction != "up":
-            return Decimal("0"), Decimal("0")
+        if direction == "up":
+            # Uptrend: increase order quantity
+            pct_by_strength = {
+                "strong": Decimal("0.20"),   # +20% for strong uptrend
+                "moderate": Decimal("0.10"), # +10% for moderate uptrend
+                "weak": Decimal("0.05"),     # +5% for weak uptrend
+            }
+            adjustment_pct = pct_by_strength.get(strength, Decimal("0"))
 
-        # Adjustment percentages based on strength
-        pct_by_strength = {
-            "strong": Decimal("0.20"),   # +20% for strong uptrend
-            "moderate": Decimal("0.10"), # +10% for moderate uptrend
-            "weak": Decimal("0.05"),     # +5% for weak uptrend
-        }
+        elif direction == "down":
+            # Downtrend: decrease order quantity to avoid overstock
+            # Mirror the uptrend logic with negative values
+            pct_by_strength = {
+                "strong": Decimal("-0.20"),   # -20% for strong decline
+                "moderate": Decimal("-0.10"), # -10% for moderate decline
+                "weak": Decimal("-0.05"),     # -5% for weak decline
+            }
+            adjustment_pct = pct_by_strength.get(strength, Decimal("0"))
 
-        adjustment_pct = pct_by_strength.get(strength, Decimal("0"))
+        else:
+            # Stable: no adjustment
+            adjustment_pct = Decimal("0")
+
         adjustment_m2 = base_quantity_m2 * adjustment_pct
 
         return adjustment_m2, adjustment_pct * 100  # Return as percentage
@@ -945,10 +976,28 @@ class OrderBuilderService:
                 exclusion_reason=exclusion_reason,
             )
 
-            # Get customer demand score for this product
-            demand_info = customer_demand_data.get(rec.sku, {"score": 0, "customers_count": 0})
+            # Get customer demand score and expected orders for this product
+            demand_info = customer_demand_data.get(rec.sku, {
+                "score": 0,
+                "customers_count": 0,
+                "expected_m2": Decimal("0"),
+                "customer_names": []
+            })
             customer_demand_score = demand_info["score"]
             customers_expecting_count = demand_info["customers_count"]
+            expected_customer_orders_m2 = Decimal(str(demand_info.get("expected_m2", 0)))
+
+            # Build note for expected orders
+            expected_orders_note = None
+            if expected_customer_orders_m2 > 0 and customers_expecting_count > 0:
+                customer_names = demand_info.get("customer_names", [])
+                names_str = ", ".join(customer_names[:3])
+                if len(customer_names) > 3:
+                    names_str += f" +{len(customer_names) - 3}"
+                expected_orders_note = (
+                    f"Includes {int(expected_customer_orders_m2):,} m² expected from "
+                    f"{customers_expecting_count} customer(s): {names_str}"
+                )
 
             # Get factory production status
             factory_info = factory_status_map.get(rec.product_id)
@@ -1020,6 +1069,21 @@ class OrderBuilderService:
                     production_add_more_m2 = gap_m2
                     production_add_more_alert = f"Add {int(gap_m2):,} m² before production starts!"
 
+            # Add expected customer orders to coverage gap
+            # This accounts for predictable demand from customers due to order soon
+            base_coverage_gap = rec.coverage_gap_m2 or Decimal("0")
+            adjusted_coverage_gap = base_coverage_gap + expected_customer_orders_m2
+
+            # Log if expected orders are adding to gap
+            if expected_customer_orders_m2 > 0:
+                logger.debug(
+                    "expected_orders_added_to_gap",
+                    sku=rec.sku,
+                    base_gap=float(base_coverage_gap),
+                    expected_orders=float(expected_customer_orders_m2),
+                    adjusted_gap=float(adjusted_coverage_gap),
+                )
+
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
@@ -1030,7 +1094,7 @@ class OrderBuilderService:
                 in_transit_m2=rec.in_transit_m2,
                 days_to_cover=days_to_cover,
                 total_demand_m2=rec.total_demand_m2 or Decimal("0"),
-                coverage_gap_m2=rec.coverage_gap_m2 or Decimal("0"),
+                coverage_gap_m2=adjusted_coverage_gap,  # Now includes expected customer orders
                 coverage_gap_pallets=coverage_gap_pallets,
                 suggested_pallets=suggested,
                 confidence=rec.confidence.value,
@@ -1078,6 +1142,8 @@ class OrderBuilderService:
                 # Customer demand signal
                 customer_demand_score=customer_demand_score,
                 customers_expecting_count=customers_expecting_count,
+                expected_customer_orders_m2=expected_customer_orders_m2,
+                expected_orders_note=expected_orders_note,
                 # Selection
                 is_selected=False,
                 selected_pallets=0,

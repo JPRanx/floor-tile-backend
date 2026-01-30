@@ -410,6 +410,14 @@ class OrderBuilderProduct(BaseSchema):
         default=0,
         description="Number of customers due soon who typically buy this product"
     )
+    expected_customer_orders_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Expected m² from customers due to order soon (added to coverage gap)"
+    )
+    expected_orders_note: Optional[str] = Field(
+        default=None,
+        description="Explanation of expected customer orders, e.g. 'Includes 500 m² from 3 expected orders'"
+    )
 
     # Selection state (editable by user)
     is_selected: bool = Field(default=False, description="Whether product is in order")
