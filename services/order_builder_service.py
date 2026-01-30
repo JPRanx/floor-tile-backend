@@ -1536,7 +1536,12 @@ class OrderBuilderService:
             gap = Decimal(str(p.coverage_gap_m2 or 0))
             # Subtract what's already coming
             in_transit = Decimal(str(p.in_transit_m2 or 0))
-            in_production = Decimal(str(p.production_requested_m2 or 0))
+            # in_production = only scheduled + in_progress (NOT completed)
+            # Completed is at factory SIESA, counted in factory_available
+            if p.production_status in ("scheduled", "in_progress"):
+                in_production = Decimal(str(p.production_requested_m2 or 0))
+            else:
+                in_production = Decimal("0")
             # True need = gap - transit - production (floor at 0)
             true_need = max(Decimal("0"), gap - in_transit - in_production)
             total_true_need_m2 += true_need
@@ -2080,7 +2085,12 @@ class OrderBuilderService:
             warehouse_m2 = p.current_stock_m2 or Decimal("0")
             in_transit_m2 = p.in_transit_m2 or Decimal("0")
             factory_available_m2 = p.factory_available_m2 or Decimal("0")
-            in_production_m2 = p.production_requested_m2 or Decimal("0")
+            # in_production = only scheduled + in_progress (NOT completed)
+            # Completed production is at factory SIESA, counted in factory_available_m2
+            if p.production_status in ("scheduled", "in_progress"):
+                in_production_m2 = p.production_requested_m2 or Decimal("0")
+            else:
+                in_production_m2 = Decimal("0")
             velocity_m2_day = p.daily_velocity_m2 or Decimal("0")
             score = p.score.total if p.score else 0
 
