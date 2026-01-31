@@ -7,7 +7,7 @@ See STANDARDS_VALIDATION.md for patterns.
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 
 from models.base import BaseSchema, TimestampMixin
@@ -48,6 +48,15 @@ class Rotation(str, Enum):
     MEDIA_ALTA = "MEDIA-ALTA"
     MEDIA = "MEDIA"
     BAJA = "BAJA"
+
+
+class InactiveReason(str, Enum):
+    """Reason for product deactivation."""
+    DISCONTINUED = "DISCONTINUED"    # Factory stopped making it
+    NO_STOCK = "NO_STOCK"            # No inventory and no plans to reorder
+    SEASONAL = "SEASONAL"            # Temporarily unavailable (seasonal)
+    REPLACED = "REPLACED"            # Replaced by another product
+    OTHER = "OTHER"                  # Other reason
 
 
 class ProductCreate(BaseSchema):
@@ -126,6 +135,14 @@ class ProductUpdate(BaseSchema):
         ge=1,
         description="SIESA (Factory Colombia) ERP item code"
     )
+    inactive_reason: Optional[InactiveReason] = Field(
+        None,
+        description="Reason for deactivation"
+    )
+    inactive_date: Optional[date] = Field(
+        None,
+        description="Date when product was marked inactive"
+    )
 
     @field_validator("sku")
     @classmethod
@@ -161,6 +178,8 @@ class ProductResponse(BaseSchema, TimestampMixin):
     rotation: Optional[Rotation] = Field(None, description="Sales velocity")
     active: bool = Field(..., description="Whether product is active")
     fob_cost_usd: Optional[Decimal] = Field(None, description="FOB cost per m² in USD")
+    inactive_reason: Optional[InactiveReason] = Field(None, description="Reason for deactivation")
+    inactive_date: Optional[date] = Field(None, description="Date when product was marked inactive")
 
 
 class ProductListResponse(BaseSchema):

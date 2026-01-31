@@ -7,7 +7,9 @@ See STANDARDS_ERRORS.md for error response format.
 
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Optional, List
+from datetime import date
+from pydantic import BaseModel, Field
 import structlog
 
 from models.product import (
@@ -16,7 +18,8 @@ from models.product import (
     ProductResponse,
     ProductListResponse,
     Category,
-    Rotation
+    Rotation,
+    InactiveReason
 )
 from services.product_service import get_product_service
 from exceptions import (
@@ -28,6 +31,24 @@ from exceptions import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+# ===================
+# REQUEST MODELS
+# ===================
+
+class BulkStatusUpdateRequest(BaseModel):
+    """Request for bulk product status update."""
+    product_ids: List[str] = Field(..., min_length=1, description="List of product IDs to update")
+    active: bool = Field(..., description="Whether to activate or deactivate")
+    inactive_reason: Optional[InactiveReason] = Field(None, description="Reason for deactivation")
+    inactive_date: Optional[date] = Field(None, description="Date of deactivation")
+
+
+class BulkStatusUpdateResponse(BaseModel):
+    """Response for bulk status update."""
+    updated: int = Field(..., description="Number of products updated")
+    failed: List[str] = Field(default_factory=list, description="IDs of products that failed")
 
 
 # ===================
@@ -172,6 +193,44 @@ async def delete_product(product_id: str):
         
     except ProductNotFoundError as e:
         return handle_error(e)
+    except Exception as e:
+        return handle_error(e)
+
+
+# ===================
+# BULK OPERATIONS
+# ===================
+
+@router.patch("/bulk/status", response_model=BulkStatusUpdateResponse)
+async def bulk_update_status(request: BulkStatusUpdateRequest):
+    """
+    Bulk update product active status.
+
+    Used by Product Management UI to activate/deactivate multiple products.
+
+    - For deactivation: inactive_reason is required, inactive_date defaults to today
+    - For activation: inactive_reason and inactive_date are cleared
+    """
+    try:
+        service = get_product_service()
+
+        # For deactivation, default date to today if not provided
+        inactive_date_str = None
+        if not request.active:
+            if request.inactive_date:
+                inactive_date_str = request.inactive_date.isoformat()
+            else:
+                inactive_date_str = date.today().isoformat()
+
+        updated, failed = service.bulk_update_status(
+            product_ids=request.product_ids,
+            active=request.active,
+            inactive_reason=request.inactive_reason,
+            inactive_date=inactive_date_str
+        )
+
+        return BulkStatusUpdateResponse(updated=updated, failed=failed)
+
     except Exception as e:
         return handle_error(e)
 

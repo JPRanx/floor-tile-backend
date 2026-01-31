@@ -15,6 +15,7 @@ from models.product import (
     ProductResponse,
     Category,
     Rotation,
+    InactiveReason,
     TILE_CATEGORIES,
 )
 from exceptions import (
@@ -379,10 +380,18 @@ class ProductService:
                 update_data["rotation"] = data.rotation.value
             if data.active is not None:
                 update_data["active"] = data.active
+                # If reactivating, clear inactive fields
+                if data.active is True:
+                    update_data["inactive_reason"] = None
+                    update_data["inactive_date"] = None
             if data.fob_cost_usd is not None:
                 update_data["fob_cost_usd"] = float(data.fob_cost_usd)
             if data.factory_code is not None:
                 update_data["factory_code"] = data.factory_code
+            if data.inactive_reason is not None:
+                update_data["inactive_reason"] = data.inactive_reason.value
+            if data.inactive_date is not None:
+                update_data["inactive_date"] = data.inactive_date.isoformat()
 
             if not update_data:
                 # Nothing to update, return existing
@@ -500,6 +509,70 @@ class ProductService:
 
         logger.info("bulk_upsert_complete", created=created, updated=updated)
         return created, updated
+
+    def bulk_update_status(
+        self,
+        product_ids: list[str],
+        active: bool,
+        inactive_reason: InactiveReason | None = None,
+        inactive_date: str | None = None
+    ) -> tuple[int, list[str]]:
+        """
+        Bulk update product active status.
+
+        Args:
+            product_ids: List of product UUIDs to update
+            active: Whether to activate (True) or deactivate (False)
+            inactive_reason: Reason for deactivation (required if active=False)
+            inactive_date: Date of deactivation (YYYY-MM-DD format)
+
+        Returns:
+            Tuple of (updated_count, failed_ids)
+        """
+        logger.info(
+            "bulk_update_status",
+            count=len(product_ids),
+            active=active,
+            reason=inactive_reason.value if inactive_reason else None
+        )
+
+        updated = 0
+        failed_ids = []
+
+        for product_id in product_ids:
+            try:
+                if active:
+                    # Reactivate: clear inactive fields
+                    update_data = {
+                        "active": True,
+                        "inactive_reason": None,
+                        "inactive_date": None
+                    }
+                else:
+                    # Deactivate: set reason and date
+                    update_data = {
+                        "active": False,
+                        "inactive_reason": inactive_reason.value if inactive_reason else None,
+                        "inactive_date": inactive_date
+                    }
+
+                self.db.table(self.table).update(update_data).eq("id", product_id).execute()
+                updated += 1
+
+            except Exception as e:
+                logger.error(
+                    "bulk_update_status_failed",
+                    product_id=product_id,
+                    error=str(e)
+                )
+                failed_ids.append(product_id)
+
+        logger.info(
+            "bulk_update_status_complete",
+            updated=updated,
+            failed=len(failed_ids)
+        )
+        return updated, failed_ids
 
     # ===================
     # UTILITY METHODS
