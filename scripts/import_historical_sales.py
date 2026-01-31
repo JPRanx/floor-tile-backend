@@ -18,7 +18,7 @@ from collections import defaultdict
 
 # Configuration
 API_BASE = "http://localhost:8000/api"
-EXCEL_PATH = r"C:\Users\Jorge Alexander\floor-tile-saas\data\phase2-samples\VENTAS ANUAL.xls"
+EXCEL_PATH = r"C:\Users\Jorge Alexander\floor-tile-saas\data\phase2-samples\VENTAS ANUAL.xlsx"
 
 # Products to skip (non-tile or 20X61 variants)
 SKIP_PATTERNS = [
@@ -63,6 +63,8 @@ def should_skip_sku(sku: str) -> bool:
 def normalize_sku(raw_sku: str) -> str:
     """Normalize SKU for matching to database."""
     import re
+    import unicodedata
+
     sku = raw_sku.strip().upper()
 
     # Remove dimension suffix like "(T) 51X51-1" or "(T) 30,25X61-1"
@@ -71,16 +73,12 @@ def normalize_sku(raw_sku: str) -> str:
     # Also handle suffix without (T) like "51X51-1"
     sku = re.sub(r'\s+51X51-1$', '', sku)
 
-    # Keep BTE suffix - BTE are separate products (Brillante = glossy finish)
+    # Remove ALL accents using unicodedata (RÚSTICO → RUSTICO, TOLÚ → TOLU, etc.)
+    sku = unicodedata.normalize('NFD', sku)
+    sku = ''.join(c for c in sku if unicodedata.category(c) != 'Mn')
 
-    # Fix encoding issues - strip replacement character and accents to ASCII
-    # Database uses ASCII names (CALARCA, TOLU, etc.)
+    # Fix encoding issues - strip replacement character
     sku = sku.replace("�", "")  # Remove replacement character
-    sku = sku.replace("Á", "A")  # CALARCÁ -> CALARCA
-    sku = sku.replace("Í", "I")  # CARACOLÍ -> CARACOLI
-    sku = sku.replace("Ú", "U")  # RÚSTICO -> RUSTICO
-    sku = sku.replace("É", "E")  # CAFÉ -> CAFE
-    sku = sku.replace("Ó", "O")  # Any Ó -> O
     sku = sku.replace("Ã", "A")  # Mojibake fix
 
     # Apply known mappings
@@ -99,6 +97,8 @@ def get_week_start(d: date) -> date:
 
 def get_products() -> dict:
     """Get all products as SKU -> ID mapping."""
+    import unicodedata
+
     response = requests.get(f"{API_BASE}/products", params={"page_size": 100})
     response.raise_for_status()
     data = response.json()
@@ -111,34 +111,19 @@ def get_products() -> dict:
         # Add the base SKU
         mapping[sku] = product_id
 
+        # Also add normalized version (no accents)
+        sku_normalized = unicodedata.normalize('NFD', sku)
+        sku_normalized = ''.join(c for c in sku_normalized if unicodedata.category(c) != 'Mn')
+        mapping[sku_normalized] = product_id
+
         # Add version without BTE suffix
         if sku.endswith(" BTE"):
             base = sku[:-4]
             mapping[base] = product_id
-            mapping[base + " BTE"] = product_id
-
-        # Add versions with accent variations
-        # CAFÉ <-> CAFE
-        if "CAFÉ" in sku:
-            alt = sku.replace("CAFÉ", "CAFE")
-            mapping[alt] = product_id
-        elif "CAFE" in sku:
-            alt = sku.replace("CAFE", "CAFÉ")
-            mapping[alt] = product_id
-
-        # CALARCÁ -> CALARCA
-        if "Á" in sku:
-            mapping[sku.replace("Á", "A")] = product_id
-
-        # CARACOLÍ -> CARACOLI
-        if "Í" in sku:
-            mapping[sku.replace("Í", "I")] = product_id
-
-        # Common truncations
-        if sku == "CEIBA GRIS OSC":
-            mapping["CEIBA GRIS OSCURO"] = product_id
-        if sku == "NOGAL GRIS OSC":
-            mapping["NOGAL GRIS OSCURO"] = product_id
+            # Also normalized
+            base_norm = unicodedata.normalize('NFD', base)
+            base_norm = ''.join(c for c in base_norm if unicodedata.category(c) != 'Mn')
+            mapping[base_norm] = product_id
 
     return mapping
 
