@@ -1047,6 +1047,11 @@ class OrderBuilderResponse(BaseSchema):
         None, description="Products that need ordering but can't ship due to no SIESA stock"
     )
 
+    # === NEW: Stability Forecast ===
+    stability_forecast: Optional["StabilityForecast"] = Field(
+        None, description="Cycle stability forecast showing when system will be stable"
+    )
+
 
 # ===================
 # CONFIRM ORDER (Create Factory Order)
@@ -1165,3 +1170,99 @@ class DemandForecastResponse(BaseSchema):
 
     # Demand by product
     demand_by_product: list[ProductDemand] = Field(default_factory=list)
+
+
+# ===================
+# STABILITY FORECAST
+# ===================
+
+class StabilityStatus(str, Enum):
+    """Overall stability status of the cycle."""
+    STABLE = "stable"           # All products have adequate coverage
+    RECOVERING = "recovering"   # Products will recover with planned shipments
+    UNSTABLE = "unstable"       # Products at risk, no recovery plan
+    BLOCKED = "blocked"         # Some products have no supply scheduled
+
+
+class SupplySource(str, Enum):
+    """Source of supply for recovery."""
+    SIESA = "siesa"             # Factory finished goods
+    PRODUCTION = "production"   # Scheduled production
+    NONE = "none"               # No supply available
+
+
+class RecoveryStatus(str, Enum):
+    """Recovery status for a product."""
+    SHIPPING = "shipping"           # Will ship on upcoming boat
+    IN_PRODUCTION = "in_production" # Waiting for production to complete
+    BLOCKED = "blocked"             # No supply scheduled
+
+
+class ProductRecovery(BaseSchema):
+    """Recovery plan for a single unstable product."""
+    sku: str
+    product_name: Optional[str] = None
+    current_coverage_days: int = Field(..., description="Days of stock at current velocity")
+    stockout_date: Optional[date] = Field(None, description="When product will stock out")
+
+    # Supply info
+    supply_source: SupplySource
+    supply_amount_m2: Decimal = Field(default=Decimal("0"), description="m² available/completing")
+    supply_ready_date: Optional[date] = Field(None, description="When supply is available")
+
+    # Shipping info
+    ship_boat_name: Optional[str] = Field(None, description="Boat that will carry this")
+    ship_boat_departure: Optional[date] = None
+    arrival_date: Optional[date] = Field(None, description="When product arrives Guatemala")
+
+    # Status
+    status: RecoveryStatus
+    status_note: str = Field(..., description="e.g., 'Ships on Boat 1, arrives Mar 5'")
+
+
+class StabilityBlocker(BaseSchema):
+    """Product blocking stability (no supply scheduled)."""
+    sku: str
+    product_name: Optional[str] = None
+    current_coverage_days: int = Field(..., description="Days of stock remaining")
+    stockout_date: Optional[date] = Field(None, description="When product will stock out")
+    velocity_m2_per_day: Decimal = Field(default=Decimal("0"), description="Daily velocity")
+    reason: str = Field(..., description="e.g., 'No production scheduled'")
+    suggested_action: str = Field(..., description="e.g., 'Request production immediately'")
+
+
+class StabilityTimeline(BaseSchema):
+    """Snapshot of stability at a point in time."""
+    date: date
+    event: str = Field(..., description="e.g., 'Boat 1 arrives', 'Production completes'")
+    resolved_count: int = Field(..., description="Products resolved by this event")
+    remaining_unstable: int = Field(..., description="Products still unstable after event")
+    resolved_skus: list[str] = Field(default_factory=list, description="SKUs resolved")
+
+
+class StabilityForecast(BaseSchema):
+    """Complete stability forecast for the cycle."""
+
+    # Overall status
+    status: StabilityStatus
+    status_message: str = Field(..., description="e.g., '7 products at risk, stable by Apr 1'")
+
+    # Counts
+    total_products: int = Field(..., description="Total products tracked")
+    stable_count: int = Field(..., description="Products with adequate coverage")
+    unstable_count: int = Field(..., description="Products at risk")
+    blocker_count: int = Field(..., description="Products with no supply scheduled")
+
+    # Recovery info
+    stable_date: Optional[date] = Field(None, description="When cycle will be stable (null if blocked)")
+    stable_date_note: Optional[str] = Field(None, description="e.g., 'After Boat 2 arrives'")
+
+    # Timeline
+    timeline: list[StabilityTimeline] = Field(default_factory=list)
+
+    # Product details
+    recovering_products: list[ProductRecovery] = Field(default_factory=list)
+    blockers: list[StabilityBlocker] = Field(default_factory=list)
+
+    # Progress (for progress bar)
+    recovery_progress_pct: int = Field(default=0, ge=0, le=100, description="0-100")
