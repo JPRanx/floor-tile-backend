@@ -229,6 +229,154 @@ class CalculationBreakdown(BaseSchema):
     final_suggestion_pallets: int = Field(..., description="Final recommendation in pallets")
 
 
+# ===================
+# FULL CALCULATION BREAKDOWN (Transparency Layer)
+# ===================
+
+class CoverageCalculation(BaseSchema):
+    """
+    Coverage Gap Calculation — Shows how we determine m² needed.
+
+    Formula: coverage_gap = (velocity × target_days) - warehouse - in_transit
+    """
+    # Target days breakdown
+    target_coverage_days: int = Field(..., description="Target days of coverage (days_to_warehouse + buffer)")
+    days_to_warehouse: int = Field(..., description="Days until product in warehouse")
+    buffer_days: int = Field(default=30, description="Safety buffer days")
+
+    # Velocity inputs
+    velocity_m2_per_day: Decimal = Field(..., description="Daily velocity in m²")
+    velocity_source: str = Field(
+        default="90d",
+        description="Which velocity used: '90d', '180d', 'blended'"
+    )
+
+    # Need calculation
+    need_for_target_m2: Decimal = Field(..., description="velocity × target_days = raw need")
+
+    # Trend adjustment (optional)
+    trend_direction: str = Field(default="stable", description="up, down, stable")
+    velocity_change_pct: Decimal = Field(
+        default=Decimal("0"),
+        description="Raw velocity change: (90d - 180d) / 180d × 100 (e.g., -52% = demand down 52%)"
+    )
+    trend_adjustment_pct: Decimal = Field(
+        default=Decimal("0"),
+        description="Order quantity adjustment (capped at ±20%)"
+    )
+    trend_adjustment_m2: Decimal = Field(default=Decimal("0"), description="trend_pct × need")
+    adjusted_need_m2: Decimal = Field(..., description="need + trend_adjustment")
+
+    # Current position
+    warehouse_m2: Decimal = Field(..., description="Current warehouse stock")
+    in_transit_m2: Decimal = Field(default=Decimal("0"), description="Stock in transit")
+
+    # Gap result
+    coverage_gap_m2: Decimal = Field(..., description="adjusted_need - warehouse - in_transit")
+    coverage_gap_pallets: int = Field(..., description="Gap converted to pallets")
+
+    # Suggestion from coverage alone
+    suggested_pallets: int = Field(..., description="Pallets suggested by coverage gap")
+    suggested_m2: Decimal = Field(..., description="m² suggested by coverage gap")
+
+
+class CustomerDemandCalculation(BaseSchema):
+    """
+    Customer Demand Calculation — Shows expected orders from customers due soon.
+
+    Looks at customers whose order cycle is due and calculates expected m².
+    """
+    # Customer inputs
+    customers_expecting_count: int = Field(..., description="Number of customers due to order")
+    customers_list: list[str] = Field(
+        default_factory=list,
+        description="Names of customers expecting this product"
+    )
+
+    # Expected volume
+    expected_orders_m2: Decimal = Field(..., description="Sum of expected m² from all customers")
+    expected_orders_pallets: int = Field(..., description="Expected orders in pallets")
+
+    # Breakdown by customer (optional, for detail view)
+    customer_breakdown: list[dict] = Field(
+        default_factory=list,
+        description="Per-customer: {name, avg_m2, tier, days_overdue}"
+    )
+
+    # Final suggestion from customer demand
+    suggested_pallets: int = Field(..., description="Pallets suggested by customer demand")
+
+    # Score
+    customer_demand_score: int = Field(
+        default=0,
+        description="Priority score from customer demand (0-300)"
+    )
+
+
+class SelectionCalculation(BaseSchema):
+    """
+    Selection Calculation — Shows how final selected_pallets was determined.
+
+    Combines coverage + customer demand, applies minimums and constraints.
+    """
+    # Input sources
+    coverage_suggested_pallets: int = Field(..., description="From CoverageCalculation")
+    customer_suggested_pallets: int = Field(..., description="From CustomerDemandCalculation")
+
+    # Combined (higher of the two)
+    combined_pallets: int = Field(..., description="max(coverage, customer) = base selection")
+    combination_reason: str = Field(
+        ...,
+        description="'coverage_driven', 'customer_driven', or 'equal'"
+    )
+
+    # Minimum container rule
+    minimum_container_applied: bool = Field(default=False, description="Was minimum applied?")
+    minimum_container_pallets: int = Field(default=14, description="1 container = 14 pallets")
+    after_minimum_pallets: int = Field(..., description="After applying minimum (if selected)")
+
+    # SIESA constraint
+    siesa_available_m2: Decimal = Field(..., description="Factory finished goods available")
+    siesa_available_pallets: int = Field(..., description="SIESA in pallets")
+    siesa_limited: bool = Field(default=False, description="Was selection capped by SIESA?")
+
+    # Final selection
+    final_selected_pallets: int = Field(..., description="Final selected_pallets value")
+    final_selected_m2: Decimal = Field(..., description="Final in m²")
+
+    # Human-readable reason
+    selection_reason: str = Field(
+        ...,
+        description="E.g., 'Customer demand (18 expecting) + minimum container rule'"
+    )
+
+    # Constraint notes
+    constraint_notes: list[str] = Field(
+        default_factory=list,
+        description="Any constraints applied: 'Capped at SIESA: 202 m²'"
+    )
+
+
+class FullCalculationBreakdown(BaseSchema):
+    """
+    Complete calculation transparency for a product.
+
+    Shows all three calculation stages:
+    1. Coverage: How much do we need based on velocity?
+    2. Customer: How much do expected customers want?
+    3. Selection: How did we pick the final number?
+    """
+    coverage: CoverageCalculation = Field(..., description="Coverage gap calculation")
+    customer_demand: CustomerDemandCalculation = Field(..., description="Customer demand calculation")
+    selection: SelectionCalculation = Field(..., description="Final selection logic")
+
+    # Summary for quick display
+    summary_sentence: str = Field(
+        ...,
+        description="One-line summary: 'Selected 14p: 0p coverage + 18 customers expecting → min container'"
+    )
+
+
 class OrderBuilderMode(str, Enum):
     """Order builder optimization modes."""
     MINIMAL = "minimal"    # 3 containers - only HIGH_PRIORITY
@@ -473,6 +621,12 @@ class OrderBuilderProduct(BaseSchema):
     availability_breakdown: Optional[AvailabilityBreakdown] = Field(
         None,
         description="Full breakdown of what's available for this boat"
+    )
+
+    # NEW: Full calculation breakdown (transparency layer)
+    full_calculation_breakdown: Optional[FullCalculationBreakdown] = Field(
+        None,
+        description="Complete calculation showing coverage + customer + selection math"
     )
 
 

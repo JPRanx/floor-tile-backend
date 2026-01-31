@@ -69,6 +69,11 @@ from models.order_builder import (
     UnableToShipSummary,
     # Availability breakdown
     AvailabilityBreakdown,
+    # Full calculation breakdown (transparency layer)
+    CoverageCalculation,
+    CustomerDemandCalculation,
+    SelectionCalculation,
+    FullCalculationBreakdown,
 )
 from models.recommendation import RecommendationPriority
 
@@ -663,20 +668,24 @@ class OrderBuilderService:
         suggested_m2 = Decimal(suggested_pallets) * M2_PER_PALLET
 
         # SIESA: Current finished goods at factory
+        # NOTE: SIESA = finished goods = WHERE completed production goes
+        # Completed production IS already in SIESA (or will be very soon)
         siesa_now = factory_available_m2
 
         # Production completing before deadline
-        # Only count if production is in_progress or completed AND ready before deadline
+        # IMPORTANT: Only count IN_PROGRESS production, NOT completed!
+        # Completed production is already in SIESA - adding it would double count
         production_completing = Decimal("0")
 
-        if production_status in ("in_progress", "completed"):
-            # If production is completed or will complete before deadline
+        if production_status == "in_progress":
+            # Only in_progress production that will complete before deadline
             if production_estimated_ready and production_estimated_ready <= order_deadline:
-                # Production will be ready - add completed m² to available
+                # Production will be ready - add to available
                 production_completing = production_completed_m2
-            elif production_status == "completed":
-                # Already completed, use it regardless of date
-                production_completing = production_completed_m2
+        # NOTE: We do NOT add "completed" production here because:
+        # - Completed production moves to SIESA finished goods
+        # - SIESA (factory_available_m2) already includes it
+        # - Adding it again would double count (e.g., SAMAN BEIGE BTE: 3,763 in both)
 
         # Total available
         total_available = siesa_now + production_completing
@@ -700,6 +709,182 @@ class OrderBuilderService:
             shortfall_m2=shortfall,
             can_fulfill=can_fulfill,
             shortfall_note=shortfall_note,
+        )
+
+    def _build_full_calculation_breakdown(
+        self,
+        # Coverage inputs
+        days_to_cover: int,
+        daily_velocity_m2: Decimal,
+        velocity_source: str,
+        trend_direction: str,
+        velocity_change_pct: Decimal,  # Raw velocity change (e.g., -52%)
+        trend_adjustment_pct: Decimal,  # Order adjustment (capped ±20%)
+        warehouse_m2: Decimal,
+        in_transit_m2: Decimal,
+        coverage_gap_pallets: int,
+        # Customer demand inputs
+        customers_expecting_count: int,
+        customer_names: list[str],
+        expected_orders_m2: Decimal,
+        customer_demand_score: int,
+        # Factory constraint
+        factory_available_m2: Decimal,
+        # Final selection
+        final_selected_pallets: int,
+        minimum_applied: bool,
+        selection_constraint_note: Optional[str],
+    ) -> FullCalculationBreakdown:
+        """
+        Build complete calculation breakdown showing all math.
+
+        This provides transparency into how the final selected_pallets was determined.
+        """
+        buffer_days = ORDERING_CYCLE_DAYS
+        target_days = days_to_cover + buffer_days
+
+        # === COVERAGE CALCULATION ===
+        need_for_target = daily_velocity_m2 * Decimal(target_days)
+        trend_adjustment_m2 = need_for_target * (trend_adjustment_pct / Decimal("100"))
+        adjusted_need = need_for_target + trend_adjustment_m2
+
+        coverage_gap_m2 = max(
+            Decimal("0"),
+            adjusted_need - warehouse_m2 - in_transit_m2
+        )
+        coverage_suggested_pallets = math.ceil(float(coverage_gap_m2 / M2_PER_PALLET)) if coverage_gap_m2 > 0 else 0
+        coverage_suggested_m2 = Decimal(coverage_suggested_pallets) * M2_PER_PALLET
+
+        coverage = CoverageCalculation(
+            target_coverage_days=target_days,
+            days_to_warehouse=days_to_cover,
+            buffer_days=buffer_days,
+            velocity_m2_per_day=daily_velocity_m2,
+            velocity_source=velocity_source,
+            need_for_target_m2=round(need_for_target, 2),
+            trend_direction=trend_direction,
+            velocity_change_pct=velocity_change_pct,  # Raw: e.g., -52%
+            trend_adjustment_pct=trend_adjustment_pct,  # Capped: e.g., -20%
+            trend_adjustment_m2=round(trend_adjustment_m2, 2),
+            adjusted_need_m2=round(adjusted_need, 2),
+            warehouse_m2=warehouse_m2,
+            in_transit_m2=in_transit_m2,
+            coverage_gap_m2=round(coverage_gap_m2, 2),
+            coverage_gap_pallets=coverage_gap_pallets,
+            suggested_pallets=coverage_suggested_pallets,
+            suggested_m2=coverage_suggested_m2,
+        )
+
+        # === CUSTOMER DEMAND CALCULATION ===
+        expected_orders_pallets = math.ceil(float(expected_orders_m2 / M2_PER_PALLET)) if expected_orders_m2 > 0 else 0
+        customer_suggested_pallets = expected_orders_pallets
+
+        # Build customer breakdown for detail view
+        customer_breakdown = []
+        for name in customer_names[:5]:  # Limit to top 5
+            customer_breakdown.append({
+                "name": name,
+                "tier": "?",  # Would need more data
+                "days_overdue": 0,  # Would need more data
+            })
+
+        customer_demand = CustomerDemandCalculation(
+            customers_expecting_count=customers_expecting_count,
+            customers_list=customer_names[:5],
+            expected_orders_m2=expected_orders_m2,
+            expected_orders_pallets=expected_orders_pallets,
+            customer_breakdown=customer_breakdown,
+            suggested_pallets=customer_suggested_pallets,
+            customer_demand_score=customer_demand_score,
+        )
+
+        # === SELECTION CALCULATION ===
+        # Combined: higher of coverage or customer demand
+        combined = max(coverage_suggested_pallets, customer_suggested_pallets)
+        if coverage_suggested_pallets > customer_suggested_pallets:
+            combination_reason = "coverage_driven"
+        elif customer_suggested_pallets > coverage_suggested_pallets:
+            combination_reason = "customer_driven"
+        else:
+            combination_reason = "equal"
+
+        # Minimum container rule (1 container = 14 pallets)
+        minimum_container_pallets = PALLETS_PER_CONTAINER
+        after_minimum = combined
+        if combined > 0 and combined < minimum_container_pallets and minimum_applied:
+            after_minimum = minimum_container_pallets
+
+        # SIESA constraint
+        siesa_available_pallets = math.floor(float(factory_available_m2 / M2_PER_PALLET))
+        siesa_limited = False
+        final_pallets = after_minimum
+
+        if after_minimum > siesa_available_pallets and siesa_available_pallets > 0:
+            siesa_limited = True
+            final_pallets = siesa_available_pallets
+
+        final_m2 = Decimal(final_pallets) * M2_PER_PALLET
+
+        # Build selection reason
+        reason_parts = []
+        if combination_reason == "customer_driven" and customers_expecting_count > 0:
+            reason_parts.append(f"{customers_expecting_count} customers expecting")
+        elif combination_reason == "coverage_driven":
+            reason_parts.append(f"Coverage gap ({coverage_suggested_pallets}p)")
+        else:
+            reason_parts.append(f"Combined need")
+
+        if minimum_applied and combined < minimum_container_pallets:
+            reason_parts.append("min container rule")
+        if siesa_limited:
+            reason_parts.append(f"capped at SIESA ({siesa_available_pallets}p)")
+
+        selection_reason = " + ".join(reason_parts) if reason_parts else "Standard calculation"
+
+        # Constraint notes
+        constraint_notes = []
+        if selection_constraint_note:
+            constraint_notes.append(selection_constraint_note)
+        if siesa_limited:
+            constraint_notes.append(f"Limited by SIESA stock: {int(factory_available_m2):,} m²")
+        if minimum_applied and combined < minimum_container_pallets:
+            constraint_notes.append(f"Minimum 1 container ({minimum_container_pallets}p) applied")
+
+        selection = SelectionCalculation(
+            coverage_suggested_pallets=coverage_suggested_pallets,
+            customer_suggested_pallets=customer_suggested_pallets,
+            combined_pallets=combined,
+            combination_reason=combination_reason,
+            minimum_container_applied=minimum_applied and combined < minimum_container_pallets,
+            minimum_container_pallets=minimum_container_pallets,
+            after_minimum_pallets=after_minimum,
+            siesa_available_m2=factory_available_m2,
+            siesa_available_pallets=siesa_available_pallets,
+            siesa_limited=siesa_limited,
+            final_selected_pallets=final_selected_pallets,
+            final_selected_m2=Decimal(final_selected_pallets) * M2_PER_PALLET,
+            selection_reason=selection_reason,
+            constraint_notes=constraint_notes,
+        )
+
+        # === SUMMARY SENTENCE ===
+        if coverage_suggested_pallets == 0 and customers_expecting_count > 0:
+            summary = f"Selected {final_selected_pallets}p: 0p coverage + {customers_expecting_count} customers expecting"
+            if minimum_applied:
+                summary += " → min container"
+        elif customers_expecting_count == 0 and coverage_suggested_pallets > 0:
+            summary = f"Selected {final_selected_pallets}p: {coverage_suggested_pallets}p coverage gap"
+        else:
+            summary = f"Selected {final_selected_pallets}p: {coverage_suggested_pallets}p coverage + {customers_expecting_count} customers"
+
+        if siesa_limited:
+            summary += f" (capped at SIESA)"
+
+        return FullCalculationBreakdown(
+            coverage=coverage,
+            customer_demand=customer_demand,
+            selection=selection,
+            summary_sentence=summary,
         )
 
     # ===================
@@ -1183,6 +1368,35 @@ class OrderBuilderService:
                     suggested_pallets=suggested,
                 )
 
+            # Build full calculation breakdown (transparency layer)
+            # This shows: Coverage → Customer Demand → Selection logic
+            # NOTE: minimum_applied=False because minimum container rule only applies
+            # to Factory Request section, NOT to Warehouse Order
+            full_calculation_breakdown = self._build_full_calculation_breakdown(
+                # Coverage inputs
+                days_to_cover=days_to_cover,
+                daily_velocity_m2=daily_velocity_m2,
+                velocity_source="90d" if velocity_90d_m2 > 0 else "180d",
+                trend_direction=direction,
+                velocity_change_pct=velocity_change_pct,  # Raw: e.g., -52%
+                trend_adjustment_pct=trend_adjustment_pct,  # Capped: e.g., -20%
+                warehouse_m2=minus_current,
+                in_transit_m2=minus_incoming,
+                coverage_gap_pallets=coverage_gap_pallets,
+                # Customer demand inputs
+                customers_expecting_count=customers_expecting_count,
+                customer_names=demand_info.get("customer_names", []),
+                expected_orders_m2=expected_customer_orders_m2,
+                customer_demand_score=customer_demand_score,
+                # Factory constraint
+                factory_available_m2=factory_available_m2,
+                # Final selection (will be updated later in _apply_selection)
+                final_selected_pallets=suggested,
+                # IMPORTANT: Minimum container only applies to Factory Request, not Warehouse Order
+                minimum_applied=False,
+                selection_constraint_note=None,
+            )
+
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
@@ -1248,6 +1462,8 @@ class OrderBuilderService:
                 selected_pallets=0,
                 # Availability breakdown (what's available for this boat)
                 availability_breakdown=availability_breakdown,
+                # Full calculation breakdown (transparency layer)
+                full_calculation_breakdown=full_calculation_breakdown,
             )
 
             # Calculate priority score and display reasoning (Layer 2 & 4)
@@ -1534,17 +1750,18 @@ class OrderBuilderService:
                 continue
 
             remaining = max_pallets - total_selected
-            if remaining > 0:
-                # Add partial to help fill containers (use suggestion if available)
-                # But cap at what factory can actually ship
-                pallets_to_add = min(PALLETS_PER_CONTAINER, remaining, p.suggested_pallets or PALLETS_PER_CONTAINER, max_shippable)
+            if remaining > 0 and p.suggested_pallets > 0:
+                # Add partial to help fill containers - only if product is actually needed
+                # Cap at what factory can actually ship
+                pallets_to_add = min(p.suggested_pallets, remaining, max_shippable)
                 if pallets_to_add > 0:
                     p.is_selected = True
                     p.selected_pallets = pallets_to_add
                     total_selected += pallets_to_add
-                    if pallets_to_add < (p.suggested_pallets or PALLETS_PER_CONTAINER):
-                        if max_shippable < (p.suggested_pallets or PALLETS_PER_CONTAINER):
+                    if pallets_to_add < p.suggested_pallets:
+                        if max_shippable < p.suggested_pallets:
                             p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
+            # If suggested_pallets=0, product is overstocked - don't auto-select
             all_products.append(p)
 
         # YOUR_CALL products - never auto-select
