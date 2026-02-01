@@ -259,40 +259,45 @@ class ProductionScheduleService:
             today = date.today()
             end_date = today + timedelta(days=days_ahead)
 
+            # Use scheduled_start_date (actual DB column) instead of production_date
             query = (
                 self.db.table(self.table)
                 .select("*, products(sku)")
-                .gte("production_date", today.isoformat())
-                .lte("production_date", end_date.isoformat())
-                .order("production_date")
+                .gte("scheduled_start_date", today.isoformat())
+                .lte("scheduled_start_date", end_date.isoformat())
+                .order("scheduled_start_date")
             )
 
             if product_id:
                 query = query.eq("product_id", product_id)
             if factory_code:
-                query = query.eq("factory_code", factory_code)
+                query = query.eq("factory_item_code", factory_code)
 
             result = query.execute()
 
             items = []
             for row in result.data:
                 # Calculate days until production
-                prod_date = date.fromisoformat(row["production_date"])
+                # Use scheduled_start_date as the production date
+                prod_date_str = row.get("scheduled_start_date") or row.get("production_date")
+                if not prod_date_str:
+                    continue
+                prod_date = date.fromisoformat(prod_date_str) if isinstance(prod_date_str, str) else prod_date_str
                 days_until = (prod_date - today).days
 
-                # Get SKU from joined products table
-                sku = None
-                if row.get("products"):
+                # Get SKU from joined products table or direct field
+                sku = row.get("sku")
+                if not sku and row.get("products"):
                     sku = row["products"].get("sku")
 
                 items.append(UpcomingProductionItem(
                     production_date=prod_date,
-                    factory_code=row["factory_code"],
-                    product_name=row.get("product_name"),
+                    factory_code=row.get("factory_item_code") or row.get("factory_code"),
+                    product_name=row.get("referencia") or row.get("product_name"),
                     product_id=row.get("product_id"),
                     sku=sku,
-                    plant=row["plant"],
-                    m2_export_first=Decimal(str(row["m2_export_first"])) if row.get("m2_export_first") else None,
+                    plant=row.get("plant", 1),
+                    m2_export_first=Decimal(str(row.get("requested_m2") or row.get("m2_export_first") or 0)),
                     days_until_production=days_until
                 ))
 
@@ -300,7 +305,8 @@ class ProductionScheduleService:
 
         except Exception as e:
             logger.error("get_upcoming_production_failed", error=str(e))
-            raise DatabaseError("select", str(e))
+            # Return empty list instead of raising to avoid breaking Order Builder
+            return []
 
     def get_production_for_product(
         self,
@@ -677,12 +683,13 @@ class ProductionScheduleService:
 
         try:
             # Get upcoming production for these products
+            # Use actual DB column names: scheduled_start_date, requested_m2
             result = (
                 self.db.table(self.table)
-                .select("product_id, production_date, m2_total_net, products(sku)")
+                .select("product_id, sku, scheduled_start_date, requested_m2, status, products(sku)")
                 .in_("product_id", product_ids)
-                .gte("production_date", today.isoformat())
-                .order("production_date")
+                .gte("scheduled_start_date", today.isoformat())
+                .order("scheduled_start_date")
                 .execute()
             )
 
@@ -699,18 +706,31 @@ class ProductionScheduleService:
                 prod = production_by_product.get(pid)
 
                 if prod:
-                    prod_date = date.fromisoformat(prod["production_date"])
-                    days_until = (prod_date - today).days
-                    ready_before_boat = prod_date <= cutoff_date
-                    m2 = Decimal(str(prod.get("m2_total_net") or 0))
-                    sku = prod.get("products", {}).get("sku", "") if prod.get("products") else ""
+                    # Use scheduled_start_date as production_date
+                    prod_date_str = prod.get("scheduled_start_date")
+                    if prod_date_str:
+                        prod_date = date.fromisoformat(prod_date_str) if isinstance(prod_date_str, str) else prod_date_str
+                        days_until = (prod_date - today).days
+                        ready_before_boat = prod_date <= cutoff_date
+                    else:
+                        prod_date = None
+                        days_until = None
+                        ready_before_boat = False
+
+                    m2 = Decimal(str(prod.get("requested_m2") or prod.get("m2_total_net") or 0))
+                    sku = prod.get("sku") or ""
+                    if not sku and prod.get("products"):
+                        sku = prod["products"].get("sku", "")
 
                     # Build timing message
-                    if ready_before_boat:
-                        timing_msg = f"Ready {prod_date.strftime('%b %d')} - in time"
+                    if prod_date:
+                        if ready_before_boat:
+                            timing_msg = f"Ready {prod_date.strftime('%b %d')} - in time"
+                        else:
+                            days_late = (prod_date - cutoff_date).days
+                            timing_msg = f"Ready {prod_date.strftime('%b %d')} - {days_late}d after deadline"
                     else:
-                        days_late = (prod_date - cutoff_date).days
-                        timing_msg = f"Ready {prod_date.strftime('%b %d')} - {days_late}d after deadline"
+                        timing_msg = "Production scheduled"
 
                     status_map[pid] = ProductFactoryStatus(
                         product_id=pid,
