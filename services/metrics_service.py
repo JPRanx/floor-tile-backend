@@ -70,10 +70,11 @@ class MetricsService:
         # === 1. FETCH ALL DATA IN BATCH ===
 
         # Products (tiles only - excludes FURNITURE, SINK, SURCHARGE)
+        # Include inactive products - we'll filter later based on inventory
         tile_categories = [cat.value for cat in TILE_CATEGORIES]
         products_result = self.db.table("products").select(
-            "id, sku, category"
-        ).eq("active", True).in_("category", tile_categories).execute()
+            "id, sku, category, active"
+        ).in_("category", tile_categories).execute()
         products_by_id = {p["id"]: p for p in products_result.data}
 
         # Inventory (from canonical source: inventory_snapshots)
@@ -123,10 +124,17 @@ class MetricsService:
                 previous_sales[pid] += qty
 
         # === 2. CALCULATE METRICS FOR EACH PRODUCT ===
+        # Include: active products OR inactive products with warehouse inventory
 
         results = []
         for pid, product in products_by_id.items():
             inv = inventory_by_product.get(pid, {})
+            is_active = product.get("active", True)
+            warehouse_qty = Decimal(str(inv.get("warehouse_qty") or 0))
+
+            # Skip inactive products with no warehouse inventory
+            if not is_active and warehouse_qty <= 0:
+                continue
 
             warehouse_m2 = Decimal(str(inv.get("warehouse_qty") or 0))
             in_transit_m2 = Decimal(str(inv.get("in_transit_qty") or 0))
@@ -198,6 +206,7 @@ class MetricsService:
                 product_id=pid,
                 sku=product.get("sku", ""),
                 category=product.get("category"),
+                active=is_active,
                 coverage=coverage,
                 velocity_change_pct=velocity_change_pct,
                 trend_direction=direction,

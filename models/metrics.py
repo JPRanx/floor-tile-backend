@@ -52,6 +52,7 @@ class ProductMetrics(BaseModel):
     product_id: str
     sku: str
     category: Optional[str] = None
+    active: bool = Field(default=True, description="Whether product is active in catalog")
 
     # Stock coverage (the main data)
     coverage: StockCoverage

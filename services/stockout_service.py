@@ -41,6 +41,7 @@ class ProductStockout(BaseSchema):
     sku: str
     category: Optional[str] = None
     rotation: Optional[str] = None
+    active: bool = True  # Whether product is active in catalog
 
     # Inventory
     warehouse_qty: Decimal
@@ -202,6 +203,7 @@ class StockoutService:
                 sku=metrics.sku,
                 category=metrics.category,
                 rotation=None,  # Not in metrics, keep for backwards compatibility
+                active=metrics.active,
                 warehouse_qty=coverage.warehouse_m2,
                 in_transit_qty=coverage.in_transit_m2,
                 total_qty=coverage.warehouse_m2 + coverage.in_transit_m2,
