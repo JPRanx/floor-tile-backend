@@ -569,3 +569,132 @@ class TestSingleton:
         service2 = get_order_builder_service()
 
         assert service1 is service2
+
+
+# ===================
+# SEASONAL DAMPENING TESTS
+# ===================
+
+class TestSeasonalDampening:
+    """Tests for seasonal trend dampening.
+
+    The dampening formula is: dampened = 1.0 + (raw - 1.0) * factor
+    This pulls the trend ratio toward 1.0 (neutral).
+
+    Example: raw_ratio=1.6 (+60%), factor=0.5
+    dampened = 1.0 + (1.6 - 1.0) * 0.5 = 1.0 + 0.3 = 1.3 (+30%)
+    """
+
+    def test_dampening_formula_february_strong_growth(self):
+        """February (factor 0.5): Strong growth +600% dampens to +300%."""
+        from config.shipping import SEASONAL_DAMPENING
+
+        raw_ratio = Decimal("7.0")  # +600%
+        factor = SEASONAL_DAMPENING[2]  # February = 0.5
+
+        # Apply formula: dampened = 1.0 + (raw - 1.0) * factor
+        dampened = Decimal("1.0") + (raw_ratio - Decimal("1.0")) * Decimal(str(factor))
+
+        # 1.0 + (7.0 - 1.0) * 0.5 = 1.0 + 3.0 = 4.0 (+300%)
+        assert dampened == Decimal("4.0")
+        # Still above 1.20 threshold, so still "growing"
+        assert dampened >= Decimal("1.20")
+
+    def test_dampening_formula_february_moderate_growth(self):
+        """February (factor 0.5): Moderate growth +30% dampens to +15% (stable)."""
+        from config.shipping import SEASONAL_DAMPENING
+
+        raw_ratio = Decimal("1.30")  # +30%
+        factor = SEASONAL_DAMPENING[2]  # February = 0.5
+
+        dampened = Decimal("1.0") + (raw_ratio - Decimal("1.0")) * Decimal(str(factor))
+
+        # 1.0 + (1.3 - 1.0) * 0.5 = 1.0 + 0.15 = 1.15 (+15%)
+        assert dampened == Decimal("1.15")
+        # Below 1.20 threshold, so becomes "stable" (was "growing")
+        assert dampened < Decimal("1.20")
+        assert dampened > Decimal("0.80")
+
+    def test_dampening_formula_august_moderate_decline(self):
+        """August (factor 0.75): Moderate decline -40% dampens to -30%."""
+        from config.shipping import SEASONAL_DAMPENING
+
+        raw_ratio = Decimal("0.60")  # -40%
+        factor = SEASONAL_DAMPENING[8]  # August = 0.75
+
+        dampened = Decimal("1.0") + (raw_ratio - Decimal("1.0")) * Decimal(str(factor))
+
+        # 1.0 + (0.6 - 1.0) * 0.75 = 1.0 + (-0.4 * 0.75) = 1.0 - 0.3 = 0.7 (-30%)
+        assert dampened == Decimal("0.70")
+        # Still below 0.80 threshold, so still "declining"
+        assert dampened <= Decimal("0.80")
+
+    def test_dampening_formula_august_weak_decline(self):
+        """August (factor 0.75): Weak decline -15% dampens to -11% (stable)."""
+        from config.shipping import SEASONAL_DAMPENING
+
+        raw_ratio = Decimal("0.85")  # -15%
+        factor = SEASONAL_DAMPENING[8]  # August = 0.75
+
+        dampened = Decimal("1.0") + (raw_ratio - Decimal("1.0")) * Decimal(str(factor))
+
+        # 1.0 + (0.85 - 1.0) * 0.75 = 1.0 + (-0.15 * 0.75) = 1.0 - 0.1125 = 0.8875 (-11.25%)
+        assert dampened == Decimal("0.8875")
+        # Above 0.80 threshold, so becomes "stable" (was "declining")
+        assert dampened > Decimal("0.80")
+
+    def test_factor_of_one_produces_identical_result(self):
+        """Factor of 1.0 should produce identical result (no dampening)."""
+        raw_ratio = Decimal("1.50")  # +50%
+        factor = 1.0  # No dampening
+
+        dampened = Decimal("1.0") + (raw_ratio - Decimal("1.0")) * Decimal(str(factor))
+
+        # 1.0 + (1.5 - 1.0) * 1.0 = 1.5
+        assert dampened == raw_ratio
+
+    def test_all_months_have_dampening_factors(self):
+        """All 12 months should have dampening factors defined."""
+        from config.shipping import SEASONAL_DAMPENING
+
+        for month in range(1, 13):
+            assert month in SEASONAL_DAMPENING, f"Month {month} missing from SEASONAL_DAMPENING"
+            factor = SEASONAL_DAMPENING[month]
+            assert 0 < factor <= 1.0, f"Month {month} factor {factor} out of range (0, 1.0]"
+
+    def test_peak_months_have_stronger_dampening(self):
+        """Peak seasonal months (Jan, Feb, Mar, Nov, Dec) should have factor 0.5."""
+        from config.shipping import SEASONAL_DAMPENING
+
+        peak_months = [1, 2, 3, 11, 12]
+        for month in peak_months:
+            assert SEASONAL_DAMPENING[month] == 0.5, f"Month {month} should be 0.5"
+
+    def test_transition_months_have_moderate_dampening(self):
+        """Transition months (Apr-Oct) should have factor 0.75."""
+        from config.shipping import SEASONAL_DAMPENING
+
+        transition_months = [4, 5, 6, 7, 8, 9, 10]
+        for month in transition_months:
+            assert SEASONAL_DAMPENING[month] == 0.75, f"Month {month} should be 0.75"
+
+    def test_dampening_preserves_neutral_ratio(self):
+        """Ratio of exactly 1.0 should stay 1.0 regardless of factor."""
+        raw_ratio = Decimal("1.0")  # Exactly neutral
+
+        for factor in [0.5, 0.75, 1.0]:
+            dampened = Decimal("1.0") + (raw_ratio - Decimal("1.0")) * Decimal(str(factor))
+            assert dampened == Decimal("1.0"), f"Factor {factor} changed neutral ratio"
+
+    def test_dampening_edge_case_exact_threshold(self):
+        """Test behavior at exact threshold boundaries."""
+        # Raw ratio exactly at growing threshold
+        raw_ratio = Decimal("1.20")  # Exactly +20%
+        factor = 0.5  # February
+
+        dampened = Decimal("1.0") + (raw_ratio - Decimal("1.0")) * Decimal(str(factor))
+
+        # 1.0 + (1.2 - 1.0) * 0.5 = 1.0 + 0.1 = 1.1 (+10%)
+        assert dampened == Decimal("1.10")
+        # Dampened below threshold, so "stable" instead of "growing"
+        assert dampened < Decimal("1.20")

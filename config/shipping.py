@@ -85,6 +85,42 @@ LIQUIDATION_NO_SALES_DAYS = LIQUIDATION_THRESHOLDS["no_sales"]["days_since_last_
 LIQUIDATION_EXTREME_DAYS_MIN = LIQUIDATION_THRESHOLDS["extreme_overstock"]["days_of_stock_min"]
 
 
+# =============================================================================
+# SEASONAL TREND DAMPENING
+# =============================================================================
+# Central America Seasonal Dampening (GT, SV, HN unified pattern)
+# Reduces trend signal strength during seasonal peaks/troughs to prevent
+# false growth/decline signals from window comparisons.
+#
+# Problem: The system compares 90-day velocity vs 180-day velocity.
+# - DRY SEASON (Nov-Apr): Peak construction. 90d window captures peak,
+#   180d includes slow months → false "growth" signal
+# - WET SEASON (May-Oct): Slow construction. 90d window captures slow,
+#   180d includes peak → false "decline" signal
+#
+# Solution: Dampen the trend ratio toward 1.0 (neutral) during distortion periods.
+# Formula: dampened = 1.0 + (raw_ratio - 1.0) * factor
+#
+# Factor of 0.5 means: a +60% raw signal becomes +30% dampened
+# Factor of 0.75 means: a +60% raw signal becomes +45% dampened
+# Factor of 1.0 means: no dampening (pass-through)
+
+SEASONAL_DAMPENING = {
+    1: 0.5,    # January - peak dry season
+    2: 0.5,    # February - peak dry season
+    3: 0.5,    # March - peak dry season
+    4: 0.75,   # April - transitioning to wet
+    5: 0.75,   # May - wet season starts
+    6: 0.75,   # June - wet season
+    7: 0.75,   # July - wet season
+    8: 0.75,   # August - wet season
+    9: 0.75,   # September - peak wet season
+    10: 0.75,  # October - transitioning to dry
+    11: 0.5,   # November - dry season starts
+    12: 0.5,   # December - peak dry season
+}
+
+
 def get_container_weight_limit(db_value: Optional[Decimal] = None) -> float:
     """
     Get container weight limit from database or use default.

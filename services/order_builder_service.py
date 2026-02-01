@@ -26,6 +26,7 @@ from config.shipping import (
     LIQUIDATION_DECLINING_DAYS_MIN,
     LIQUIDATION_NO_SALES_DAYS,
     LIQUIDATION_EXTREME_DAYS_MIN,
+    SEASONAL_DAMPENING,
 )
 from services.boat_schedule_service import get_boat_schedule_service
 from services.recommendation_service import get_recommendation_service
@@ -418,22 +419,56 @@ class OrderBuilderService:
             GROWING_THRESHOLD = Decimal("1.20")   # 90d > 180d by 20%+
             DECLINING_THRESHOLD = Decimal("0.80") # 90d < 180d by 20%+
 
+            # Get seasonal dampening factor for current month
+            current_month = date.today().month
+            seasonal_factor = SEASONAL_DAMPENING.get(current_month, 1.0)
+
             result = {}
             for t in trends_90d:
                 velocity_90d = t.current_velocity_m2_day
                 velocity_180d = velocity_180d_by_sku.get(t.sku, Decimal("0"))
 
-                # Calculate trend signal
+                # Calculate trend signal with seasonal dampening
                 if velocity_180d > 0:
-                    trend_ratio = velocity_90d / velocity_180d
+                    trend_ratio_raw = velocity_90d / velocity_180d
+
+                    # Apply seasonal dampening: pull ratio toward 1.0 (neutral)
+                    # Formula: dampened = 1.0 + (raw - 1.0) * factor
+                    # Factor of 0.5 means: +60% raw becomes +30% dampened
+                    trend_ratio = Decimal("1.0") + (trend_ratio_raw - Decimal("1.0")) * Decimal(str(seasonal_factor))
+
+                    # Determine signal from dampened ratio
                     if trend_ratio >= GROWING_THRESHOLD:
                         trend_signal = "growing"
                     elif trend_ratio <= DECLINING_THRESHOLD:
                         trend_signal = "declining"
                     else:
                         trend_signal = "stable"
+
+                    # Log when dampening changes the outcome (DEBUG level)
+                    if seasonal_factor < 1.0:
+                        # What would signal have been without dampening?
+                        if trend_ratio_raw >= GROWING_THRESHOLD:
+                            raw_signal = "growing"
+                        elif trend_ratio_raw <= DECLINING_THRESHOLD:
+                            raw_signal = "declining"
+                        else:
+                            raw_signal = "stable"
+
+                        if raw_signal != trend_signal:
+                            logger.debug(
+                                "seasonal_dampening_applied",
+                                sku=t.sku,
+                                month=current_month,
+                                raw_ratio=float(trend_ratio_raw),
+                                dampened_ratio=float(trend_ratio),
+                                raw_signal=raw_signal,
+                                dampened_signal=trend_signal,
+                                seasonal_factor=seasonal_factor,
+                            )
                 else:
-                    # No 180d data - use 90d direction
+                    # No 180d data - use 90d direction (no dampening possible)
+                    trend_ratio_raw = Decimal("1.0")
                     trend_ratio = Decimal("1.0")
                     if velocity_90d > 0:
                         trend_signal = "growing"  # New activity
@@ -452,6 +487,7 @@ class OrderBuilderService:
                     "velocity_180d_m2": velocity_180d,
                     "velocity_trend_signal": trend_signal,
                     "velocity_trend_ratio": round(trend_ratio, 2) if velocity_180d > 0 else Decimal("1.0"),
+                    "velocity_trend_ratio_raw": round(trend_ratio_raw, 2) if velocity_180d > 0 else Decimal("1.0"),
                 }
 
             return result
