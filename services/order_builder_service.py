@@ -2671,42 +2671,12 @@ class OrderBuilderService:
                 total_available = warehouse_m2 + in_transit_m2 + factory_available_m2 + in_production_m2
                 gap_m2 = suggested_m2 - total_available
 
-                # If gap <= 0, product is well-stocked - still show but mark as no request needed
                 if gap_m2 <= 0:
-                    factory_request_items.append(FactoryRequestItem(
-                        product_id=p.product_id,
-                        sku=p.sku,
-                        description=p.description,
-                        warehouse_m2=warehouse_m2,
-                        in_transit_m2=in_transit_m2,
-                        factory_available_m2=factory_available_m2,
-                        in_production_m2=in_production_m2,
-                        suggested_m2=Decimal("0"),
-                        gap_m2=Decimal("0"),
-                        gap_pallets=0,
-                        request_m2=Decimal("0"),
-                        request_pallets=0,
-                        estimated_ready="",
-                        avg_production_days=avg_production_days,
-                        velocity_m2_day=velocity_m2_day,
-                        buffer_days_applied=0,
-                        buffer_note="",
-                        days_to_consume_container=None,
-                        is_low_volume=False,
-                        low_volume_reason=None,
-                        should_request=False,
-                        skip_reason="Well stocked - no production needed",
-                        urgency=p.urgency,
-                        score=score,
-                        is_selected=False,
-                        minimum_applied=False,
-                        minimum_note=None,
-                    ))
                     continue
 
                 gap_pallets = int(gap_m2 / M2_PER_PALLET)
                 if gap_pallets <= 0:
-                    gap_pallets = 1  # Ensure at least 1 pallet if there's any gap
+                    continue
 
                 # Apply minimum with low-volume check
                 request_pallets, request_m2, minimum_applied, minimum_note, is_low_volume, low_volume_reason, should_request, skip_reason, days_to_consume = self._apply_container_minimum(
@@ -2762,54 +2732,9 @@ class OrderBuilderService:
             # Project stock at arrival
             projected_stock = warehouse_m2 + pipeline_m2 - consumption_until_arrival
 
-            # If projected stock >= 0, pipeline covers demand - still show but mark as no request needed
+            # If projected stock >= 0, pipeline covers demand
             if projected_stock >= 0:
-                # Calculate buffer transparency for display
-                buffer_days = settings.production_buffer_days
-                safe_ready = estimated_ready_date_global + timedelta(days=buffer_days)
-                days_of_stock = int(projected_stock / velocity_m2_day) if velocity_m2_day > 0 else 999
-
-                factory_request_items.append(FactoryRequestItem(
-                    product_id=p.product_id,
-                    sku=p.sku,
-                    description=p.description,
-                    warehouse_m2=warehouse_m2,
-                    in_transit_m2=in_transit_m2,
-                    factory_available_m2=factory_available_m2,
-                    in_production_m2=in_production_m2,
-                    suggested_m2=Decimal("0"),
-                    gap_m2=Decimal("0"),
-                    gap_pallets=0,
-                    request_m2=Decimal("0"),
-                    request_pallets=0,
-                    estimated_ready="",
-                    avg_production_days=avg_production_days,
-                    estimated_ready_date=None,
-                    target_boat=target_boat.vessel_name,
-                    target_boat_departure=target_boat.departure_date,
-                    target_boat_order_deadline=target_boat.order_deadline,
-                    arrival_date=arrival_date,
-                    days_until_arrival=days_until_arrival,
-                    buffer_days_applied=0,
-                    safe_ready_date=None,
-                    buffer_note=f"Projected {projected_stock:.0f} m² at arrival ({days_of_stock} days stock)",
-                    velocity_m2_day=velocity_m2_day,
-                    consumption_until_arrival_m2=consumption_until_arrival,
-                    pipeline_m2=pipeline_m2,
-                    projected_stock_at_arrival_m2=projected_stock,
-                    calculated_need_m2=Decimal("0"),
-                    days_to_consume_container=None,
-                    is_low_volume=False,
-                    low_volume_reason=None,
-                    should_request=False,
-                    skip_reason="Well stocked - pipeline covers demand",
-                    urgency=p.urgency,
-                    score=score,
-                    is_selected=False,
-                    minimum_applied=False,
-                    minimum_note=None,
-                ))
-                continue
+                continue  # No request needed
 
             # Will stockout — calculate need
             future_gap = abs(projected_stock)
