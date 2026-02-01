@@ -1012,6 +1012,19 @@ class OrderBuilderResponse(BaseSchema):
         description="Explanation showing need vs available, e.g. 'Need: 3 BLs (12,000 m²) • Available: 2 BLs (8,000 m²)'"
     )
 
+    # Shippable BLs (what can actually be shipped to fill gaps)
+    # shippable = min(coverage_gap, factory_available) for products with both > 0
+    shippable_bls: int = Field(
+        default=0,
+        ge=0,
+        le=5,
+        description="BLs that can ship to fill coverage gaps (min of need and available per product)"
+    )
+    shippable_m2: Decimal = Field(
+        default=Decimal("0"),
+        description="Total m² that can ship to fill gaps (sum of min(gap, available) per product)"
+    )
+
     # Products grouped by priority (existing)
     high_priority: list[OrderBuilderProduct] = Field(default_factory=list)
     consider: list[OrderBuilderProduct] = Field(default_factory=list)

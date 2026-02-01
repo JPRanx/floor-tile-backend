@@ -264,6 +264,9 @@ class OrderBuilderService:
         # Step 9: Calculate recommended BL count (based on true need) and available BLs
         recommended_bls, available_bls, recommended_bls_reason = self._calculate_recommended_bls(all_products)
 
+        # Step 9b: Calculate shippable BLs (what can actually fill gaps)
+        shippable_bls, shippable_m2 = self._calculate_shippable_bls(all_products)
+
         # Step 10: Calculate "Unable to Ship" alerts
         unable_to_ship = self._calculate_unable_to_ship_alerts(all_products, boat.order_deadline)
 
@@ -282,6 +285,8 @@ class OrderBuilderService:
             recommended_bls=recommended_bls,
             available_bls=available_bls,
             recommended_bls_reason=recommended_bls_reason,
+            shippable_bls=shippable_bls,
+            shippable_m2=shippable_m2,
             high_priority=high_priority,
             consider=consider,
             well_covered=well_covered,
@@ -2029,6 +2034,40 @@ class OrderBuilderService:
             reason = f"Need: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Available: {available_bls} BLs ({total_factory_available_m2:,.0f} m²)"
 
         return recommended_bls, available_bls, reason
+
+    def _calculate_shippable_bls(
+        self,
+        products: list[OrderBuilderProduct]
+    ) -> tuple[int, Decimal]:
+        """
+        Calculate BLs based on what's actually shippable from SIESA.
+
+        Shippable = min(coverage_gap, factory_available) for each product
+        This represents the overlap - what can actually be shipped to fill gaps.
+
+        Returns:
+            tuple[int, Decimal]: (shippable_bls, shippable_m2)
+        """
+        total_shippable_m2 = Decimal("0")
+
+        for p in products:
+            gap = Decimal(str(p.coverage_gap_m2 or 0))
+            available = Decimal(str(p.factory_available_m2 or 0))
+
+            # Only count if both gap and available are positive
+            if gap > 0 and available > 0:
+                shippable = min(gap, available)
+                total_shippable_m2 += shippable
+
+        # Convert to BLs
+        if total_shippable_m2 > 0:
+            ship_pallets = math.ceil(float(total_shippable_m2) / float(M2_PER_PALLET))
+            ship_containers = math.ceil(ship_pallets / PALLETS_PER_CONTAINER)
+            shippable_bls = max(1, min(5, math.ceil(ship_containers / MAX_CONTAINERS_PER_BL)))
+        else:
+            shippable_bls = 0
+
+        return shippable_bls, total_shippable_m2
 
     def _generate_alerts(
         self,
