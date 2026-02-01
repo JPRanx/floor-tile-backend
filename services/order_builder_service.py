@@ -1210,6 +1210,20 @@ class OrderBuilderService:
             coverage_gap_pallets = max(0, rec.coverage_gap_pallets or 0)
             suggested = final_suggestion_pallets if daily_velocity_m2 > 0 else coverage_gap_pallets
 
+            # Recalculate priority based on suggested_pallets (considering full pipeline)
+            # This ensures consistency: if pipeline covers demand, product shouldn't be HIGH_PRIORITY
+            # The stockout_service uses warehouse-only, but Order Builder considers full pipeline
+            original_priority = rec.priority.value
+            if suggested == 0:
+                # Pipeline covers demand → WELL_COVERED (no action needed)
+                effective_priority = "WELL_COVERED"
+            elif suggested <= 5 and original_priority == "HIGH_PRIORITY":
+                # Small gap (1-5 pallets) with HIGH_PRIORITY → downgrade to CONSIDER
+                effective_priority = "CONSIDER"
+            else:
+                # Keep original priority for significant gaps
+                effective_priority = original_priority
+
             # Determine primary factor for reasoning
             primary_factor = self._determine_primary_factor(
                 days_of_stock=days_of_stock,
@@ -1419,7 +1433,7 @@ class OrderBuilderService:
                 product_id=rec.product_id,
                 sku=rec.sku,
                 description=None,
-                priority=rec.priority.value,
+                priority=effective_priority,
                 action_type=rec.action_type.value,
                 current_stock_m2=rec.warehouse_m2,
                 in_transit_m2=rec.in_transit_m2,
