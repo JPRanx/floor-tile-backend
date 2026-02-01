@@ -257,6 +257,15 @@ class OrderBuilderService:
         well_covered = [p for p in all_products if p.priority == "WELL_COVERED"]
         your_call = [p for p in all_products if p.priority == "YOUR_CALL"]
 
+        # Sort each tier: selected first (alphabetically), then non-selected (alphabetically)
+        def sort_by_selection_then_sku(products: list) -> list:
+            return sorted(products, key=lambda p: (0 if p.is_selected else 1, p.sku.upper()))
+
+        high_priority = sort_by_selection_then_sku(high_priority)
+        consider = sort_by_selection_then_sku(consider)
+        well_covered = sort_by_selection_then_sku(well_covered)
+        your_call = sort_by_selection_then_sku(your_call)
+
         # Step 8: Calculate three-section summaries
         warehouse_summary, add_to_production_summary, factory_request_summary = \
             self._calculate_section_summaries(all_products, boat, num_bls)
