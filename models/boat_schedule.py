@@ -29,7 +29,13 @@ class RouteType(str, Enum):
 # Constants
 # Order deadline: 20 days before departure to finalize order
 # (allows time for factory confirmation, logistics, etc.)
+# This is the SOFT deadline - displayed to users as "Order by: [date]"
 ORDER_DEADLINE_DAYS = 20
+
+# Hard deadline: 10 days before departure - boat visibility cutoff
+# After this point, boat is hidden from Order Builder and next boat is shown
+# Provides 10-day grace period after order deadline for late orders
+HARD_DEADLINE_DAYS = 10
 
 # Booking buffer: 3 days before departure for final booking
 BOOKING_BUFFER_DAYS = 3  # Days before departure to book
@@ -104,7 +110,7 @@ class BoatScheduleCreate(BaseSchema):
 
     @property
     def order_deadline(self) -> date:
-        """Calculate order deadline (departure - 30 days)."""
+        """Calculate order deadline (departure - 20 days)."""
         return self.departure_date - timedelta(days=ORDER_DEADLINE_DAYS)
 
     @property
@@ -188,7 +194,7 @@ class BoatScheduleResponse(BaseSchema, TimestampMixin):
     origin_port: str = Field(..., description="Origin port")
     destination_port: str = Field(..., description="Destination port")
     route_type: Optional[RouteType] = Field(None, description="Route type")
-    order_deadline: date = Field(..., description="Recommended order deadline (30 days before departure)")
+    order_deadline: date = Field(..., description="Recommended order deadline (20 days before departure)")
     booking_deadline: date = Field(..., description="Last date to book cargo (3 days before departure)")
     status: BoatStatus = Field(..., description="Current status")
     source_file: Optional[str] = Field(None, description="Source filename")
@@ -209,7 +215,7 @@ class BoatScheduleResponse(BaseSchema, TimestampMixin):
         deadline = cls._parse_date(row["booking_deadline"])
         arrival = cls._parse_date(row["arrival_date"])
 
-        # Calculate order deadline (30 days before departure)
+        # Calculate order deadline (20 days before departure)
         order_deadline = departure - timedelta(days=ORDER_DEADLINE_DAYS)
 
         days_until_departure = (departure - today).days if departure >= today else None

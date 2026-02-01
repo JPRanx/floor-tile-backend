@@ -23,9 +23,11 @@ TRUCKING_DAYS = 1
 WAREHOUSE_BUFFER_DAYS = PORT_BUFFER_DAYS + TRUCKING_DAYS
 
 # Ordering cycle coverage (days until NEXT boat arrives)
+# FALLBACK value - Order Builder now calculates this dynamically based on actual
+# next boat arrival date. This value is only used when no next boat is scheduled.
 # Ashley orders monthly (~20th), so boats arrive ~30 days apart.
 # When Boat 1 arrives, we need enough stock to last until Boat 2.
-ORDERING_CYCLE_DAYS = 30
+ORDERING_CYCLE_DAYS = 30  # Fallback when no next boat scheduled
 
 
 # =============================================================================

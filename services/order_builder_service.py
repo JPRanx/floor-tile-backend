@@ -220,6 +220,9 @@ class OrderBuilderService:
         trend_data = self._get_product_trends()
         timings["3_trends"] = round(time.time() - t2, 2)
 
+        # Step 2c: Calculate dynamic coverage buffer based on next boat arrival
+        coverage_buffer_days = self._get_coverage_buffer(boat, next_boat)
+
         # Step 3: Convert to OrderBuilderProducts grouped by priority
         t3 = time.time()
         products_by_priority = self._group_products_by_priority(
@@ -227,7 +230,8 @@ class OrderBuilderService:
             boat.days_until_warehouse,  # Use warehouse arrival (not departure!)
             trend_data,
             boat_departure=boat.departure_date if boat.boat_id else None,  # Pass departure for factory status
-            order_deadline=boat.order_deadline  # Pass for availability breakdown calculation
+            order_deadline=boat.order_deadline,  # Pass for availability breakdown calculation
+            coverage_buffer_days=coverage_buffer_days  # Dynamic buffer based on next boat
         )
         timings["4_grouping"] = round(time.time() - t3, 2)
 
@@ -393,6 +397,41 @@ class OrderBuilderService:
             days_until_deadline=max(0, days_until_deadline),
             max_containers=5,  # Default, could be configurable per boat
         )
+
+    def _get_coverage_buffer(
+        self,
+        current_boat: Optional[OrderBuilderBoat],
+        next_boat: Optional[OrderBuilderBoat]
+    ) -> int:
+        """
+        Calculate days of coverage needed until next boat arrives at warehouse.
+
+        Dynamic calculation based on actual boat schedule instead of hardcoded 30 days.
+
+        Logic:
+        - If next_boat exists: days between current boat arrival and next boat arrival
+        - Otherwise: fall back to ORDERING_CYCLE_DAYS (30 days)
+
+        This ensures we order enough to last until the NEXT shipment is in warehouse.
+        """
+        if current_boat and next_boat and next_boat.arrival_date and current_boat.arrival_date:
+            # Days between current boat warehouse arrival and next boat warehouse arrival
+            buffer = (next_boat.arrival_date - current_boat.arrival_date).days
+            # Add warehouse buffer (port + trucking) since we need to cover until next is IN warehouse
+            buffer += WAREHOUSE_BUFFER_DAYS
+            # Sanity check: at least 14 days, at most 60 days
+            buffer = max(14, min(60, buffer))
+            logger.debug(
+                "dynamic_coverage_buffer",
+                current_arrival=str(current_boat.arrival_date),
+                next_arrival=str(next_boat.arrival_date),
+                buffer_days=buffer
+            )
+            return buffer
+
+        # Fallback to static value if no next boat scheduled
+        logger.debug("coverage_buffer_fallback", reason="no_next_boat")
+        return ORDERING_CYCLE_DAYS
 
     def _get_product_trends(self) -> dict[str, dict]:
         """
@@ -802,13 +841,16 @@ class OrderBuilderService:
         final_selected_pallets: int,
         minimum_applied: bool,
         selection_constraint_note: Optional[str],
+        # Dynamic buffer
+        buffer_days: Optional[int] = None,
     ) -> FullCalculationBreakdown:
         """
         Build complete calculation breakdown showing all math.
 
         This provides transparency into how the final selected_pallets was determined.
         """
-        buffer_days = ORDERING_CYCLE_DAYS
+        # Use dynamic buffer if provided, otherwise fall back to ORDERING_CYCLE_DAYS
+        buffer_days = buffer_days if buffer_days is not None else ORDERING_CYCLE_DAYS
         target_days = days_to_cover + buffer_days
 
         # === COVERAGE CALCULATION ===
@@ -1145,7 +1187,8 @@ class OrderBuilderService:
         days_to_cover: int,
         trend_data: dict[str, dict],
         boat_departure: Optional[date] = None,
-        order_deadline: Optional[date] = None
+        order_deadline: Optional[date] = None,
+        coverage_buffer_days: Optional[int] = None
     ) -> dict[str, list[OrderBuilderProduct]]:
         """Convert recommendations to OrderBuilderProducts grouped by priority."""
         groups = {
@@ -1155,8 +1198,9 @@ class OrderBuilderService:
             "YOUR_CALL": [],
         }
 
-        # ORDERING_CYCLE_DAYS imported from config.shipping (default: 30)
-        # Covers the gap until the NEXT boat arrives (monthly ordering cycle)
+        # Dynamic coverage buffer: days until NEXT boat arrives at warehouse
+        # Falls back to ORDERING_CYCLE_DAYS (30 days) if not provided
+        buffer_days = coverage_buffer_days if coverage_buffer_days is not None else ORDERING_CYCLE_DAYS
 
         # Get customer demand scores for priority ranking
         customer_demand_data = self._get_customer_demand_scores()
@@ -1218,8 +1262,8 @@ class OrderBuilderService:
             # Calculate urgency based on days of stock
             urgency = self._calculate_urgency(days_of_stock)
 
-            # Calculate base quantity (lead time + ordering cycle) × velocity
-            total_coverage_days = days_to_cover + ORDERING_CYCLE_DAYS
+            # Calculate base quantity (lead time + dynamic buffer) × velocity
+            total_coverage_days = days_to_cover + buffer_days
             base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
 
             # Calculate trend adjustment
@@ -1245,7 +1289,7 @@ class OrderBuilderService:
             # Build calculation breakdown
             breakdown = CalculationBreakdown(
                 lead_time_days=days_to_cover,
-                ordering_cycle_days=ORDERING_CYCLE_DAYS,
+                ordering_cycle_days=buffer_days,  # Dynamic buffer based on next boat
                 daily_velocity_m2=daily_velocity_m2,
                 base_quantity_m2=round(base_quantity_m2, 2),
                 trend_adjustment_m2=round(trend_adjustment_m2, 2),
@@ -1477,6 +1521,8 @@ class OrderBuilderService:
                 # IMPORTANT: Minimum container only applies to Factory Request, not Warehouse Order
                 minimum_applied=False,
                 selection_constraint_note=None,
+                # Dynamic buffer based on next boat arrival
+                buffer_days=buffer_days,
             )
 
             product = OrderBuilderProduct(

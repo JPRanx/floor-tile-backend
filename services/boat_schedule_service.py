@@ -21,6 +21,7 @@ from models.boat_schedule import (
     BoatUploadResult,
     BOOKING_BUFFER_DAYS,
     ORDER_DEADLINE_DAYS,
+    HARD_DEADLINE_DAYS,
 )
 from parsers.tiba_parser import parse_tiba_excel, BoatScheduleRecord
 from exceptions import (
@@ -166,6 +167,14 @@ class BoatScheduleService:
         """
         Get available boat schedules for booking.
 
+        Uses HARD_DEADLINE_DAYS (10 days before departure) as the visibility cutoff.
+        This provides a 10-day grace period after the soft order deadline (20 days).
+
+        Example: Boat departs Mar 20
+        - Order deadline displayed: Mar 1 (departure - 20 days)
+        - Boat visible until: Mar 10 (departure - 10 days)
+        - After Mar 10: Boat hidden, next boat shown
+
         Args:
             from_date: Only schedules with departure after this date
             limit: Maximum number to return
@@ -187,8 +196,16 @@ class BoatScheduleService:
             if from_date:
                 query = query.gte("departure_date", from_date.isoformat())
             else:
-                # Default to future departures only
-                query = query.gte("departure_date", date.today().isoformat())
+                # Use hard deadline: only show boats departing > HARD_DEADLINE_DAYS from now
+                # This keeps boats visible for 10 days after the soft order deadline
+                cutoff_date = date.today() + timedelta(days=HARD_DEADLINE_DAYS)
+                query = query.gte("departure_date", cutoff_date.isoformat())
+                logger.debug(
+                    "boat_visibility_cutoff",
+                    today=date.today().isoformat(),
+                    cutoff_date=cutoff_date.isoformat(),
+                    hard_deadline_days=HARD_DEADLINE_DAYS
+                )
 
             result = query.execute()
 
