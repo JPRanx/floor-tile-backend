@@ -34,6 +34,7 @@ from services.inventory_service import get_inventory_service
 from services.trend_service import get_trend_service
 from services.customer_pattern_service import get_customer_pattern_service
 from services.production_schedule_service import get_production_schedule_service
+from services.warehouse_order_service import get_warehouse_order_service
 from models.order_builder import (
     OrderBuilderMode,
     OrderBuilderProduct,
@@ -129,6 +130,7 @@ class OrderBuilderService:
         self.trend_service = get_trend_service()
         self.customer_pattern_service = get_customer_pattern_service()
         self.production_schedule_service = get_production_schedule_service()
+        self.warehouse_order_service = get_warehouse_order_service()
 
     def get_order_builder(
         self,
@@ -829,6 +831,7 @@ class OrderBuilderService:
         trend_adjustment_pct: Decimal,  # Order adjustment (capped ±20%)
         warehouse_m2: Decimal,
         in_transit_m2: Decimal,
+        pending_order_m2: Decimal,  # Pending warehouse orders
         coverage_gap_pallets: int,
         # Customer demand inputs
         customers_expecting_count: int,
@@ -858,9 +861,10 @@ class OrderBuilderService:
         trend_adjustment_m2 = need_for_target * (trend_adjustment_pct / Decimal("100"))
         adjusted_need = need_for_target + trend_adjustment_m2
 
+        # Coverage gap = adjusted_need - warehouse - in_transit - pending_orders
         coverage_gap_m2 = max(
             Decimal("0"),
-            adjusted_need - warehouse_m2 - in_transit_m2
+            adjusted_need - warehouse_m2 - in_transit_m2 - pending_order_m2
         )
         coverage_suggested_pallets = math.ceil(float(coverage_gap_m2 / M2_PER_PALLET)) if coverage_gap_m2 > 0 else 0
         coverage_suggested_m2 = Decimal(coverage_suggested_pallets) * M2_PER_PALLET
@@ -879,6 +883,7 @@ class OrderBuilderService:
             adjusted_need_m2=round(adjusted_need, 2),
             warehouse_m2=warehouse_m2,
             in_transit_m2=in_transit_m2,
+            pending_order_m2=pending_order_m2,
             coverage_gap_m2=round(coverage_gap_m2, 2),
             coverage_gap_pallets=coverage_gap_pallets,
             suggested_pallets=coverage_suggested_pallets,
@@ -1244,6 +1249,18 @@ class OrderBuilderService:
         except Exception as e:
             logger.warning("production_schedule_lookup_failed", error=str(e))
 
+        # Get pending warehouse orders by SKU
+        # This prevents double-ordering products already committed to a boat
+        pending_orders_map = {}
+        try:
+            pending_orders_map = self.warehouse_order_service.get_pending_by_sku_dict()
+            logger.debug(
+                "pending_orders_loaded",
+                skus_with_pending=len(pending_orders_map)
+            )
+        except Exception as e:
+            logger.warning("pending_orders_lookup_failed", error=str(e))
+
         for rec in recommendations:
             # Get trend data for this product
             trend = trend_data.get(rec.sku, {})
@@ -1278,9 +1295,16 @@ class OrderBuilderService:
             minus_current = rec.warehouse_m2 or Decimal("0")
             minus_incoming = rec.in_transit_m2 or Decimal("0")
 
+            # Get pending orders for this SKU (already ordered, awaiting shipment)
+            pending_info = pending_orders_map.get(rec.sku, {})
+            pending_order_m2 = Decimal(str(pending_info.get("total_m2", 0)))
+            pending_order_pallets = int(pending_info.get("total_pallets", 0))
+            pending_order_boat = pending_info.get("boat_name")
+
+            # Coverage gap = adjusted_need - warehouse - in_transit - pending_orders
             final_suggestion_m2 = max(
                 Decimal("0"),
-                adjusted_quantity_m2 - minus_current - minus_incoming
+                adjusted_quantity_m2 - minus_current - minus_incoming - pending_order_m2
             )
 
             # Convert to pallets
@@ -1508,6 +1532,7 @@ class OrderBuilderService:
                 trend_adjustment_pct=trend_adjustment_pct,  # Capped: e.g., -20%
                 warehouse_m2=minus_current,
                 in_transit_m2=minus_incoming,
+                pending_order_m2=pending_order_m2,
                 coverage_gap_pallets=coverage_gap_pallets,
                 # Customer demand inputs
                 customers_expecting_count=customers_expecting_count,
@@ -1533,6 +1558,10 @@ class OrderBuilderService:
                 action_type=rec.action_type.value,
                 current_stock_m2=rec.warehouse_m2,
                 in_transit_m2=rec.in_transit_m2,
+                # Pending orders (already ordered, awaiting shipment)
+                pending_order_m2=pending_order_m2,
+                pending_order_pallets=pending_order_pallets,
+                pending_order_boat=pending_order_boat,
                 days_to_cover=days_to_cover,
                 total_demand_m2=rec.total_demand_m2 or Decimal("0"),
                 coverage_gap_m2=adjusted_coverage_gap,  # Now includes expected customer orders

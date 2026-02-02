@@ -555,3 +555,19 @@ class SIESAMissingColumnsError(SIESAParseError):
             message=f"Missing required columns: {', '.join(missing)}",
             details={"missing_columns": missing}
         )
+
+
+# ===================
+# WAREHOUSE ORDER ERRORS
+# ===================
+
+
+class WarehouseOrderNotFoundError(NotFoundError):
+    """Warehouse order not found."""
+
+    def __init__(self, order_id: str):
+        super().__init__(
+            code="WAREHOUSE_ORDER_NOT_FOUND",
+            message=f"Warehouse order not found: {order_id}",
+            details={"order_id": order_id}
+        )

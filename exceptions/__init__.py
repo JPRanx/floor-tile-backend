@@ -62,6 +62,9 @@ from exceptions.errors import (
     # SIESA Parser
     SIESAParseError,
     SIESAMissingColumnsError,
+
+    # Warehouse Orders
+    WarehouseOrderNotFoundError,
 )
 
 __all__ = [
@@ -122,4 +125,7 @@ __all__ = [
     # SIESA Parser
     "SIESAParseError",
     "SIESAMissingColumnsError",
+
+    # Warehouse Orders
+    "WarehouseOrderNotFoundError",
 ]

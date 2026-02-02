@@ -237,7 +237,7 @@ class CoverageCalculation(BaseSchema):
     """
     Coverage Gap Calculation — Shows how we determine m² needed.
 
-    Formula: coverage_gap = (velocity × target_days) - warehouse - in_transit
+    Formula: coverage_gap = (velocity × target_days) - warehouse - in_transit - pending_orders
     """
     # Target days breakdown
     target_coverage_days: int = Field(..., description="Target days of coverage (days_to_warehouse + buffer)")
@@ -270,9 +270,10 @@ class CoverageCalculation(BaseSchema):
     # Current position
     warehouse_m2: Decimal = Field(..., description="Current warehouse stock")
     in_transit_m2: Decimal = Field(default=Decimal("0"), description="Stock in transit")
+    pending_order_m2: Decimal = Field(default=Decimal("0"), description="Pending warehouse orders (awaiting shipment)")
 
     # Gap result
-    coverage_gap_m2: Decimal = Field(..., description="adjusted_need - warehouse - in_transit")
+    coverage_gap_m2: Decimal = Field(..., description="adjusted_need - warehouse - in_transit - pending_orders")
     coverage_gap_pallets: int = Field(..., description="Gap converted to pallets")
 
     # Suggestion from coverage alone
@@ -448,6 +449,12 @@ class OrderBuilderProduct(BaseSchema):
     # Coverage gap
     current_stock_m2: Decimal = Field(..., description="Warehouse stock in m2")
     in_transit_m2: Decimal = Field(default=Decimal("0"), description="In-transit stock in m2")
+
+    # Pending orders (already ordered, awaiting shipment from factory)
+    pending_order_m2: Decimal = Field(default=Decimal("0"), description="m² already ordered, awaiting shipment")
+    pending_order_pallets: int = Field(default=0, description="Pallets already ordered")
+    pending_order_boat: Optional[str] = Field(default=None, description="Which boat the pending order is on")
+
     days_to_cover: int = Field(..., description="Days until next boat arrival")
     total_demand_m2: Decimal = Field(..., description="Demand during coverage period")
     coverage_gap_m2: Decimal = Field(..., description="Demand - available (positive = need)")
