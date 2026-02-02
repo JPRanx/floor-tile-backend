@@ -2,6 +2,10 @@
 
 Updates in_transit_qty field in inventory_snapshots.
 Does NOT touch warehouse_qty or factory_available_m2.
+
+IMPORTANT: Only includes orders that are actually in-transit or pending departure.
+Orders that have already been received into warehouse should be excluded.
+The dispatch file may contain historical orders - we filter them out here.
 """
 import sys
 import os
@@ -19,6 +23,12 @@ from services.product_service import get_product_service
 
 DISPATCH_FILE = r"C:\Users\Jorge Alexander\floor-tile-saas\data\uploads\INFORMES TARRAGONA\PROGRAMACIÓN DE DESPACHO DE TARRAGONA.xlsx"
 SNAPSHOT_DATE = date(2026, 1, 31)
+
+# Orders to EXCLUDE (already received into warehouse inventory)
+# Update this list as shipments are confirmed received
+RECEIVED_ORDERS = [
+    "OC002",  # FEX338 - ETA Jan 31, received into warehouse
+]
 
 
 def normalize_sku(raw):
@@ -77,6 +87,16 @@ def main():
     print(f"Excel rows: {len(df)}")
     print(f"Columns: {list(df.columns)}")
 
+    # Fill forward order numbers so each row knows its order
+    df['Factura'] = df['Factura'].ffill()
+
+    # Filter out received orders
+    print(f"\nExcluding received orders: {RECEIVED_ORDERS}")
+    original_count = len(df)
+    df = df[~df['Factura'].astype(str).str.contains('|'.join(RECEIVED_ORDERS), case=False, na=False)]
+    filtered_count = len(df)
+    print(f"Filtered: {original_count} -> {filtered_count} rows")
+
     # Aggregate by SKU (sum Cantidad de Mts)
     transit_totals = defaultdict(Decimal)
     unmatched = []
@@ -85,6 +105,10 @@ def main():
         # Column "Nombre de Referencias" contains SKU like "ALMENDRO BEIGE BTE 51X51"
         raw_sku = str(row['Nombre de Referencias ']) if pd.notna(row.get('Nombre de Referencias ')) else ""
         if not raw_sku or raw_sku == "nan":
+            continue
+
+        # Skip TOTAL rows
+        if "TOTAL" in raw_sku.upper():
             continue
 
         # "Cantidad de Mts" = quantity in m2
@@ -113,6 +137,25 @@ def main():
         print(f"\nUnmatched SKUs ({len(unmatched)}):")
         for raw, norm in unmatched[:10]:
             print(f"  - {raw[:40]} -> {norm}")
+
+    # First, reset all in_transit_qty to 0 for products NOT in transit
+    print("\nResetting in_transit_qty for products not in current transit...")
+    all_products_result = client.table('products').select('id').execute()
+    all_product_ids = {p['id'] for p in all_products_result.data}
+    products_in_transit = set(transit_totals.keys())
+    products_to_reset = all_product_ids - products_in_transit
+
+    reset_count = 0
+    for pid in products_to_reset:
+        result = client.table('inventory_snapshots').select('id').eq(
+            'product_id', pid
+        ).order('snapshot_date', desc=True).limit(1).execute()
+        if result.data:
+            client.table('inventory_snapshots').update({
+                'in_transit_qty': 0
+            }).eq('id', result.data[0]['id']).execute()
+            reset_count += 1
+    print(f"Reset {reset_count} products to 0 in-transit")
 
     # Update inventory snapshots - ALWAYS update the LATEST snapshot
     print("\nUpdating in_transit_qty (latest snapshot per product)...")
