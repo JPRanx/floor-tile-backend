@@ -78,8 +78,9 @@ class MetricsService:
         products_by_id = {p["id"]: p for p in products_result.data}
 
         # Inventory (from canonical source: inventory_snapshots)
+        # Include factory fields (SIESA) for visibility
         inventory_result = self.db.table("inventory_snapshots").select(
-            "product_id, warehouse_qty, in_transit_qty, snapshot_date"
+            "product_id, warehouse_qty, in_transit_qty, factory_available_m2, factory_lot_count, snapshot_date"
         ).order("snapshot_date", desc=True).execute()
 
         # Get latest inventory per product
@@ -138,6 +139,8 @@ class MetricsService:
 
             warehouse_m2 = Decimal(str(inv.get("warehouse_qty") or 0))
             in_transit_m2 = Decimal(str(inv.get("in_transit_qty") or 0))
+            factory_available_m2 = Decimal(str(inv.get("factory_available_m2") or 0))
+            factory_lot_count = int(inv.get("factory_lot_count") or 0)
 
             # Velocity (based on period_days, 2 decimal precision)
             total_current = current_sales.get(pid, Decimal("0"))
@@ -188,6 +191,8 @@ class MetricsService:
                 in_transit_m2=round_decimal(in_transit_m2, 2),
                 in_transit_arrival_date=None,  # TODO: Get from shipments
                 in_transit_arrival_days=None,
+                factory_available_m2=round_decimal(factory_available_m2, 2),
+                factory_lot_count=factory_lot_count,
                 velocity_m2_day=velocity,
                 warehouse_days=warehouse_days,
                 with_transit_days=with_transit_days,

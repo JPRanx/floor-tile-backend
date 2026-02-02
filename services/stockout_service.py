@@ -48,6 +48,10 @@ class ProductStockout(BaseSchema):
     in_transit_qty: Decimal
     total_qty: Decimal
 
+    # Factory inventory (SIESA)
+    factory_available_m2: Decimal = Decimal("0")
+    factory_lot_count: int = 0
+
     # Sales velocity
     avg_daily_sales: Decimal
     weekly_sales: Decimal
@@ -207,6 +211,8 @@ class StockoutService:
                 warehouse_qty=coverage.warehouse_m2,
                 in_transit_qty=coverage.in_transit_m2,
                 total_qty=coverage.warehouse_m2 + coverage.in_transit_m2,
+                factory_available_m2=coverage.factory_available_m2,
+                factory_lot_count=coverage.factory_lot_count,
                 avg_daily_sales=coverage.velocity_m2_day,
                 weekly_sales=round(weekly_sales, 2),
                 weeks_of_data=metrics.sample_count,

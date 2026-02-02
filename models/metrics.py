@@ -26,6 +26,10 @@ class StockCoverage(BaseModel):
     in_transit_arrival_date: Optional[date] = Field(None, description="When transit arrives")
     in_transit_arrival_days: Optional[Decimal] = Field(None, description="Days until transit arrives")
 
+    # Factory inventory (SIESA)
+    factory_available_m2: Decimal = Field(default=Decimal("0"), description="Available stock at factory (SIESA)")
+    factory_lot_count: int = Field(default=0, description="Number of lots available at factory")
+
     # Velocity (90-day standard, 2 decimal precision)
     velocity_m2_day: Decimal = Field(..., description="Average daily sales over 90 days")
 
