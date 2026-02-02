@@ -78,6 +78,36 @@ def normalize_accents(text: str) -> str:
     return text
 
 
+def parse_plant_number(plant_value) -> int:
+    """
+    Parse plant value from database to integer.
+
+    Handles:
+        - Integer: 1 -> 1
+        - String integer: "1" -> 1
+        - Prefixed string: "plant_1" -> 1
+
+    Returns 1 as default if parsing fails.
+    """
+    if plant_value is None:
+        return 1
+    if isinstance(plant_value, int):
+        return plant_value
+    if isinstance(plant_value, str):
+        # Handle "plant_1", "plant_2" format
+        if plant_value.startswith("plant_"):
+            try:
+                return int(plant_value.replace("plant_", ""))
+            except ValueError:
+                return 1
+        # Handle plain string number
+        try:
+            return int(plant_value)
+        except ValueError:
+            return 1
+    return 1
+
+
 class ProductionScheduleService:
     """
     Production schedule business logic.
@@ -296,7 +326,7 @@ class ProductionScheduleService:
                     product_name=row.get("referencia") or row.get("product_name"),
                     product_id=row.get("product_id"),
                     sku=sku,
-                    plant=row.get("plant", 1),
+                    plant=parse_plant_number(row.get("plant")),
                     m2_export_first=Decimal(str(row.get("requested_m2") or row.get("m2_export_first") or 0)),
                     days_until_production=days_until
                 ))

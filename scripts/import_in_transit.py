@@ -114,44 +114,31 @@ def main():
         for raw, norm in unmatched[:10]:
             print(f"  - {raw[:40]} -> {norm}")
 
-    # Update inventory snapshots
-    print("\nUpdating in_transit_qty...")
+    # Update inventory snapshots - ALWAYS update the LATEST snapshot
+    print("\nUpdating in_transit_qty (latest snapshot per product)...")
     updated = 0
     errors = 0
 
     for pid, total_m2 in transit_totals.items():
-        # Get latest snapshot for this product
-        result = client.table('inventory_snapshots').select('id').eq(
+        # Get LATEST snapshot for this product (regardless of date)
+        result = client.table('inventory_snapshots').select('id, snapshot_date').eq(
             'product_id', pid
-        ).eq('snapshot_date', SNAPSHOT_DATE.isoformat()).execute()
+        ).order('snapshot_date', desc=True).limit(1).execute()
 
         if result.data:
-            # Update existing snapshot
             snapshot_id = result.data[0]['id']
+            snapshot_date = result.data[0]['snapshot_date']
             try:
                 client.table('inventory_snapshots').update({
                     'in_transit_qty': float(total_m2)
                 }).eq('id', snapshot_id).execute()
                 updated += 1
+                print(f"  Updated {pid[:8]}... ({snapshot_date}): {total_m2} m2")
             except Exception as e:
                 print(f"  Error updating {pid}: {e}")
                 errors += 1
         else:
-            # No snapshot for today - check if any exists
-            result = client.table('inventory_snapshots').select('id').eq(
-                'product_id', pid
-            ).order('snapshot_date', desc=True).limit(1).execute()
-
-            if result.data:
-                snapshot_id = result.data[0]['id']
-                try:
-                    client.table('inventory_snapshots').update({
-                        'in_transit_qty': float(total_m2)
-                    }).eq('id', snapshot_id).execute()
-                    updated += 1
-                except Exception as e:
-                    print(f"  Error updating {pid}: {e}")
-                    errors += 1
+            print(f"  No snapshot found for {pid}")
 
     print(f"\nUpdated: {updated}, Errors: {errors}")
 
