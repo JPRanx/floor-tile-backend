@@ -150,17 +150,39 @@ def parse_owner_excel(
         )
 
     # Parse INVENTARIO sheet if present (try multiple naming conventions)
+    # Handle trailing spaces in sheet names
     inventory_sheet_names = [
         "Inventario", "INVENTARIO",
         "INVENTARIO CERÁMICO", "INVENTARIO CERAMICO",
         "INVENTARIO MUEBLES"
     ]
     inventory_found = False
+    matched_sheet = None
+
+    # First try exact match, then try with stripped names
     for sheet_name in inventory_sheet_names:
         if sheet_name in excel.sheet_names:
-            _parse_inventory_sheet(excel, known_owner_codes, result, sheet_name=sheet_name, known_sku_names=known_sku_names)
-            inventory_found = True
+            matched_sheet = sheet_name
             break
+
+    # If not found, try matching stripped names (handles trailing spaces)
+    if not matched_sheet:
+        for actual_sheet in excel.sheet_names:
+            stripped = actual_sheet.strip()
+            if stripped.upper() in [s.upper() for s in inventory_sheet_names]:
+                matched_sheet = actual_sheet
+                logger.info("matched_sheet_with_trailing_space", original=actual_sheet, stripped=stripped)
+                break
+
+    if matched_sheet:
+        # Detect if this is movement-tracking format
+        if _is_movement_tracking_format(excel, matched_sheet):
+            logger.info("detected_movement_tracking_format", sheet=matched_sheet)
+            _parse_movement_tracking_sheet(excel, known_owner_codes, result, sheet_name=matched_sheet, known_sku_names=known_sku_names)
+        else:
+            _parse_inventory_sheet(excel, known_owner_codes, result, sheet_name=matched_sheet, known_sku_names=known_sku_names)
+        inventory_found = True
+
     if not inventory_found:
         logger.debug("inventario_sheet_not_found")
 
@@ -217,7 +239,7 @@ def extract_products_from_excel(
             details={"original_error": str(e)}
         )
 
-    # Find inventory sheet
+    # Find inventory sheet (handle trailing spaces)
     inventory_sheet_names = [
         "Inventario", "INVENTARIO",
         "INVENTARIO CERÁMICO", "INVENTARIO CERAMICO",
@@ -225,10 +247,19 @@ def extract_products_from_excel(
     ]
 
     sheet_name = None
+    # First try exact match
     for name in inventory_sheet_names:
         if name in excel.sheet_names:
             sheet_name = name
             break
+
+    # If not found, try matching stripped names
+    if not sheet_name:
+        for actual_sheet in excel.sheet_names:
+            stripped = actual_sheet.strip()
+            if stripped.upper() in [s.upper() for s in inventory_sheet_names]:
+                sheet_name = actual_sheet
+                break
 
     if not sheet_name:
         logger.warning("no_inventory_sheet_found_for_products")
@@ -239,6 +270,11 @@ def extract_products_from_excel(
     except Exception as e:
         logger.error("failed_to_parse_inventory_sheet", error=str(e))
         return []
+
+    # Detect movement-tracking format and handle appropriately
+    if _is_movement_tracking_format(excel, sheet_name):
+        logger.info("extracting_products_from_movement_tracking_format")
+        return _extract_products_from_movement_tracking(excel, sheet_name)
 
     # Normalize column names
     df.columns = [_normalize_column(col) for col in df.columns]
@@ -565,6 +601,224 @@ def _parse_sales_sheet(
                 customer=str(customer) if customer else None,
                 notes=str(notes) if notes else None,
             ))
+
+
+# ===================
+# MOVEMENT-TRACKING FORMAT
+# ===================
+
+def _is_movement_tracking_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
+    """
+    Detect if the sheet uses movement-tracking format (INICIAL/INGRESOS/SALIDAS/SALDO).
+
+    Movement-tracking format has:
+    - Row 2 (0-indexed row 1): "FECHA ACTUALIZACION: DD/MM/YYYY"
+    - Row 3 (0-indexed row 2): Headers like REFERENCIAS, FORMATO, INICIAL, INGRESOS, SALIDAS, SALDO
+    - Row 4: Sub-headers with PALETT/CANTIDAD M2
+    - Data starts at row 5
+    """
+    try:
+        # Read first few rows without header
+        df = excel.parse(sheet_name, header=None, nrows=5)
+
+        # Check row 2 (index 2) for "FECHA ACTUALIZACION"
+        if len(df) > 2:
+            row2_text = str(df.iloc[2, 0]) if pd.notna(df.iloc[2, 0]) else ""
+            if "FECHA ACTUALIZACION" in row2_text.upper():
+                return True
+
+        # Also check for SALDO column header in row 3
+        if len(df) > 3:
+            row3 = df.iloc[3].astype(str).str.upper()
+            if any("SALDO" in str(cell) for cell in row3):
+                return True
+
+    except Exception as e:
+        logger.warning("format_detection_failed", error=str(e))
+
+    return False
+
+
+def _extract_date_from_header(df: pd.DataFrame) -> date:
+    """
+    Extract date from 'FECHA ACTUALIZACION: DD/MM/YYYY' format in header.
+
+    Args:
+        df: DataFrame with raw Excel data (no header parsing)
+
+    Returns:
+        Parsed date or today's date as fallback
+    """
+    import re
+
+    try:
+        # Check row 2 (0-indexed) for date
+        header_text = str(df.iloc[2, 0]) if len(df) > 2 and pd.notna(df.iloc[2, 0]) else ""
+
+        # Parse "FECHA ACTUALIZACION: 09/02/2026"
+        match = re.search(r'(\d{2}/\d{2}/\d{4})', header_text)
+        if match:
+            date_str = match.group(1)
+            return datetime.strptime(date_str, "%d/%m/%Y").date()
+
+    except Exception as e:
+        logger.warning("date_extraction_failed", error=str(e))
+
+    return date.today()
+
+
+def _parse_movement_tracking_sheet(
+    excel: pd.ExcelFile,
+    known_owner_codes: dict[str, str],
+    result: ExcelParseResult,
+    sheet_name: str,
+    known_sku_names: dict[str, str] = None,
+) -> None:
+    """
+    Parse movement-tracking format inventory sheet.
+
+    Format:
+    - Row 0-1: Empty/title
+    - Row 2: "FECHA ACTUALIZACION: DD/MM/YYYY"
+    - Row 3: REFERENCIAS | FORMATO | INICIAL | ... | SALDO | OBSERVACIONES
+    - Row 4: Sub-headers (PALETT | CANTIDAD M2 | ...)
+    - Row 5+: Data
+
+    Column mapping (0-indexed):
+    - Column 0: REFERENCIAS (SKU)
+    - Column 8: SALDO PALET
+    - Column 9: SALDO M2 (current warehouse quantity)
+    """
+    logger.info("parsing_movement_tracking_sheet", sheet=sheet_name)
+
+    try:
+        # Read raw data without header
+        df = excel.parse(sheet_name, header=None)
+    except Exception as e:
+        result.errors.append(ParseError(
+            sheet=sheet_name,
+            row=0,
+            field="sheet",
+            error=f"Failed to read sheet: {str(e)}"
+        ))
+        return
+
+    # Extract snapshot date from header
+    snapshot_date = _extract_date_from_header(df)
+    logger.info("extracted_snapshot_date", date=snapshot_date.isoformat())
+
+    # Skip header rows (first 5 rows: 0-4)
+    data_df = df.iloc[5:].copy()
+
+    # Parse each row
+    for idx, row in data_df.iterrows():
+        row_num = idx + 1  # Excel row number (1-indexed)
+
+        # Get SKU from column 0
+        raw_sku = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+
+        if not raw_sku or raw_sku == "nan" or raw_sku.upper() == "TOTAL":
+            continue
+
+        # Get SALDO M2 from column 9
+        saldo_m2 = row.iloc[9] if len(row) > 9 and pd.notna(row.iloc[9]) else 0
+
+        try:
+            warehouse_qty = float(saldo_m2)
+        except (ValueError, TypeError):
+            warehouse_qty = 0
+
+        # Skip zero quantity rows
+        if warehouse_qty <= 0:
+            continue
+
+        # Match product
+        product_id = None
+        sku = raw_sku
+
+        # Try to match by owner code first (numeric codes)
+        if raw_sku.replace(".", "").isdigit():
+            owner_code = raw_sku.split(".")[0].zfill(7)
+            sku = owner_code
+            product_id = known_owner_codes.get(owner_code)
+
+        # If not numeric or not found, try matching by SKU name
+        if product_id is None and known_sku_names:
+            normalized_sku = _normalize_sku_name(raw_sku)
+            product_id = known_sku_names.get(normalized_sku)
+            if product_id:
+                sku = normalized_sku
+
+        if product_id is None:
+            result.errors.append(ParseError(
+                sheet=sheet_name,
+                row=row_num,
+                field="SKU",
+                error=f"Unknown product: {raw_sku}"
+            ))
+            continue
+
+        # Add valid record
+        result.inventory.append(InventoryRecord(
+            snapshot_date=snapshot_date,
+            sku=sku,
+            product_id=product_id,
+            warehouse_qty=round(warehouse_qty, 2),
+            in_transit_qty=0,  # In-transit handled separately
+            notes=None,
+        ))
+
+    logger.info(
+        "movement_tracking_parsed",
+        sheet=sheet_name,
+        records=len(result.inventory),
+        errors=len(result.errors)
+    )
+
+
+def _extract_products_from_movement_tracking(
+    excel: pd.ExcelFile,
+    sheet_name: str,
+) -> list[ProductExtract]:
+    """
+    Extract unique products from movement-tracking format inventory sheet.
+
+    Movement-tracking format has SKUs in column 0 starting at row 5.
+    """
+    try:
+        df = excel.parse(sheet_name, header=None)
+    except Exception as e:
+        logger.error("failed_to_parse_movement_tracking_sheet", error=str(e))
+        return []
+
+    # Skip header rows (first 5 rows: 0-4)
+    data_df = df.iloc[5:].copy()
+
+    products_seen = set()
+    products = []
+
+    for _, row in data_df.iterrows():
+        # Get SKU from column 0
+        raw_sku = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
+
+        if not raw_sku or raw_sku == "nan" or raw_sku.upper() == "TOTAL":
+            continue
+
+        normalized_sku = _normalize_sku_name(raw_sku)
+
+        if normalized_sku in products_seen:
+            continue
+        products_seen.add(normalized_sku)
+
+        # Default category for movement-tracking format (no category column)
+        products.append(ProductExtract(
+            sku=normalized_sku,
+            category="MADERAS",  # Default
+            rotation=None,
+        ))
+
+    logger.info("products_extracted_from_movement_tracking", count=len(products))
+    return products
 
 
 # ===================

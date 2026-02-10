@@ -21,13 +21,14 @@ from datetime import date
 from config import get_supabase_client
 from services.product_service import get_product_service
 
-DISPATCH_FILE = r"C:\Users\Jorge Alexander\floor-tile-saas\data\uploads\INFORMES TARRAGONA\PROGRAMACIÓN DE DESPACHO DE TARRAGONA.xlsx"
+DISPATCH_FILE = r"C:\Users\Jorge Alexander\floor-tile-saas\data\uploads\Informes Tarragona 0210\PROGRAMACIÓN DE DESPACHO DE TARRAGONA.xlsx"
 SNAPSHOT_DATE = date(2026, 1, 31)
 
 # Orders to EXCLUDE (already received into warehouse inventory)
 # Update this list as shipments are confirmed received
 RECEIVED_ORDERS = [
     "OC002",  # FEX338 - ETA Jan 31, received into warehouse
+    "OC003",  # FEX339 - ETA Jan 31, received into warehouse
 ]
 
 
