@@ -548,6 +548,11 @@ Return JSON in this exact structure:
                     referencia = str(referencia).strip()
                     if 'MANTENIMIENTO' in referencia.upper():
                         continue
+                    # Skip junk rows: pure numbers, formulas, or too-short text
+                    if referencia.replace('.', '').replace('-', '').isdigit():
+                        continue
+                    if len(referencia) < 3 or '=' in referencia:
+                        continue
 
                     # Get factory code
                     factory_code = row.get(config['items_col'])
