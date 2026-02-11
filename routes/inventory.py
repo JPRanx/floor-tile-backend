@@ -19,6 +19,7 @@ from models.inventory import (
     InventoryListResponse,
     InventoryCurrentResponse,
     InventoryUploadResponse,
+    InTransitUploadResponse,
 )
 from models.product import ProductCreate, Category, Rotation
 from services.inventory_service import get_inventory_service
@@ -232,6 +233,35 @@ async def upload_inventory(file: UploadFile = File(...)):
             for record in parse_result.inventory
         ]
 
+        # STEP 4: Fill missing active products with zero-rows
+        # Ensures ALL active products get a snapshot row for this date,
+        # preventing stale data from older dates in get_latest().
+        if snapshots_to_create:
+            snapshot_date = snapshots_to_create[0].snapshot_date
+            uploaded_product_ids = {s.product_id for s in snapshots_to_create}
+
+            # Re-use the products list already fetched in STEP 2
+            missing_products = [
+                p for p in products
+                if p.id not in uploaded_product_ids
+            ]
+
+            if missing_products:
+                for p in missing_products:
+                    snapshots_to_create.append(
+                        InventorySnapshotCreate(
+                            product_id=p.id,
+                            warehouse_qty=0,
+                            in_transit_qty=0,
+                            snapshot_date=snapshot_date,
+                        )
+                    )
+                logger.info(
+                    "inventory_filled_missing_products",
+                    filled_count=len(missing_products),
+                    filled_skus=[p.sku for p in missing_products],
+                )
+
         if snapshots_to_create:
             # Make upload idempotent: delete existing records for these dates
             unique_dates = list(set(s.snapshot_date for s in snapshots_to_create))
@@ -360,44 +390,69 @@ async def upload_siesa_inventory(
         # ===================
         # SYNC TO INVENTORY_SNAPSHOTS
         # ===================
-        # Aggregate lots by product_id and update inventory_snapshots table
-        # This ensures Dashboard/Order Builder see correct totals
+        # Aggregate lots by product_id and update inventory_snapshots.factory_available_m2
+        # SIESA data is FACTORY finished goods (not US warehouse), so write to factory_* fields
         if lots_created > 0:
-            # Aggregate quantities by product_id from the lots we just inserted
-            product_totals: dict[str, float] = {}
+            # Aggregate quantities and find largest lot per product
+            product_stats: dict[str, dict] = {}
             for lot in lots_to_insert:
                 pid = lot["product_id"]
                 qty = lot["quantity_m2"]
-                if pid in product_totals:
-                    product_totals[pid] += qty
-                else:
-                    product_totals[pid] = qty
+                lot_num = lot.get("lot_number", "")
 
-            # Delete existing snapshots for this date
-            db.table("inventory_snapshots").delete().eq(
-                "snapshot_date", actual_date.isoformat()
-            ).execute()
+                if pid not in product_stats:
+                    product_stats[pid] = {
+                        "total_m2": 0.0,
+                        "lot_count": 0,
+                        "largest_lot_m2": 0.0,
+                        "largest_lot_code": "",
+                    }
 
-            # Insert aggregated snapshots
-            snapshots_to_insert = [
-                {
-                    "product_id": pid,
-                    "warehouse_qty": total_qty,
-                    "in_transit_qty": 0,  # SIESA is warehouse inventory only
-                    "snapshot_date": actual_date.isoformat(),
+                stats = product_stats[pid]
+                stats["total_m2"] += qty
+                stats["lot_count"] += 1
+
+                if qty > stats["largest_lot_m2"]:
+                    stats["largest_lot_m2"] = qty
+                    stats["largest_lot_code"] = lot_num
+
+            # Update inventory_snapshots with factory availability
+            # Target the specific snapshot_date so all data lands on the same date
+            synced_count = 0
+            for pid, stats in product_stats.items():
+                # Find snapshot for this product ON the target date
+                existing = db.table("inventory_snapshots").select("id").eq(
+                    "product_id", pid
+                ).eq("snapshot_date", actual_date.isoformat()).limit(1).execute()
+
+                factory_data = {
+                    "factory_available_m2": stats["total_m2"],
+                    "factory_lot_count": stats["lot_count"],
+                    "factory_largest_lot_m2": stats["largest_lot_m2"],
+                    "factory_largest_lot_code": stats["largest_lot_code"],
                 }
-                for pid, total_qty in product_totals.items()
-            ]
 
-            if snapshots_to_insert:
-                # Batch insert snapshots
-                for i in range(0, len(snapshots_to_insert), chunk_size):
-                    chunk = snapshots_to_insert[i:i + chunk_size]
-                    db.table("inventory_snapshots").insert(chunk).execute()
+                if existing.data:
+                    # Update existing snapshot for this date
+                    snapshot_id = existing.data[0]["id"]
+                    db.table("inventory_snapshots").update(factory_data).eq(
+                        "id", snapshot_id
+                    ).execute()
+                else:
+                    # No snapshot for this date — create one
+                    db.table("inventory_snapshots").insert({
+                        "product_id": pid,
+                        "warehouse_qty": 0,
+                        "in_transit_qty": 0,
+                        "snapshot_date": actual_date.isoformat(),
+                        **factory_data,
+                    }).execute()
+
+                synced_count += 1
 
             logger.info(
                 "siesa_synced_to_snapshots",
-                products_synced=len(product_totals),
+                products_synced=synced_count,
                 date=actual_date.isoformat(),
             )
 
@@ -483,6 +538,131 @@ async def upload_siesa_inventory(
         return handle_error(e)
     except Exception as e:
         logger.error("siesa_upload_failed", error=str(e), type=type(e).__name__)
+        return handle_error(e)
+
+
+# ===================
+# IN-TRANSIT / DISPATCH
+# ===================
+
+@router.post("/in-transit/upload", response_model=InTransitUploadResponse)
+async def upload_in_transit(
+    file: UploadFile = File(...),
+    snapshot_date: date = Query(..., description="Target snapshot date (must match warehouse upload)"),
+    received_orders: Optional[str] = Query(None, description="Comma-separated order numbers to exclude (e.g., 'OC002,OC003')"),
+):
+    """
+    Upload dispatch schedule to update in-transit quantities.
+
+    Parses PROGRAMACIÓN DE DESPACHO Excel and updates in_transit_qty
+    on inventory_snapshots for the specified snapshot_date.
+
+    Products in the dispatch file get their aggregated m².
+    Products NOT in the dispatch file get in_transit_qty reset to 0.
+    Only updates rows matching the specified snapshot_date.
+    """
+    # Parse received_orders from comma-separated string
+    excluded = []
+    if received_orders:
+        excluded = [o.strip() for o in received_orders.split(",") if o.strip()]
+
+    logger.info(
+        "in_transit_upload_started",
+        filename=file.filename,
+        snapshot_date=snapshot_date,
+        excluded_orders=excluded,
+    )
+
+    try:
+        content = await file.read()
+
+        if len(content) == 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "EMPTY_FILE", "message": "Empty file uploaded"}}
+            )
+
+        # Get active products for SKU matching
+        product_service = get_product_service()
+        products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+
+        # Parse the dispatch file
+        from parsers.dispatch_parser import parse_dispatch_excel
+        parse_result = parse_dispatch_excel(content, products, excluded)
+
+        # Get database client
+        db = get_supabase_client()
+
+        # Build set of product IDs with in-transit stock
+        in_transit_pids = {p.product_id for p in parse_result.products}
+
+        # Reset in_transit_qty=0 for ALL snapshots on this date
+        # that are NOT in the dispatch file
+        all_snapshots = db.table("inventory_snapshots").select("id, product_id").eq(
+            "snapshot_date", snapshot_date.isoformat()
+        ).execute()
+
+        reset_count = 0
+        for snap in all_snapshots.data:
+            if snap["product_id"] not in in_transit_pids:
+                db.table("inventory_snapshots").update(
+                    {"in_transit_qty": 0}
+                ).eq("id", snap["id"]).execute()
+                reset_count += 1
+
+        # Update in_transit_qty for products in the dispatch file
+        updated_count = 0
+        details = []
+        for product in parse_result.products:
+            # Find snapshot for this product on the target date
+            existing = db.table("inventory_snapshots").select("id").eq(
+                "product_id", product.product_id
+            ).eq("snapshot_date", snapshot_date.isoformat()).limit(1).execute()
+
+            if existing.data:
+                db.table("inventory_snapshots").update(
+                    {"in_transit_qty": product.in_transit_m2}
+                ).eq("id", existing.data[0]["id"]).execute()
+                updated_count += 1
+            else:
+                # No snapshot for this date — create one
+                db.table("inventory_snapshots").insert({
+                    "product_id": product.product_id,
+                    "warehouse_qty": 0,
+                    "in_transit_qty": product.in_transit_m2,
+                    "snapshot_date": snapshot_date.isoformat(),
+                }).execute()
+                updated_count += 1
+
+            details.append({"sku": product.sku, "in_transit_m2": product.in_transit_m2})
+
+        logger.info(
+            "in_transit_upload_complete",
+            products_updated=updated_count,
+            products_reset=reset_count,
+            total_m2=parse_result.total_m2,
+            snapshot_date=snapshot_date.isoformat(),
+        )
+
+        return InTransitUploadResponse(
+            success=True,
+            snapshot_date=snapshot_date,
+            products_updated=updated_count,
+            products_reset=reset_count,
+            total_in_transit_m2=parse_result.total_m2,
+            excluded_orders=excluded,
+            unmatched_skus=parse_result.unmatched_skus,
+            details=details,
+        )
+
+    except ValueError as e:
+        logger.error("in_transit_parse_error", error=str(e))
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "PARSE_ERROR", "message": str(e)}}
+        )
+    except Exception as e:
+        logger.error("in_transit_upload_failed", error=str(e), type=type(e).__name__)
         return handle_error(e)
 
 

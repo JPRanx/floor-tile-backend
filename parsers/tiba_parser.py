@@ -48,15 +48,23 @@ class ParseError:
 
 
 @dataclass
+class SkippedRow:
+    """A row that was skipped during parsing (non-fatal)."""
+    row: int
+    reason: str
+
+
+@dataclass
 class TibaParseResult:
     """Result of parsing a TIBA Excel file."""
     schedules: list[BoatScheduleRecord] = field(default_factory=list)
     errors: list[ParseError] = field(default_factory=list)
+    skipped_rows: list[SkippedRow] = field(default_factory=list)
     origin_port: Optional[str] = None  # Extracted from file header
 
     @property
     def success(self) -> bool:
-        """True if no errors occurred."""
+        """True if no fatal errors occurred (skipped rows are not fatal)."""
         return len(self.errors) == 0
 
     @property
@@ -89,6 +97,10 @@ class TibaParseResult:
                     "error": e.error,
                 }
                 for e in self.errors
+            ],
+            "skipped_rows": [
+                {"row": s.row, "reason": s.reason}
+                for s in self.skipped_rows
             ],
             "origin_port": self.origin_port,
         }
@@ -137,6 +149,7 @@ def parse_tiba_excel(
     logger.info(
         "tiba_parsed",
         schedules_count=len(result.schedules),
+        skipped_rows=len(result.skipped_rows),
         error_count=len(result.errors),
         success=result.success,
         origin_port=result.origin_port
@@ -233,26 +246,26 @@ def _parse_booking_sheet(
 
         row_errors = []
 
-        # Parse departure date
+        # Parse departure date — skip row if unparseable
         departure_date = _parse_date(departure_val)
         if departure_date is None:
-            row_errors.append(ParseError(
-                sheet=sheet_name,
+            result.skipped_rows.append(SkippedRow(
                 row=row_num,
-                field="Fecha Salida ETD",
-                error=f"Invalid date format: {departure_val}"
+                reason=f"Invalid departure date: {departure_val}",
             ))
+            logger.warning("skipping_bad_date_row", row=row_num, field="departure", value=str(departure_val))
+            continue
 
-        # Parse arrival date
+        # Parse arrival date — skip row if unparseable
         arrival_val = row.get(col_mapping["arrival"])
         arrival_date = _parse_date(arrival_val)
         if arrival_date is None:
-            row_errors.append(ParseError(
-                sheet=sheet_name,
+            result.skipped_rows.append(SkippedRow(
                 row=row_num,
-                field="Fecha Llegada ETA",
-                error=f"Invalid date format: {arrival_val}"
+                reason=f"Invalid arrival date: {arrival_val}",
             ))
+            logger.warning("skipping_bad_date_row", row=row_num, field="arrival", value=str(arrival_val))
+            continue
 
         # Parse transit days
         transit_days = None

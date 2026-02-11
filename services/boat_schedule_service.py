@@ -19,6 +19,7 @@ from models.boat_schedule import (
     BoatScheduleResponse,
     BoatStatus,
     BoatUploadResult,
+    SkippedRowInfo,
     BOOKING_BUFFER_DAYS,
     ORDER_DEADLINE_DAYS,
     HARD_DEADLINE_DAYS,
@@ -654,12 +655,25 @@ class BoatScheduleService:
         parse_result = parse_tiba_excel(file)
 
         if not parse_result.success:
-            # Convert parse errors to dicts
+            # Fatal parse errors (missing sheet, missing columns, etc.)
             errors = [
                 {"row": e.row, "field": e.field, "error": e.error}
                 for e in parse_result.errors
             ]
             raise BoatScheduleUploadError(errors)
+
+        # Convert skipped rows from parser
+        skipped_rows = [
+            SkippedRowInfo(row=s.row, reason=s.reason)
+            for s in parse_result.skipped_rows
+        ]
+
+        if skipped_rows:
+            logger.warning(
+                "boat_import_skipped_rows",
+                count=len(skipped_rows),
+                rows=[s.row for s in skipped_rows],
+            )
 
         # Track results
         imported = 0
@@ -689,6 +703,7 @@ class BoatScheduleService:
             imported=imported,
             updated=updated,
             skipped=skipped,
+            skipped_rows=len(skipped_rows),
             errors=len(errors)
         )
 
@@ -696,6 +711,7 @@ class BoatScheduleService:
             imported=imported,
             updated=updated,
             skipped=skipped,
+            skipped_rows=skipped_rows,
             errors=errors
         )
 

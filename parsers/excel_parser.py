@@ -114,20 +114,36 @@ class ExcelParseResult:
         }
 
 
+def _detect_excel_engine(file: Union[str, Path, BytesIO, bytes], filename: Optional[str] = None) -> str:
+    """Detect the appropriate pandas engine for the Excel file format."""
+    # Check filename extension first
+    if filename:
+        if filename.lower().endswith(".xls") and not filename.lower().endswith(".xlsx"):
+            return "xlrd"
+    # Check file path extension
+    if isinstance(file, (str, Path)):
+        path_str = str(file).lower()
+        if path_str.endswith(".xls") and not path_str.endswith(".xlsx"):
+            return "xlrd"
+    return "openpyxl"
+
+
 def parse_owner_excel(
-    file: Union[str, Path, BytesIO],
+    file: Union[str, Path, BytesIO, bytes],
     known_owner_codes: dict[str, str],
     known_sku_names: dict[str, str] = None,
+    filename: Optional[str] = None,
 ) -> ExcelParseResult:
     """
     Parse owner upload Excel file.
 
     Args:
-        file: File path (str/Path) or file-like object (BytesIO)
+        file: File path (str/Path), file-like object (BytesIO), or raw bytes
         known_owner_codes: Dict mapping owner_code (with leading zeros) to product_id
                           e.g., {"0000102": "uuid-123", "0000119": "uuid-456", ...}
         known_sku_names: Optional dict mapping normalized SKU names to product_id
                         e.g., {"ALMENDRO BEIGE BTE": "uuid-123", ...}
+        filename: Optional filename to detect .xls vs .xlsx format
 
     Returns:
         ExcelParseResult with inventory, sales, and any errors
@@ -135,15 +151,22 @@ def parse_owner_excel(
     Raises:
         ExcelParseError: If file cannot be read or is invalid format
     """
-    logger.info("parsing_excel", file_type=type(file).__name__)
+    logger.info("parsing_excel", file_type=type(file).__name__, filename=filename)
 
     result = ExcelParseResult()
 
+    # Wrap raw bytes in BytesIO
+    if isinstance(file, bytes):
+        file = BytesIO(file)
+
+    # Detect engine based on file extension
+    engine = _detect_excel_engine(file, filename)
+
     # Load Excel file
     try:
-        excel = pd.ExcelFile(file, engine="openpyxl")
+        excel = pd.ExcelFile(file, engine=engine)
     except Exception as e:
-        logger.error("excel_read_failed", error=str(e))
+        logger.error("excel_read_failed", error=str(e), engine=engine)
         raise ExcelParseError(
             message="Failed to read Excel file",
             details={"original_error": str(e)}
@@ -193,12 +216,25 @@ def parse_owner_excel(
         "VENTAS25MUEBLES",
         "Sheet1"  # Fallback
     ]
+    # Spanish month names (used in REPORTE VENTAS files where sheet = month name)
+    _month_names = [
+        "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+        "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+    ]
     sales_found = False
     for sheet_name in sales_sheet_names:
         if sheet_name in excel.sheet_names:
             _parse_sales_sheet(excel, known_owner_codes, result, sheet_name=sheet_name, known_sku_names=known_sku_names)
             sales_found = True
             break
+    # Fallback: try month-named sheets (REPORTE VENTAS PERPETUO format)
+    if not sales_found:
+        for actual_sheet in excel.sheet_names:
+            if actual_sheet.strip().upper() in _month_names:
+                logger.info("matched_sales_sheet_by_month", sheet=actual_sheet)
+                _parse_report_sales_sheet(excel, known_owner_codes, result, sheet_name=actual_sheet, known_sku_names=known_sku_names)
+                sales_found = True
+                break
     if not sales_found:
         logger.debug("ventas_sheet_not_found")
 
@@ -822,6 +858,145 @@ def _extract_products_from_movement_tracking(
 
 
 # ===================
+# REPORTE VENTAS PERPETUO FORMAT
+# ===================
+
+def _parse_report_sales_sheet(
+    excel: pd.ExcelFile,
+    known_owner_codes: dict[str, str],
+    result: ExcelParseResult,
+    sheet_name: str,
+    known_sku_names: dict[str, str] = None,
+) -> None:
+    """
+    Parse REPORTE VENTAS PERPETUO format (month-named sheets).
+
+    Format:
+    - Row 0: Company title (Cerámicas y Materiales Tarragona S.A.)
+    - Row 1: Actual headers (FECHA, REFERENCIA, MT2, MUEBLES, CLIENTE, ...)
+    - Row 2+: Data
+    """
+    logger.info("parsing_report_sales_sheet", sheet=sheet_name)
+
+    try:
+        # Read with header at row 1 (skip company title in row 0)
+        df = excel.parse(sheet_name, header=1)
+    except Exception as e:
+        result.errors.append(ParseError(
+            sheet=sheet_name,
+            row=0,
+            field="sheet",
+            error=f"Failed to read sheet: {str(e)}"
+        ))
+        return
+
+    # Normalize column names
+    df.columns = [_normalize_column(col) for col in df.columns]
+
+    # Check required columns (after aliases: REFERENCIA→sku, MT2→cantidad_m2, FECHA→fecha)
+    required = ["sku", "cantidad_m2", "fecha"]
+    missing = [col for col in required if col not in df.columns]
+
+    if missing:
+        result.errors.append(ParseError(
+            sheet=sheet_name,
+            row=0,
+            field="columns",
+            error=f"Missing required columns: {', '.join(_denormalize_columns(missing))}. "
+                  f"Available: {', '.join(df.columns[:10])}"
+        ))
+        return
+
+    # Parse each row — reuse the same logic as _parse_sales_sheet
+    for idx, row in df.iterrows():
+        row_num = idx + 3  # Excel row (0=title, 1=header, 2+=data → 1-indexed)
+
+        # Skip empty rows
+        if pd.isna(row.get("sku")) or str(row.get("sku")).strip() == "":
+            continue
+
+        raw_sku = str(row["sku"]).strip()
+
+        # Skip total/summary rows
+        if raw_sku.upper() in ("TOTAL", "GRAN TOTAL", "SUBTOTAL"):
+            continue
+
+        row_errors = []
+        product_id = None
+        sku = raw_sku
+
+        # Try matching by normalized SKU name (these use full names like "CARACOLI (T) 51X51-1")
+        if known_sku_names:
+            normalized_sku = _normalize_sku_name(raw_sku)
+            product_id = known_sku_names.get(normalized_sku)
+            if product_id:
+                sku = normalized_sku
+
+        # Fallback: try owner code if numeric
+        if product_id is None and raw_sku.replace(".", "").isdigit():
+            owner_code = raw_sku.split(".")[0].zfill(7)
+            product_id = known_owner_codes.get(owner_code)
+            if product_id:
+                sku = owner_code
+
+        if product_id is None:
+            row_errors.append(ParseError(
+                sheet=sheet_name,
+                row=row_num,
+                field="SKU",
+                error=f"Unknown product: {raw_sku}"
+            ))
+
+        # Validate quantity
+        quantity = row.get("cantidad_m2")
+        if pd.isna(quantity):
+            continue  # Skip rows with no m² (muebles-only rows)
+        elif not _is_valid_quantity(quantity, allow_zero=False):
+            row_errors.append(ParseError(
+                sheet=sheet_name,
+                row=row_num,
+                field="MT2",
+                error="Must be a positive number"
+            ))
+
+        # Validate date
+        sale_date = row.get("fecha")
+        parsed_date = _parse_date(sale_date)
+
+        if parsed_date is None:
+            row_errors.append(ParseError(
+                sheet=sheet_name,
+                row=row_num,
+                field="Fecha",
+                error="Invalid or missing date"
+            ))
+
+        # Collect errors or add valid record
+        if row_errors:
+            result.errors.extend(row_errors)
+        else:
+            customer = row.get("cliente")
+            if pd.isna(customer):
+                customer = None
+
+            result.sales.append(SalesRecord(
+                sale_date=parsed_date,
+                sku=sku,
+                product_id=product_id,
+                quantity=round(float(quantity), 2),
+                customer=str(customer) if customer else None,
+                notes=None,
+            ))
+
+    logger.info(
+        "report_sales_parsed",
+        sheet=sheet_name,
+        records=len(result.sales),
+        errors=len(result.errors)
+    )
+
+
+# ===================
 # HELPER FUNCTIONS
 # ===================
 
@@ -847,6 +1022,9 @@ def _normalize_sku_name(sku: str) -> str:
 
     # Convert to uppercase
     sku = sku.upper().strip()
+
+    # Remove "BALDOSAS CERAMICAS / " prefix (REPORTE VENTAS format)
+    sku = re.sub(r'^BALDOSAS\s+CER[AÁ]MICAS\s*/\s*', '', sku)
 
     # Remove size patterns like "51X51-1", "20X61-1", etc.
     sku = re.sub(r'\s*\d+X\d+(-\d+)?$', '', sku)
@@ -883,6 +1061,8 @@ def _normalize_column(col: str) -> str:
     # Handle column aliases
     if col == "mt2":
         col = "cantidad_m2"
+    if col == "referencia":
+        col = "sku"
 
     return col
 

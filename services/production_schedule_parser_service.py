@@ -1,9 +1,13 @@
 """
-Production Schedule PDF parser using Claude Vision.
+Production Schedule parser using Claude Vision for PDFs and pandas for Excel.
 
-Parses factory production schedule PDFs to extract:
+Parses factory production schedule files to extract:
 - Schedule date and version
 - Production line items with dates, factory codes, and m² quantities
+
+Supports:
+- PDF files (via Claude Vision)
+- Excel files (.xlsx, .xls) (via pandas with openpyxl)
 
 See STANDARDS_LOGGING.md for logging patterns.
 """
@@ -12,10 +16,13 @@ import os
 import base64
 import json
 import re
-from typing import Optional
-from datetime import date
+from typing import Optional, Tuple
+from datetime import date, datetime
 from decimal import Decimal
+from io import BytesIO
 import structlog
+
+import pandas as pd
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,6 +30,9 @@ load_dotenv()
 from models.production_schedule import (
     ParsedProductionSchedule,
     ProductionScheduleLineItem,
+    ProductionScheduleCreate,
+    ProductionStatus,
+    ProductionImportResult,
 )
 
 logger = structlog.get_logger(__name__)
@@ -397,6 +407,283 @@ Return JSON in this exact structure:
             parsing_confidence=float(data.get("parsing_confidence", 0.5)),
             parsing_notes=data.get("parsing_notes")
         )
+
+
+    async def parse_excel(
+        self,
+        excel_bytes: bytes,
+        filename: Optional[str] = None
+    ) -> Tuple[ParsedProductionSchedule, list[ProductionScheduleCreate]]:
+        """
+        Parse production schedule Excel file.
+
+        Excel structure (FEBRERO-26 sheet):
+        - Row 14: Schedule date in format "2026-02-09 00:00:00"
+        - Row 15: "Programa" and "Real" section headers
+        - Row 16: Column headers
+        - Row 17+: Data rows
+
+        Columns (Plant 1):
+        - Fecha Inicio, Fecha Fin, Fecha estimada entrega
+        - Formato, ITEMS (factory code), Diseño, Acabado
+        - Orden de producción, Planta, Nro de Turnos, Referencia
+        - Calidad PROMEDIO, Calidad Real, m2 Totales Netos
+        - Cant sug. salas, Cant sug. Distribución, m2 Primera exportacion (Programa)
+        - m2 Totales Netos, m2 Primera exportacion (Real)
+
+        Args:
+            excel_bytes: Excel file content as bytes
+            filename: Optional original filename
+
+        Returns:
+            Tuple of (ParsedProductionSchedule, list of ProductionScheduleCreate records)
+        """
+        logger.info(
+            "production_schedule_excel_parsing_started",
+            excel_size=len(excel_bytes),
+            filename=filename
+        )
+
+        try:
+            # Read Excel from bytes
+            excel = pd.ExcelFile(BytesIO(excel_bytes))
+
+            # Find the month sheet (e.g., "FEBRERO-26")
+            month_sheet = None
+            for sheet in excel.sheet_names:
+                # Look for pattern like "FEBRERO-26", "ENERO-26", etc.
+                if re.match(r'^[A-Z]+-\d+$', sheet):
+                    month_sheet = sheet
+                    break
+
+            if not month_sheet:
+                raise ValueError(
+                    f"No month sheet found (expected pattern like FEBRERO-26). "
+                    f"Available sheets: {excel.sheet_names}"
+                )
+
+            logger.info("found_month_sheet", sheet=month_sheet)
+
+            # Read raw data for header extraction
+            df_raw = pd.read_excel(
+                BytesIO(excel_bytes),
+                sheet_name=month_sheet,
+                header=None,
+                nrows=20
+            )
+
+            # Extract schedule date from row 14 (0-indexed)
+            schedule_date = date.today()
+            try:
+                date_cell = df_raw.iloc[14, 11]  # Column L (index 11)
+                if pd.notna(date_cell):
+                    if isinstance(date_cell, datetime):
+                        schedule_date = date_cell.date()
+                    elif isinstance(date_cell, str):
+                        schedule_date = datetime.strptime(
+                            date_cell.split()[0], "%Y-%m-%d"
+                        ).date()
+                    logger.info("extracted_schedule_date", date=str(schedule_date))
+            except Exception as e:
+                logger.warning("schedule_date_extraction_failed", error=str(e))
+
+            # Read data with header at row 16
+            df = pd.read_excel(
+                BytesIO(excel_bytes),
+                sheet_name=month_sheet,
+                header=16
+            )
+
+            # Parse line items for Claude Vision format
+            line_items = []
+            # Create ProductionScheduleCreate records for database
+            production_records = []
+
+            # Excel has Plant 1 and Plant 2 data side by side in each row
+            # Plant 1: columns without suffix
+            # Plant 2: columns with .1 suffix
+            plant_configs = [
+                {
+                    'plant': 1,
+                    'referencia_col': 'Referencia',
+                    'items_col': 'ITEMS',
+                    'fecha_inicio_col': 'Fecha Inicio',
+                    'fecha_fin_col': 'Fecha Fin',
+                    'formato_col': 'Formato',
+                    'diseno_col': 'Diseño',
+                    'acabado_col': 'Acabado',
+                    'turnos_col': 'Nro de Turnos',
+                    'calidad_col': 'Calidad PROMEDIO',
+                    'calidad_real_col': 'Calidad Real',
+                    'm2_totales_col': 'm2 Totales\nNetos',
+                    'm2_primera_programa_col': 'm2 Primera exportacion',
+                    'm2_primera_real_col': 'm2 Primera exportacion.1',
+                },
+                {
+                    'plant': 2,
+                    'referencia_col': 'Referencia.1',
+                    'items_col': 'ITEMS.1',
+                    'fecha_inicio_col': 'Fecha Inicio.1',
+                    'fecha_fin_col': 'Fecha Fin.1',
+                    'formato_col': 'Formato',  # Shared column
+                    'diseno_col': 'Diseño.1',
+                    'acabado_col': 'Acabado.1',
+                    'turnos_col': 'Nro de Turnos.1',
+                    'calidad_col': 'Calidad PROMEDIO.1',
+                    'calidad_real_col': 'Calidad Real.1',
+                    'm2_totales_col': 'm2 Totales\nNetos.2',
+                    'm2_primera_programa_col': 'm2 Primera exportacion.2',
+                    'm2_primera_real_col': 'm2 Primera exportacion.3',
+                },
+            ]
+
+            for idx, row in df.iterrows():
+                for config in plant_configs:
+                    plant = config['plant']
+
+                    # Get referencia for this plant
+                    referencia = row.get(config['referencia_col'])
+                    if pd.isna(referencia) or not referencia:
+                        continue
+                    referencia = str(referencia).strip()
+                    if 'MANTENIMIENTO' in referencia.upper():
+                        continue
+
+                    # Get factory code
+                    factory_code = row.get(config['items_col'])
+                    if pd.isna(factory_code) or factory_code == 0:
+                        factory_code = None
+                    else:
+                        factory_code = str(int(factory_code))
+
+                    # Get dates
+                    fecha_inicio = self._parse_excel_date(row.get(config['fecha_inicio_col']))
+                    fecha_fin = self._parse_excel_date(row.get(config['fecha_fin_col']))
+                    # Use standard fecha entrega column pattern
+                    fecha_entrega_col = [c for c in df.columns if 'estimada entrega' in str(c).lower()]
+                    fecha_entrega = None
+                    if fecha_entrega_col:
+                        fecha_entrega = self._parse_excel_date(row.get(fecha_entrega_col[0]))
+
+                    # Get format, design, finish
+                    formato = str(row.get(config['formato_col'], '')).strip() if pd.notna(row.get(config['formato_col'])) else None
+                    diseno = str(row.get(config['diseno_col'], '')).strip() if pd.notna(row.get(config['diseno_col'])) else None
+                    acabado = str(row.get(config['acabado_col'], '')).strip() if pd.notna(row.get(config['acabado_col'])) else None
+
+                    # Get quality and shifts
+                    shifts = self._parse_decimal(row.get(config['turnos_col']))
+                    quality_target = self._parse_decimal(row.get(config['calidad_col']))
+                    if quality_target and quality_target <= 1:
+                        quality_target = quality_target * 100  # Convert to percentage
+                    quality_actual = self._parse_decimal(row.get(config['calidad_real_col']))
+                    if quality_actual and quality_actual <= 1:
+                        quality_actual = quality_actual * 100
+
+                    # Get m² values
+                    m2_totales_programa = self._parse_decimal(row.get(config['m2_totales_col']))
+                    m2_primera_programa = self._parse_decimal(row.get(config['m2_primera_programa_col']))
+                    m2_primera_real = self._parse_decimal(row.get(config['m2_primera_real_col']))
+
+                    # Create ParsedProductionSchedule line item (for Claude format compatibility)
+                    if factory_code and fecha_inicio:
+                        line_item = ProductionScheduleLineItem(
+                            production_date=fecha_inicio,
+                            factory_code=factory_code,
+                            product_name=referencia,
+                            plant=plant,
+                            format=formato,
+                            design=diseno,
+                            finish=acabado,
+                            shifts=shifts,
+                            quality_target_pct=quality_target,
+                            quality_actual_pct=quality_actual,
+                            m2_total_net=m2_totales_programa,
+                            m2_export_first=m2_primera_programa or Decimal("0"),
+                        )
+                        line_items.append(line_item)
+
+                    # Determine status based on Real values
+                    requested = m2_primera_programa or Decimal("0")
+                    completed = m2_primera_real or Decimal("0")
+
+                    if completed > 0:
+                        if completed >= requested * Decimal("0.95"):  # 95% threshold
+                            status = ProductionStatus.COMPLETED
+                        else:
+                            status = ProductionStatus.IN_PROGRESS
+                    else:
+                        status = ProductionStatus.SCHEDULED
+
+                    # Create ProductionScheduleCreate record
+                    plant_str = f"plant_{plant}"
+                    production_record = ProductionScheduleCreate(
+                        factory_item_code=factory_code,
+                        referencia=referencia,
+                        plant=plant_str,
+                        requested_m2=requested,
+                        completed_m2=completed,
+                        status=status,
+                        scheduled_start_date=fecha_inicio,
+                        scheduled_end_date=fecha_fin,
+                        estimated_delivery_date=fecha_entrega,
+                        source_file=filename,
+                        source_month=month_sheet,
+                        source_row=idx + 17  # Actual row in Excel
+                    )
+                    production_records.append(production_record)
+
+            # Extract version from filename
+            version = None
+            if filename:
+                version_match = re.search(r'V(\d+)', filename)
+                if version_match:
+                    version = f"V{version_match.group(1)}"
+
+            # Build ParsedProductionSchedule
+            parsed = ParsedProductionSchedule(
+                schedule_date=schedule_date,
+                schedule_version=version,
+                schedule_month=month_sheet,
+                line_items=line_items,
+                parsing_confidence=0.95,  # High confidence for Excel parsing
+                parsing_notes=f"Parsed {len(line_items)} items from Excel ({month_sheet})"
+            )
+
+            logger.info(
+                "production_schedule_excel_parsing_completed",
+                schedule_date=str(schedule_date),
+                line_items_count=len(line_items),
+                production_records_count=len(production_records),
+                month_sheet=month_sheet
+            )
+
+            return parsed, production_records
+
+        except Exception as e:
+            logger.error("production_schedule_excel_parsing_failed", error=str(e))
+            raise ValueError(f"Excel parsing failed: {str(e)}")
+
+    def _parse_excel_date(self, value) -> Optional[date]:
+        """Parse date from Excel cell."""
+        if pd.isna(value):
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return datetime.strptime(str(value).split()[0], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    def _parse_decimal(self, value) -> Optional[Decimal]:
+        """Parse decimal from Excel cell."""
+        if pd.isna(value):
+            return None
+        try:
+            return Decimal(str(float(value)))
+        except Exception:
+            return None
 
 
 # Singleton instance

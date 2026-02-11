@@ -664,8 +664,8 @@ class ProductionScheduleService:
             if not sku:
                 continue
 
-            # Calculate fuzzy match score
-            score = fuzz.token_sort_ratio(factory_name.upper(), sku.upper())
+            # Calculate fuzzy match score (convert to int for model)
+            score = int(fuzz.token_sort_ratio(factory_name.upper(), sku.upper()))
 
             if score >= 50:  # Minimum threshold
                 suggestions.append(MatchSuggestion(

@@ -98,9 +98,9 @@ async def upload_sales(file: UploadFile = File(...)):
             if p.sku
         }
 
-        # Parse Excel file
+        # Parse Excel file (pass filename for .xls vs .xlsx engine detection)
         contents = await file.read()
-        parse_result = parse_owner_excel(contents, known_owner_codes, known_sku_names)
+        parse_result = parse_owner_excel(contents, known_owner_codes, known_sku_names, filename=file.filename)
 
         # Log errors but continue with valid records (partial success)
         if parse_result.errors:

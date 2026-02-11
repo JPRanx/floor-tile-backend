@@ -11,6 +11,7 @@ from datetime import date
 from decimal import Decimal
 import structlog
 
+from typing import Union
 from models.production_schedule import (
     ProductionScheduleUploadResponse,
     ProductionScheduleResponse,
@@ -19,6 +20,7 @@ from models.production_schedule import (
     UpcomingProductionResponse,
     # Order Builder integration
     UploadResult,
+    ProductionImportResult,
     MapProductRequest,
     MapProductResponse,
     UnmappedProduct,
@@ -60,41 +62,60 @@ def handle_error(e: Exception) -> JSONResponse:
 # UPLOAD & PARSE
 # ===================
 
+def _validate_file_type(filename: str) -> str:
+    """Validate file type and return 'pdf' or 'excel'."""
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    lower = filename.lower()
+    if lower.endswith('.pdf'):
+        return 'pdf'
+    if lower.endswith('.xlsx') or lower.endswith('.xls'):
+        return 'excel'
+    raise HTTPException(
+        status_code=400,
+        detail="File must be PDF (.pdf) or Excel (.xlsx, .xls)"
+    )
+
+
 @router.post("/upload", response_model=ProductionScheduleUploadResponse)
 async def upload_production_schedule(
-    file: UploadFile = File(..., description="Production schedule PDF file")
+    file: UploadFile = File(..., description="Production schedule PDF or Excel file")
 ):
     """
-    Upload and parse a production schedule PDF.
+    Upload and parse a production schedule PDF or Excel file.
 
-    Uses Claude Vision to extract production data from factory PDFs.
+    Uses Claude Vision for PDFs or pandas for Excel files.
     Automatically matches factory codes to products and saves to database.
 
     Returns:
         Parsed schedule data with match statistics
     """
     # Validate file type
-    if not file.filename or not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(
-            status_code=400,
-            detail="File must be a PDF"
-        )
+    file_type = _validate_file_type(file.filename)
 
     try:
         # Read file content
-        pdf_bytes = await file.read()
+        file_bytes = await file.read()
 
-        if len(pdf_bytes) == 0:
+        if len(file_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty file uploaded")
 
-        if len(pdf_bytes) > 10 * 1024 * 1024:  # 10MB limit
+        if len(file_bytes) > 10 * 1024 * 1024:  # 10MB limit
             raise HTTPException(status_code=400, detail="File too large (max 10MB)")
 
-        logger.info("production_schedule_upload_started", filename=file.filename, size=len(pdf_bytes))
+        logger.info(
+            "production_schedule_upload_started",
+            filename=file.filename,
+            size=len(file_bytes),
+            file_type=file_type
+        )
 
-        # Parse PDF with Claude Vision
+        # Parse based on file type
         parser = get_production_schedule_parser_service()
-        parsed_data = await parser.parse_pdf(pdf_bytes, filename=file.filename)
+        if file_type == 'excel':
+            parsed_data, _ = await parser.parse_excel(file_bytes, filename=file.filename)
+        else:
+            parsed_data = await parser.parse_pdf(file_bytes, filename=file.filename)
 
         if not parsed_data.line_items:
             return ProductionScheduleUploadResponse(
@@ -305,64 +326,93 @@ async def rematch_products():
 # ORDER BUILDER INTEGRATION
 # ===================
 
-@router.post("/upload-replace", response_model=UploadResult)
+@router.post("/upload-replace", response_model=ProductionImportResult)
 async def upload_and_replace_schedule(
-    file: UploadFile = File(..., description="Production schedule PDF file")
+    file: UploadFile = File(..., description="Production schedule PDF or Excel file")
 ):
     """
-    Upload a production schedule PDF, wiping and replacing all existing data.
+    Upload a production schedule Excel, wiping and replacing all existing data.
 
-    This is the preferred method for daily uploads where the new PDF
+    This is the preferred method for daily uploads where the new file
     represents the complete current state.
 
     Returns:
-        Upload result with matched/unmatched counts and fuzzy suggestions
+        Import result with matched/unmatched counts and status breakdown
     """
     # Validate file type
-    if not file.filename or not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(
-            status_code=400,
-            detail="File must be a PDF"
-        )
+    file_type = _validate_file_type(file.filename)
 
     try:
         # Read file content
-        pdf_bytes = await file.read()
+        file_bytes = await file.read()
 
-        if len(pdf_bytes) == 0:
+        if len(file_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty file uploaded")
 
-        if len(pdf_bytes) > 10 * 1024 * 1024:  # 10MB limit
+        if len(file_bytes) > 10 * 1024 * 1024:  # 10MB limit
             raise HTTPException(status_code=400, detail="File too large (max 10MB)")
 
         logger.info(
             "production_schedule_upload_replace_started",
             filename=file.filename,
-            size=len(pdf_bytes)
+            size=len(file_bytes),
+            file_type=file_type
         )
 
-        # Parse PDF with Claude Vision
+        # Parse based on file type
         parser = get_production_schedule_parser_service()
-        parsed_data = await parser.parse_pdf(pdf_bytes, filename=file.filename)
+        service = get_production_schedule_service()
 
-        if not parsed_data.line_items:
-            raise HTTPException(
-                status_code=400,
-                detail="No production items could be extracted from the PDF"
+        if file_type == 'excel':
+            # Excel uses the NEW schema with production_records
+            parsed_data, production_records = await parser.parse_excel(
+                file_bytes, filename=file.filename
             )
 
-        # Wipe and replace
-        service = get_production_schedule_service()
-        result = service.wipe_and_replace(parsed_data, filename=file.filename)
+            if not production_records:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No production items could be extracted from the Excel"
+                )
 
-        logger.info(
-            "production_schedule_upload_replace_completed",
-            total_rows=result.total_rows,
-            matched=result.matched_count,
-            unmatched=result.unmatched_count
-        )
+            # Wipe existing data
+            try:
+                from config import get_supabase_client
+                db = get_supabase_client()
+                db.table("production_schedule").delete().neq(
+                    "id", "00000000-0000-0000-0000-000000000000"
+                ).execute()
+                logger.info("existing_schedule_deleted")
+            except Exception as e:
+                logger.warning("delete_existing_failed", error=str(e))
 
-        return result
+            # Import using correct schema
+            result = service.import_from_excel(production_records, match_products=True)
+
+            logger.info(
+                "production_schedule_upload_replace_completed",
+                total_rows=result.total_rows_parsed,
+                matched=result.matched_to_products,
+                unmatched=len(result.unmatched_referencias)
+            )
+
+            return result
+
+        else:
+            # PDF uses old schema (requires migration 015)
+            parsed_data = await parser.parse_pdf(file_bytes, filename=file.filename)
+
+            if not parsed_data.line_items:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No production items could be extracted from the PDF"
+                )
+
+            # For PDF, attempt old method but this may fail without migration
+            raise HTTPException(
+                status_code=400,
+                detail="PDF upload not supported. Please use Excel format (.xlsx)"
+            )
 
     except HTTPException:
         raise

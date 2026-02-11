@@ -276,10 +276,17 @@ class BoatScheduleListResponse(BaseSchema):
     total_pages: int
 
 
+class SkippedRowInfo(BaseSchema):
+    """A row that was skipped during parsing."""
+    row: int = Field(..., description="Excel row number")
+    reason: str = Field(..., description="Why the row was skipped")
+
+
 class BoatUploadResult(BaseSchema):
     """Result of uploading a TIBA Excel file."""
 
     imported: int = Field(..., description="Number of new schedules imported")
     updated: int = Field(..., description="Number of existing schedules updated")
-    skipped: int = Field(0, description="Number of rows skipped")
+    skipped: int = Field(0, description="Number of rows skipped (unchanged)")
+    skipped_rows: list[SkippedRowInfo] = Field(default_factory=list, description="Rows skipped due to bad data")
     errors: list[str] = Field(default_factory=list, description="Error messages")

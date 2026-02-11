@@ -184,6 +184,24 @@ class InventoryUploadResponse(BaseSchema):
     message: str
 
 
+class InTransitProductDetail(BaseSchema):
+    """Single product in-transit detail."""
+    sku: str
+    in_transit_m2: float
+
+
+class InTransitUploadResponse(BaseSchema):
+    """Response from in-transit dispatch upload."""
+    success: bool
+    snapshot_date: date
+    products_updated: int
+    products_reset: int
+    total_in_transit_m2: float
+    excluded_orders: list[str] = Field(default_factory=list)
+    unmatched_skus: list[str] = Field(default_factory=list)
+    details: list[InTransitProductDetail] = Field(default_factory=list)
+
+
 class BulkInventoryCreate(BaseSchema):
     """
     Bulk create inventory snapshots from parsed Excel.
