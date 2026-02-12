@@ -108,11 +108,39 @@ class SalesHistoryResponse(BaseSchema):
     weeks_count: int
 
 
+class VerificationCheck(BaseSchema):
+    """Single verification check comparing Excel vs DB."""
+    excel: float
+    db: float
+    match: bool
+
+
+class SalesMismatch(BaseSchema):
+    """Per-product m² mismatch between Excel and DB."""
+    sku: str
+    excel_m2: float
+    db_m2: float
+    diff: float
+
+
+class SalesVerification(BaseSchema):
+    """Post-import verification results."""
+    status: str  # "VERIFIED" or "MISMATCH"
+    row_count: VerificationCheck
+    total_m2: VerificationCheck
+    products: VerificationCheck
+    mismatches: list[SalesMismatch] = []
+
+
 class SalesUploadResponse(BaseSchema):
     """Response from sales upload."""
 
-    created: int
-    records: list[SalesRecordResponse]
+    success: bool = True
+    inserted: int
+    deleted: int = 0
+    date_range: Optional[dict] = None
+    verification: Optional[SalesVerification] = None
+    warnings: list[str] = []
 
 
 class BulkSalesCreate(BaseSchema):

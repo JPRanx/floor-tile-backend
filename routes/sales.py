@@ -12,12 +12,17 @@ import structlog
 
 from decimal import Decimal
 
+from collections import defaultdict
+
 from models.sales import (
     SalesRecordCreate,
     SalesRecordUpdate,
     SalesRecordResponse,
     SalesListResponse,
     SalesUploadResponse,
+    SalesVerification,
+    VerificationCheck,
+    SalesMismatch,
     SACUploadResponse,
 )
 from services.sales_service import get_sales_service
@@ -139,6 +144,8 @@ async def upload_sales(file: UploadFile = File(...)):
         ]
 
         sales_service = get_sales_service()
+        deleted = 0
+        min_date = max_date = None
 
         if sales_records:
             # Make upload idempotent: delete existing records in date range
@@ -157,9 +164,75 @@ async def upload_sales(file: UploadFile = File(...)):
             records_created=len(created)
         )
 
+        # --- Inline verification (bridge code — remove with Excel imports) ---
+        verification = None
+        warnings = []
+        if sales_records and min_date and max_date:
+            # Excel-side totals
+            excel_m2_by_product: dict[str, float] = defaultdict(float)
+            for r in sales_records:
+                excel_m2_by_product[r.product_id] += float(r.quantity_m2)
+            excel_total_m2 = sum(excel_m2_by_product.values())
+            excel_product_count = len(excel_m2_by_product)
+
+            # DB-side totals
+            db = sales_service.db
+            db_rows = (
+                db.table("sales")
+                .select("product_id, quantity_m2")
+                .gte("week_start", min_date.isoformat())
+                .lte("week_start", max_date.isoformat())
+                .execute()
+            )
+            db_m2_by_product: dict[str, float] = defaultdict(float)
+            for row in db_rows.data:
+                db_m2_by_product[row["product_id"]] += float(row["quantity_m2"])
+            db_total_m2 = sum(db_m2_by_product.values())
+            db_row_count = len(db_rows.data)
+            db_product_count = len(db_m2_by_product)
+
+            # Per-product mismatches
+            mismatches = []
+            all_pids = set(excel_m2_by_product) | set(db_m2_by_product)
+            # Build reverse lookup: product_id -> sku
+            pid_to_sku = {}
+            for r in parse_result.sales:
+                if r.product_id and r.product_id not in pid_to_sku:
+                    pid_to_sku[r.product_id] = r.sku
+            for pid in all_pids:
+                e_m2 = excel_m2_by_product.get(pid, 0.0)
+                d_m2 = db_m2_by_product.get(pid, 0.0)
+                if abs(e_m2 - d_m2) > 0.01:
+                    mismatches.append(SalesMismatch(
+                        sku=pid_to_sku.get(pid, pid[:8]),
+                        excel_m2=round(e_m2, 2),
+                        db_m2=round(d_m2, 2),
+                        diff=round(d_m2 - e_m2, 2),
+                    ))
+
+            row_match = len(sales_records) == db_row_count
+            m2_match = abs(excel_total_m2 - db_total_m2) < 0.01
+            prod_match = excel_product_count == db_product_count
+            status = "VERIFIED" if (row_match and m2_match and not mismatches) else "MISMATCH"
+
+            verification = SalesVerification(
+                status=status,
+                row_count=VerificationCheck(excel=len(sales_records), db=db_row_count, match=row_match),
+                total_m2=VerificationCheck(excel=round(excel_total_m2, 2), db=round(db_total_m2, 2), match=m2_match),
+                products=VerificationCheck(excel=excel_product_count, db=db_product_count, match=prod_match),
+                mismatches=mismatches,
+            )
+
+            if deleted > 0 and abs(deleted - len(sales_records)) > len(sales_records) * 0.5:
+                warnings.append(f"Deleted {deleted} rows but only inserted {len(sales_records)} — check if correct file was uploaded")
+
         return SalesUploadResponse(
-            created=len(created),
-            records=created
+            success=True,
+            inserted=len(created),
+            deleted=deleted,
+            date_range={"start": min_date.isoformat(), "end": max_date.isoformat()} if min_date else None,
+            verification=verification,
+            warnings=warnings,
         )
 
     except (ExcelParseError, AppError) as e:
