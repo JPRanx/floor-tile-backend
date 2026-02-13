@@ -214,4 +214,5 @@ class LiquidationProductResponse(BaseSchema):
     inactive_reason: Optional[InactiveReason] = None
     inactive_date: Optional[date] = None
     warehouse_m2: float              # Latest warehouse_qty from inventory_snapshots
+    factory_m2: float = 0.0          # Latest factory_available_m2 from inventory_snapshots
     days_since_last_sale: Optional[int] = None  # Today - max(sales.week_start), None if no sales

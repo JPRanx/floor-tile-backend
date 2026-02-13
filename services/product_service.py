@@ -617,26 +617,31 @@ class ProductService:
             # - Loop through results, keep only the first (latest) per product_id
             inventory_result = (
                 self.db.table("inventory_snapshots")
-                .select("product_id, warehouse_qty, snapshot_date")
+                .select("product_id, warehouse_qty, factory_available_m2, snapshot_date")
                 .order("product_id")
                 .order("snapshot_date", desc=True)
                 .execute()
             )
 
-            # Build dict of latest warehouse_qty per product_id
+            # Build dict of latest warehouse_qty and factory_available_m2 per product_id
             latest_inventory = {}
             for row in (inventory_result.data or []):
                 pid = row["product_id"]
                 if pid not in latest_inventory:
-                    latest_inventory[pid] = float(row["warehouse_qty"])
+                    latest_inventory[pid] = {
+                        "warehouse_m2": float(row.get("warehouse_qty") or 0),
+                        "factory_m2": float(row.get("factory_available_m2") or 0),
+                    }
 
-            # 3. Filter inactive products to those with warehouse_qty > 0
+            # 3. Filter inactive products to those with warehouse_qty > 0 OR factory_m2 > 0
             candidates = []
             for product in products_result.data:
                 pid = product["id"]
-                warehouse_m2 = latest_inventory.get(pid, 0.0)
-                if warehouse_m2 > 0:
-                    candidates.append((product, warehouse_m2))
+                inv = latest_inventory.get(pid, {})
+                warehouse_m2 = inv.get("warehouse_m2", 0.0)
+                factory_m2 = inv.get("factory_m2", 0.0)
+                if warehouse_m2 > 0 or factory_m2 > 0:
+                    candidates.append((product, warehouse_m2, factory_m2))
 
             if not candidates:
                 logger.info("liquidation_products_retrieved", count=0)
@@ -664,7 +669,7 @@ class ProductService:
             # 5. Build response list, ordered by warehouse_m2 DESC
             today = date_type.today()
             results = []
-            for product, warehouse_m2 in candidates:
+            for product, warehouse_m2, factory_m2 in candidates:
                 pid = product["id"]
                 days_since = None
                 if pid in latest_sale:
@@ -679,6 +684,7 @@ class ProductService:
                     inactive_reason=product.get("inactive_reason"),
                     inactive_date=product.get("inactive_date"),
                     warehouse_m2=warehouse_m2,
+                    factory_m2=factory_m2,
                     days_since_last_sale=days_since,
                 ))
 
