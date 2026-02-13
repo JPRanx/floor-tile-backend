@@ -195,11 +195,23 @@ class ProductListResponse(BaseSchema):
 class ProductWithStats(ProductResponse):
     """
     Product with calculated statistics.
-    
+
     Extended response for dashboard views.
     """
-    
+
     warehouse_qty: Optional[float] = Field(None, description="Current warehouse quantity (m²)")
     daily_velocity: Optional[float] = Field(None, description="Average daily sales (m²)")
     days_until_empty: Optional[float] = Field(None, description="Days until stockout")
     status: Optional[str] = Field(None, description="Stockout status: CRITICAL, WARNING, OK, NO_SALES")
+
+
+class LiquidationProductResponse(BaseSchema):
+    """Deactivated product with remaining warehouse stock."""
+    id: str
+    sku: str
+    category: Category
+    rotation: Optional[Rotation] = None
+    inactive_reason: Optional[InactiveReason] = None
+    inactive_date: Optional[date] = None
+    warehouse_m2: float              # Latest warehouse_qty from inventory_snapshots
+    days_since_last_sale: Optional[int] = None  # Today - max(sales.week_start), None if no sales

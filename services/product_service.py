@@ -13,6 +13,7 @@ from models.product import (
     ProductCreate,
     ProductUpdate,
     ProductResponse,
+    LiquidationProductResponse,
     Category,
     Rotation,
     InactiveReason,
@@ -593,6 +594,103 @@ class ProductService:
         except Exception as e:
             logger.error("count_products_failed", error=str(e))
             raise DatabaseError("count", str(e))
+
+    def get_liquidation_products(self) -> list[LiquidationProductResponse]:
+        """Get deactivated products that still have warehouse inventory."""
+        logger.info("getting_liquidation_products")
+
+        try:
+            # 1. Query products where active=false
+            products_result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("active", False)
+                .execute()
+            )
+            if not products_result.data:
+                logger.info("liquidation_products_retrieved", count=0)
+                return []
+
+            # 2. Get latest inventory_snapshots per product
+            # Follow the inventory_service.get_latest() pattern:
+            # - Query inventory_snapshots table, order by product_id then snapshot_date DESC
+            # - Loop through results, keep only the first (latest) per product_id
+            inventory_result = (
+                self.db.table("inventory_snapshots")
+                .select("product_id, warehouse_qty, snapshot_date")
+                .order("product_id")
+                .order("snapshot_date", desc=True)
+                .execute()
+            )
+
+            # Build dict of latest warehouse_qty per product_id
+            latest_inventory = {}
+            for row in (inventory_result.data or []):
+                pid = row["product_id"]
+                if pid not in latest_inventory:
+                    latest_inventory[pid] = float(row["warehouse_qty"])
+
+            # 3. Filter inactive products to those with warehouse_qty > 0
+            candidates = []
+            for product in products_result.data:
+                pid = product["id"]
+                warehouse_m2 = latest_inventory.get(pid, 0.0)
+                if warehouse_m2 > 0:
+                    candidates.append((product, warehouse_m2))
+
+            if not candidates:
+                logger.info("liquidation_products_retrieved", count=0)
+                return []
+
+            # 4. For each candidate, query max(sales.week_start) to get days_since_last_sale
+            from datetime import date as date_type
+            candidate_ids = [c[0]["id"] for c in candidates]
+
+            sales_result = (
+                self.db.table("sales")
+                .select("product_id, week_start")
+                .in_("product_id", candidate_ids)
+                .order("week_start", desc=True)
+                .execute()
+            )
+
+            # Build dict of latest sale date per product
+            latest_sale = {}
+            for row in (sales_result.data or []):
+                pid = row["product_id"]
+                if pid not in latest_sale:
+                    latest_sale[pid] = row["week_start"]
+
+            # 5. Build response list, ordered by warehouse_m2 DESC
+            today = date_type.today()
+            results = []
+            for product, warehouse_m2 in candidates:
+                pid = product["id"]
+                days_since = None
+                if pid in latest_sale:
+                    last_sale_date = date_type.fromisoformat(latest_sale[pid])
+                    days_since = (today - last_sale_date).days
+
+                results.append(LiquidationProductResponse(
+                    id=pid,
+                    sku=product["sku"],
+                    category=product["category"],
+                    rotation=product.get("rotation"),
+                    inactive_reason=product.get("inactive_reason"),
+                    inactive_date=product.get("inactive_date"),
+                    warehouse_m2=warehouse_m2,
+                    days_since_last_sale=days_since,
+                ))
+
+            # Sort by warehouse_m2 descending
+            results.sort(key=lambda x: x.warehouse_m2, reverse=True)
+
+            logger.info("liquidation_products_retrieved", count=len(results))
+            return results
+
+        except Exception as e:
+            logger.error("get_liquidation_products_failed", error=str(e))
+            raise DatabaseError("select", str(e))
 
 
 # Singleton instance for convenience

@@ -17,6 +17,7 @@ from models.product import (
     ProductUpdate,
     ProductResponse,
     ProductListResponse,
+    LiquidationProductResponse,
     Category,
     Rotation,
     InactiveReason
@@ -113,6 +114,16 @@ async def list_products(
             total_pages=total_pages
         )
         
+    except Exception as e:
+        return handle_error(e)
+
+
+@router.get("/liquidation", response_model=list[LiquidationProductResponse])
+async def get_liquidation_products():
+    """Get deactivated products with remaining warehouse stock."""
+    try:
+        service = get_product_service()
+        return service.get_liquidation_products()
     except Exception as e:
         return handle_error(e)
 
