@@ -88,7 +88,7 @@ class Settings(BaseSettings):
         description="Maximum pallets per container"
     )
     container_max_weight_kg: int = Field(
-        default=28000,
+        default=27500,
         ge=1000,
         le=50000,
         description="Maximum weight per container in kg"

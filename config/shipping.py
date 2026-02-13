@@ -123,6 +123,33 @@ SEASONAL_DAMPENING = {
 }
 
 
+def get_shipping_config() -> dict:
+    """Get shipping config from database with fallbacks to module-level constants."""
+    from services.config_service import get_config_service
+    try:
+        config = get_config_service()
+        return {
+            "M2_PER_PALLET": config.get_decimal("m2_per_pallet", M2_PER_PALLET),
+            "CONTAINER_MAX_WEIGHT_KG": config.get_int("container_max_weight_kg", CONTAINER_MAX_WEIGHT_KG),
+            "CONTAINER_MAX_PALLETS": config.get_int("container_max_pallets", CONTAINER_MAX_PALLETS),
+            "DEFAULT_WEIGHT_PER_M2_KG": config.get_decimal("weight_per_m2_kg", DEFAULT_WEIGHT_PER_M2_KG),
+            "PORT_BUFFER_DAYS": config.get_int("port_buffer_days", PORT_BUFFER_DAYS),
+            "TRUCKING_DAYS": config.get_int("trucking_days", TRUCKING_DAYS),
+            "ORDERING_CYCLE_DAYS": config.get_int("ordering_cycle_days", ORDERING_CYCLE_DAYS),
+        }
+    except Exception:
+        # DB not available — use hardcoded defaults
+        return {
+            "M2_PER_PALLET": M2_PER_PALLET,
+            "CONTAINER_MAX_WEIGHT_KG": CONTAINER_MAX_WEIGHT_KG,
+            "CONTAINER_MAX_PALLETS": CONTAINER_MAX_PALLETS,
+            "DEFAULT_WEIGHT_PER_M2_KG": DEFAULT_WEIGHT_PER_M2_KG,
+            "PORT_BUFFER_DAYS": PORT_BUFFER_DAYS,
+            "TRUCKING_DAYS": TRUCKING_DAYS,
+            "ORDERING_CYCLE_DAYS": ORDERING_CYCLE_DAYS,
+        }
+
+
 def get_container_weight_limit(db_value: Optional[Decimal] = None) -> float:
     """
     Get container weight limit from database or use default.

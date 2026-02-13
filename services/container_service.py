@@ -29,10 +29,11 @@ from exceptions import (
 logger = structlog.get_logger(__name__)
 
 
-# Container limits (soft warnings)
-MAX_WEIGHT_KG = Decimal("28000")
-MAX_PALLETS = 14
-MAX_M2 = Decimal("1881")
+# Container limits (soft warnings) — sourced from shipping config
+from config.shipping import CONTAINER_MAX_WEIGHT_KG, CONTAINER_MAX_PALLETS, M2_PER_PALLET
+MAX_WEIGHT_KG = Decimal(str(CONTAINER_MAX_WEIGHT_KG))
+MAX_PALLETS = CONTAINER_MAX_PALLETS
+MAX_M2 = M2_PER_PALLET * MAX_PALLETS  # 134.4 × 14 = 1881.6
 
 
 class ContainerService:
