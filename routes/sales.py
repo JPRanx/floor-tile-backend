@@ -5,7 +5,7 @@ Handles weekly sales records from owner Excel uploads.
 """
 
 from datetime import date
-from fastapi import APIRouter, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse
 from typing import Optional
 import structlog
@@ -23,10 +23,13 @@ from models.sales import (
     SalesVerification,
     VerificationCheck,
     SalesMismatch,
+    SalesPreview,
+    SalesPreviewRow,
     SACUploadResponse,
 )
 from services.sales_service import get_sales_service
 from services.product_service import get_product_service
+from services import preview_cache_service
 from parsers.excel_parser import parse_owner_excel
 from parsers.sac_parser import parse_sac_csv
 from utils.text_utils import normalize_customer_name, clean_customer_name, normalize_product_name
@@ -70,6 +73,217 @@ def handle_error(e: Exception) -> JSONResponse:
 # UPLOAD ROUTES
 # ===================
 
+
+def _parse_sales_file(file_contents: bytes, filename: str | None = None):
+    """Parse sales Excel and return (sales_records, warnings, parse_result)."""
+    product_service = get_product_service()
+    products, _ = product_service.get_all(page=1, page_size=1000, active_only=False)
+
+    known_owner_codes = {
+        p.owner_code: p.id for p in products if p.owner_code is not None
+    }
+    from parsers.excel_parser import _normalize_sku_name
+    known_sku_names = {
+        _normalize_sku_name(p.sku): p.id for p in products if p.sku
+    }
+
+    parse_result = parse_owner_excel(file_contents, known_owner_codes, known_sku_names, filename=filename)
+
+    warnings = []
+    if parse_result.errors:
+        unknown_products = [e for e in parse_result.errors if "Unknown product" in e.error]
+        other_errors = [e for e in parse_result.errors if "Unknown product" not in e.error]
+
+        if unknown_products:
+            unique_unknown = set(e.error.split(": ")[1] for e in unknown_products if ": " in e.error)
+            warnings = [f"Unknown product: {sku}" for sku in unique_unknown]
+
+        if other_errors:
+            raise ExcelParseError(
+                message=f"Upload failed with {len(other_errors)} validation errors",
+                details={"errors": [e.__dict__ for e in other_errors[:20]]}
+            )
+
+    sales_records = [
+        SalesRecordCreate(
+            product_id=record.product_id,
+            week_start=record.sale_date,
+            quantity_m2=record.quantity,
+            customer=clean_customer_name(record.customer),
+            customer_normalized=normalize_customer_name(record.customer),
+        )
+        for record in parse_result.sales
+    ]
+
+    return sales_records, warnings, parse_result
+
+
+@router.post("/upload/preview", response_model=SalesPreview)
+async def preview_sales_upload(file: UploadFile = File(...)):
+    """Parse sales Excel and return preview. Nothing is saved."""
+    try:
+        contents = await file.read()
+        sales_records, warnings, parse_result = _parse_sales_file(contents, filename=file.filename)
+
+        if not sales_records:
+            raise ExcelParseError(
+                message="No valid sales records found in file",
+                details={}
+            )
+
+        row_count = len(sales_records)
+        product_count = len(set(r.product_id for r in sales_records))
+        total_m2 = sum(float(r.quantity_m2) for r in sales_records)
+        dates = [r.week_start for r in sales_records]
+        date_range_start = min(dates)
+        date_range_end = max(dates)
+
+        # Build reverse lookup for SKU names from parse_result
+        pid_to_sku: dict[str, str] = {}
+        for r in parse_result.sales:
+            if r.product_id and r.product_id not in pid_to_sku:
+                pid_to_sku[r.product_id] = r.sku
+
+        sample_rows = [
+            SalesPreviewRow(
+                sku=pid_to_sku.get(r.product_id, r.product_id[:8]),
+                week_start=r.week_start,
+                quantity_m2=float(r.quantity_m2),
+                customer=r.customer,
+            )
+            for r in sales_records[:10]
+        ]
+
+        preview_id = preview_cache_service.store_preview(sales_records)
+
+        logger.info(
+            "sales_preview_created",
+            preview_id=preview_id,
+            row_count=row_count,
+            product_count=product_count,
+            total_m2=round(total_m2, 2),
+        )
+
+        return SalesPreview(
+            preview_id=preview_id,
+            row_count=row_count,
+            product_count=product_count,
+            total_m2=round(total_m2, 2),
+            date_range_start=date_range_start,
+            date_range_end=date_range_end,
+            warnings=warnings,
+            sample_rows=sample_rows,
+        )
+
+    except (ExcelParseError, AppError) as e:
+        return handle_error(e)
+    except Exception as e:
+        logger.error("sales_preview_failed", error=str(e))
+        return handle_error(e)
+
+
+@router.post("/upload/confirm/{preview_id}", response_model=SalesUploadResponse)
+async def confirm_sales_upload(preview_id: str):
+    """Save previously previewed sales data."""
+    try:
+        sales_records = preview_cache_service.retrieve_preview(preview_id)
+        if sales_records is None:
+            raise HTTPException(status_code=404, detail="Preview expired")
+
+        sales_service = get_sales_service()
+        deleted = 0
+        min_date = max_date = None
+
+        if sales_records:
+            dates = [r.week_start for r in sales_records]
+            min_date = min(dates)
+            max_date = max(dates)
+            deleted = sales_service.delete_by_date_range(min_date, max_date)
+            if deleted > 0:
+                logger.info("sales_deleted_before_upload", count=deleted)
+
+        created = sales_service.bulk_create(sales_records)
+
+        logger.info(
+            "sales_confirm_complete",
+            preview_id=preview_id,
+            records_created=len(created),
+        )
+
+        # --- Inline verification (bridge code — remove with Excel imports) ---
+        verification = None
+        warnings = []
+        if sales_records and min_date and max_date:
+            excel_m2_by_product: dict[str, float] = defaultdict(float)
+            for r in sales_records:
+                excel_m2_by_product[r.product_id] += float(r.quantity_m2)
+            excel_total_m2 = sum(excel_m2_by_product.values())
+            excel_product_count = len(excel_m2_by_product)
+
+            db = sales_service.db
+            db_rows = (
+                db.table("sales")
+                .select("product_id, quantity_m2")
+                .gte("week_start", min_date.isoformat())
+                .lte("week_start", max_date.isoformat())
+                .execute()
+            )
+            db_m2_by_product: dict[str, float] = defaultdict(float)
+            for row in db_rows.data:
+                db_m2_by_product[row["product_id"]] += float(row["quantity_m2"])
+            db_total_m2 = sum(db_m2_by_product.values())
+            db_row_count = len(db_rows.data)
+            db_product_count = len(db_m2_by_product)
+
+            mismatches = []
+            all_pids = set(excel_m2_by_product) | set(db_m2_by_product)
+            for pid in all_pids:
+                e_m2 = excel_m2_by_product.get(pid, 0.0)
+                d_m2 = db_m2_by_product.get(pid, 0.0)
+                if abs(e_m2 - d_m2) > 0.01:
+                    mismatches.append(SalesMismatch(
+                        sku=pid[:8],
+                        excel_m2=round(e_m2, 2),
+                        db_m2=round(d_m2, 2),
+                        diff=round(d_m2 - e_m2, 2),
+                    ))
+
+            row_match = len(sales_records) == db_row_count
+            m2_match = abs(excel_total_m2 - db_total_m2) < 0.01
+            prod_match = excel_product_count == db_product_count
+            status = "VERIFIED" if (row_match and m2_match and not mismatches) else "MISMATCH"
+
+            verification = SalesVerification(
+                status=status,
+                row_count=VerificationCheck(excel=len(sales_records), db=db_row_count, match=row_match),
+                total_m2=VerificationCheck(excel=round(excel_total_m2, 2), db=round(db_total_m2, 2), match=m2_match),
+                products=VerificationCheck(excel=excel_product_count, db=db_product_count, match=prod_match),
+                mismatches=mismatches,
+            )
+
+            if deleted > 0 and abs(deleted - len(sales_records)) > len(sales_records) * 0.5:
+                warnings.append(f"Deleted {deleted} rows but only inserted {len(sales_records)} — check if correct file was uploaded")
+
+        preview_cache_service.delete_preview(preview_id)
+
+        return SalesUploadResponse(
+            success=True,
+            inserted=len(created),
+            deleted=deleted,
+            date_range={"start": min_date.isoformat(), "end": max_date.isoformat()} if min_date else None,
+            verification=verification,
+            warnings=warnings,
+        )
+
+    except HTTPException:
+        raise
+    except (AppError,) as e:
+        return handle_error(e)
+    except Exception as e:
+        logger.error("sales_confirm_failed", error=str(e), preview_id=preview_id)
+        return handle_error(e)
+
+
 @router.post("/upload", response_model=SalesUploadResponse)
 async def upload_sales(file: UploadFile = File(...)):
     """
@@ -82,66 +296,8 @@ async def upload_sales(file: UploadFile = File(...)):
         SalesUploadResponse with created records
     """
     try:
-        # Get products with owner_code mappings
-        product_service = get_product_service()
-        products, _ = product_service.get_all(page=1, page_size=1000, active_only=False)
-
-        # Build lookup: owner_code -> product_id
-        # Excel SKU column contains owner codes (102, 119, etc.)
-        known_owner_codes = {
-            p.owner_code: p.id
-            for p in products
-            if p.owner_code is not None
-        }
-
-        # Build lookup: normalized SKU name -> product_id
-        # For Excel files that use product names instead of codes
-        from parsers.excel_parser import _normalize_sku_name
-        known_sku_names = {
-            _normalize_sku_name(p.sku): p.id
-            for p in products
-            if p.sku
-        }
-
-        # Parse Excel file (pass filename for .xls vs .xlsx engine detection)
         contents = await file.read()
-        parse_result = parse_owner_excel(contents, known_owner_codes, known_sku_names, filename=file.filename)
-
-        # Log errors but continue with valid records (partial success)
-        if parse_result.errors:
-            # Group errors by type for logging
-            unknown_products = [e for e in parse_result.errors if "Unknown product" in e.error]
-            other_errors = [e for e in parse_result.errors if "Unknown product" not in e.error]
-
-            if unknown_products:
-                unique_unknown = set(e.error.split(": ")[1] for e in unknown_products if ": " in e.error)
-                logger.warning(
-                    "sales_upload_unknown_products",
-                    count=len(unknown_products),
-                    unique_products=len(unique_unknown),
-                    sample=list(unique_unknown)[:5]
-                )
-
-            # Only reject if there are non-product errors (validation errors)
-            if other_errors:
-                raise ExcelParseError(
-                    message=f"Upload failed with {len(other_errors)} validation errors",
-                    details={"errors": [e.__dict__ for e in other_errors[:20]]}
-                )
-
-        # Convert parsed sales records to SalesRecordCreate
-        # product_id already resolved by parser
-        # customer name is cleaned and normalized for grouping
-        sales_records = [
-            SalesRecordCreate(
-                product_id=record.product_id,
-                week_start=record.sale_date,
-                quantity_m2=record.quantity,
-                customer=clean_customer_name(record.customer),
-                customer_normalized=normalize_customer_name(record.customer),
-            )
-            for record in parse_result.sales
-        ]
+        sales_records, warnings, parse_result = _parse_sales_file(contents, filename=file.filename)
 
         sales_service = get_sales_service()
         deleted = 0

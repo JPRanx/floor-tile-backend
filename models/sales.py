@@ -149,6 +149,27 @@ class BulkSalesCreate(BaseSchema):
     records: list[SalesRecordCreate]
 
 
+class SalesPreviewRow(BaseSchema):
+    """Sample row shown in preview."""
+    sku: str
+    week_start: date
+    quantity_m2: float
+    customer: Optional[str] = None
+
+
+class SalesPreview(BaseSchema):
+    """Preview response — stats + sample rows, nothing saved yet."""
+    preview_id: str
+    row_count: int
+    product_count: int
+    total_m2: float
+    date_range_start: date
+    date_range_end: date
+    warnings: list[str] = Field(default_factory=list)
+    sample_rows: list[SalesPreviewRow] = Field(default_factory=list)
+    expires_in_minutes: int = 30
+
+
 class SACUploadResponse(BaseSchema):
     """Response from SAC sales CSV upload."""
 
