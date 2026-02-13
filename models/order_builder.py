@@ -692,6 +692,21 @@ class OrderBuilderSummary(BaseSchema):
     alerts: list[OrderBuilderAlert] = Field(default_factory=list)
 
 
+class LiquidationClearanceProduct(BaseSchema):
+    """Deactivated product with remaining SIESA factory stock to clear out."""
+    product_id: str
+    sku: str
+    description: Optional[str] = None
+    factory_available_m2: Decimal          # SIESA finished goods
+    factory_lot_count: int = 0
+    warehouse_m2: Decimal = Decimal("0")   # Guatemala warehouse (may also have stock)
+    suggested_pallets: int                  # ceil(factory_m2 / M2_PER_PALLET) — bring it ALL
+    suggested_m2: Decimal                   # = factory_available_m2 (all of it)
+    days_since_last_sale: Optional[int] = None
+    inactive_reason: Optional[str] = None
+    inactive_date: Optional[date] = None
+
+
 class LiquidationReason(str, Enum):
     """Reasons why a product is a liquidation candidate."""
     DECLINING_OVERSTOCKED = "declining_overstocked"  # Declining trend + high stock
@@ -1071,6 +1086,9 @@ class OrderBuilderResponse(BaseSchema):
     stability_forecast: Optional["StabilityForecast"] = Field(
         None, description="Cycle stability forecast showing when system will be stable"
     )
+
+    # === Liquidation Clearance (deactivated products with factory stock) ===
+    liquidation_clearance: list[LiquidationClearanceProduct] = Field(default_factory=list)
 
 
 # ===================

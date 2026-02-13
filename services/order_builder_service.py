@@ -46,6 +46,7 @@ from models.order_builder import (
     CalculationBreakdown,
     ConstraintAnalysis,
     LiquidationCandidate,
+    LiquidationClearanceProduct,
     Urgency,
     # Reasoning models
     ProductReasoning,
@@ -293,6 +294,9 @@ class OrderBuilderService:
             available_boats
         )
 
+        # Step 12: Get liquidation clearance candidates (deactivated products with factory stock)
+        liquidation_clearance = self._get_liquidation_clearance()
+
         result = OrderBuilderResponse(
             boat=boat,
             next_boat=next_boat,
@@ -317,6 +321,8 @@ class OrderBuilderService:
             unable_to_ship=unable_to_ship,
             # Stability forecast
             stability_forecast=stability_forecast,
+            # Liquidation clearance (deactivated products with factory stock)
+            liquidation_clearance=liquidation_clearance,
         )
 
         logger.info(
@@ -1668,6 +1674,96 @@ class OrderBuilderService:
         warehouse_current_pallets = int(warehouse_current_m2 / M2_PER_PALLET)
         available = max(0, WAREHOUSE_CAPACITY - warehouse_current_pallets)
         return available
+
+    def _get_days_since_last_sale(self, product_id: str) -> Optional[int]:
+        """Days since last sale for a product."""
+        sales_result = (
+            self.inventory_service.db.table("sales")
+            .select("week_start")
+            .eq("product_id", product_id)
+            .order("week_start", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if sales_result.data:
+            last_sale = date.fromisoformat(sales_result.data[0]["week_start"])
+            return (date.today() - last_sale).days
+        return None
+
+    def _get_liquidation_clearance(self) -> list[LiquidationClearanceProduct]:
+        """
+        Find deactivated products with SIESA factory stock.
+        These should be ordered to Guatemala to sell off.
+        """
+        # 1. Query inactive products
+        products_result = (
+            self.inventory_service.db.table("products")
+            .select("id, sku, description, inactive_reason, inactive_date")
+            .eq("active", False)
+            .execute()
+        )
+        if not products_result.data:
+            return []
+
+        # 2. Get latest inventory snapshots (factory_available_m2, warehouse_qty)
+        product_ids = [p["id"] for p in products_result.data]
+        inventory_result = (
+            self.inventory_service.db.table("inventory_snapshots")
+            .select("product_id, factory_available_m2, factory_lot_count, warehouse_qty, snapshot_date")
+            .in_("product_id", product_ids)
+            .order("product_id")
+            .order("snapshot_date", desc=True)
+            .execute()
+        )
+
+        # Build dict of latest snapshot per product
+        latest_inv = {}
+        seen = set()
+        for inv in (inventory_result.data or []):
+            pid = inv["product_id"]
+            if pid not in seen:
+                seen.add(pid)
+                latest_inv[pid] = inv
+
+        # 3. Filter to factory_available_m2 > 0
+        candidates = []
+        for product in products_result.data:
+            inv = latest_inv.get(product["id"])
+            if not inv:
+                continue
+            factory_m2 = Decimal(str(inv.get("factory_available_m2") or 0))
+            if factory_m2 <= 0:
+                continue
+
+            warehouse_m2 = Decimal(str(inv.get("warehouse_qty") or 0))
+            suggested_pallets = math.ceil(float(factory_m2 / M2_PER_PALLET))
+
+            # Get days since last sale
+            days_since_last_sale = self._get_days_since_last_sale(product["id"])
+
+            candidates.append(LiquidationClearanceProduct(
+                product_id=product["id"],
+                sku=product["sku"],
+                description=product.get("description"),
+                factory_available_m2=factory_m2,
+                factory_lot_count=int(inv.get("factory_lot_count") or 0),
+                warehouse_m2=warehouse_m2,
+                suggested_pallets=suggested_pallets,
+                suggested_m2=factory_m2,
+                days_since_last_sale=days_since_last_sale,
+                inactive_reason=product.get("inactive_reason"),
+                inactive_date=product.get("inactive_date"),
+            ))
+
+        # Sort by factory stock DESC (biggest clearance opportunity first)
+        candidates.sort(key=lambda c: c.factory_available_m2, reverse=True)
+
+        logger.info(
+            "liquidation_clearance_found",
+            count=len(candidates),
+        )
+
+        return candidates
 
     def _identify_liquidation_candidates(
         self,
