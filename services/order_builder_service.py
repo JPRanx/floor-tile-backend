@@ -28,6 +28,7 @@ from config.shipping import (
     LIQUIDATION_EXTREME_DAYS_MIN,
     SEASONAL_DAMPENING,
 )
+from services.config_service import get_config_service
 from services.boat_schedule_service import get_boat_schedule_service
 from services.recommendation_service import get_recommendation_service
 from services.inventory_service import get_inventory_service
@@ -1556,10 +1557,14 @@ class OrderBuilderService:
                 buffer_days=buffer_days,
             )
 
+            # Look up per-product weight from product type config
+            product_weight_per_m2, _ = get_config_service().get_product_physics(rec.category)
+
             product = OrderBuilderProduct(
                 product_id=rec.product_id,
                 sku=rec.sku,
                 description=None,
+                weight_per_m2_kg=product_weight_per_m2,
                 priority=effective_priority,
                 action_type=rec.action_type.value,
                 current_stock_m2=rec.warehouse_m2,
@@ -2750,7 +2755,8 @@ class OrderBuilderService:
         warehouse_total_pallets = sum(p.selected_pallets for p in selected_warehouse)
         warehouse_total_m2 = Decimal(str(warehouse_total_pallets)) * M2_PER_PALLET
         warehouse_total_containers = math.ceil(warehouse_total_pallets / PALLETS_PER_CONTAINER)
-        warehouse_total_weight = warehouse_total_m2 * DEFAULT_WEIGHT_PER_M2_KG
+        # Use per-product weight (already calculated in summary step)
+        warehouse_total_weight = sum(p.total_weight_kg for p in selected_warehouse)
 
         warehouse_summary = WarehouseOrderSummary(
             product_count=len(warehouse_products),

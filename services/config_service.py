@@ -10,6 +10,27 @@ from config.database import get_supabase_client
 
 logger = structlog.get_logger(__name__)
 
+# =============================================================================
+# CATEGORY → PRODUCT TYPE MAPPING
+# =============================================================================
+# Maps product.category (enum values) to product_type_configs.category_group.
+# This is deterministic — a product's category always maps to one type.
+#
+# Tile categories → TILES (14.90 kg/m², 134.4 m²/pallet)
+# Furniture       → FURNITURE (different weight/pallet config)
+# Sinks           → SINKS (different weight/pallet config)
+# Surcharge       → TILES (treated as tile for calculations)
+
+CATEGORY_TO_TYPE: dict[str, str] = {
+    "MADERAS": "TILES",
+    "EXTERIORES": "TILES",
+    "MARMOLIZADOS": "TILES",
+    "OTHER": "TILES",
+    "FURNITURE": "FURNITURE",
+    "SINK": "SINKS",
+    "SURCHARGE": "TILES",
+}
+
 
 class ConfigService:
     def __init__(self):
@@ -67,6 +88,34 @@ class ConfigService:
         """Get all product type configs."""
         self._ensure_loaded()
         return dict(self._product_types_cache)
+
+    def get_product_physics(self, category: Optional[str]) -> tuple[Decimal, Decimal]:
+        """
+        Get weight_per_m2_kg and m2_per_pallet for a product category.
+
+        Looks up the product type config via CATEGORY_TO_TYPE mapping.
+        Falls back to TILES defaults if category is unknown or config missing.
+
+        Args:
+            category: Product category string (e.g. "MADERAS", "FURNITURE", "SINK")
+
+        Returns:
+            (weight_per_m2_kg, m2_per_pallet)
+        """
+        from config.shipping import DEFAULT_WEIGHT_PER_M2_KG, M2_PER_PALLET
+
+        if not category:
+            return DEFAULT_WEIGHT_PER_M2_KG, M2_PER_PALLET
+
+        type_group = CATEGORY_TO_TYPE.get(category, "TILES")
+        type_config = self.get_product_type(type_group)
+
+        if not type_config:
+            return DEFAULT_WEIGHT_PER_M2_KG, M2_PER_PALLET
+
+        weight = Decimal(str(type_config.get("weight_per_m2_kg", DEFAULT_WEIGHT_PER_M2_KG)))
+        m2_pallet = Decimal(str(type_config.get("m2_per_pallet", M2_PER_PALLET)))
+        return weight, m2_pallet
 
 
 # Singleton
