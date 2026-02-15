@@ -1703,7 +1703,7 @@ class OrderBuilderService:
         # 1. Query inactive products
         products_result = (
             self.inventory_service.db.table("products")
-            .select("id, sku, description, inactive_reason, inactive_date")
+            .select("id, sku, inactive_reason, inactive_date")
             .eq("active", False)
             .execute()
         )
