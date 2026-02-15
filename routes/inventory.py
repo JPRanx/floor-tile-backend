@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import date
 from io import BytesIO
+import hashlib
 import structlog
 
 from models.inventory import (
@@ -54,6 +55,8 @@ from config.shipping import (
 from utils.text_utils import normalize_product_name
 from config import get_supabase_client
 from services import preview_cache_service
+from services.upload_history_service import get_upload_history_service
+from models.manual_mapping import ManualMapping
 
 logger = structlog.get_logger(__name__)
 
@@ -134,7 +137,11 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
     try:
         # Read file content
         content = await file.read()
+        file_hash = hashlib.sha256(content).hexdigest()
         file_obj = BytesIO(content)
+
+        # Check for duplicate upload
+        inv_duplicate = get_upload_history_service().check_duplicate("inventory", file_hash)
 
         product_service = get_product_service()
 
@@ -266,6 +273,9 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
             "snapshots_to_create": [s.model_dump() for s in snapshots_to_create],
             "auto_created_skus": auto_created_skus,
             "zero_filled_skus": zero_filled_skus,
+            "file_hash": file_hash,
+            "filename": file.filename,
+            "upload_type": "inventory",
         }
         preview_id = preview_cache_service.store_preview(cache_data)
 
@@ -287,7 +297,7 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
             auto_created_count=len(auto_created_skus),
             zero_filled_count=len(zero_filled_skus),
             zero_filled_products=zero_filled_skus[:20],  # Limit to 20
-            warnings=[],
+            warnings=[f"Este archivo ya fue subido el {inv_duplicate['uploaded_at'][:10]} ({inv_duplicate['filename']})"] if inv_duplicate else [],
             sample_rows=sample_rows,
         )
 
@@ -327,6 +337,14 @@ async def confirm_inventory_upload(preview_id: str):
 
             # Bulk insert snapshots
             inventory_service.bulk_create(snapshots_to_create)
+
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type=cache_data.get("upload_type", "inventory"),
+            file_hash=cache_data.get("file_hash", ""),
+            filename=cache_data.get("filename", "unknown"),
+            row_count=len(snapshots_to_create),
+        )
 
         # Delete preview from cache
         preview_cache_service.delete_preview(preview_id)
@@ -532,6 +550,10 @@ async def preview_siesa_upload(
     try:
         # Read file content
         content = await file.read()
+        siesa_file_hash = hashlib.sha256(content).hexdigest()
+
+        # Check for duplicate upload
+        siesa_duplicate = get_upload_history_service().check_duplicate("siesa", siesa_file_hash)
 
         # Build product lookup dictionaries
         product_service = get_product_service()
@@ -620,9 +642,26 @@ async def preview_siesa_upload(
             for match in parse_result.matched_lots[:10]
         ]
 
+        # Build unmatched lots for manual resolution
+        unmatched_lots_raw = [
+            {
+                "lot_number": m.lot.lot_number,
+                "quantity_m2": float(m.lot.quantity_m2),
+                "weight_kg": float(m.lot.weight_kg) if m.lot.weight_kg else None,
+                "quality": m.lot.quality,
+                "warehouse_code": m.lot.warehouse_code,
+                "warehouse_name": m.lot.warehouse_name,
+                "snapshot_date": actual_date.isoformat(),
+                "siesa_item": m.lot.siesa_item,
+                "siesa_description": m.lot.siesa_description,
+            }
+            for m in parse_result.unmatched_lots
+        ]
+
         # Store in cache
         cache_data = {
             "lots_to_insert": lots_to_insert,
+            "unmatched_lots": unmatched_lots_raw,
             "snapshot_date": actual_date.isoformat(),
             "parse_result": {
                 "total_rows": parse_result.total_rows,
@@ -642,6 +681,9 @@ async def preview_siesa_upload(
                 "containers_needed": containers_needed,
                 "container_utilization_pct": round(utilization, 1),
             },
+            "file_hash": siesa_file_hash,
+            "filename": file.filename,
+            "upload_type": "siesa",
         }
         preview_id = preview_cache_service.store_preview(cache_data)
 
@@ -669,7 +711,7 @@ async def preview_siesa_upload(
             match_rate_pct=round(match_rate, 1),
             unmatched_products=unmatched_products,
             warehouses=warehouse_summaries,
-            warnings=[],
+            warnings=[f"Este archivo ya fue subido el {siesa_duplicate['uploaded_at'][:10]} ({siesa_duplicate['filename']})"] if siesa_duplicate else [],
             sample_lots=sample_lots,
         )
 
@@ -685,8 +727,11 @@ async def preview_siesa_upload(
 
 
 @router.post("/siesa/upload/confirm/{preview_id}", response_model=SIESAUploadResponse)
-async def confirm_siesa_upload(preview_id: str):
-    """Save previously previewed SIESA data."""
+async def confirm_siesa_upload(
+    preview_id: str,
+    manual_mappings: Optional[list[ManualMapping]] = None,
+):
+    """Save previously previewed SIESA data. Optionally resolve unmatched items."""
     try:
         cache_data = preview_cache_service.retrieve_preview(preview_id)
         if cache_data is None:
@@ -694,6 +739,16 @@ async def confirm_siesa_upload(preview_id: str):
 
         # Retrieve cached data
         lots_to_insert = cache_data["lots_to_insert"]
+
+        # Apply manual mappings to unmatched lots
+        if manual_mappings:
+            mapping_dict = {m.original_key: m.mapped_product_id for m in manual_mappings}
+            unmatched_lots = cache_data.get("unmatched_lots", [])
+            for lot_data in unmatched_lots:
+                key = lot_data.get("siesa_description") or f"Item {lot_data.get('siesa_item')}"
+                if key in mapping_dict:
+                    lot_data["product_id"] = mapping_dict[key]
+                    lots_to_insert.append(lot_data)
         actual_date = date.fromisoformat(cache_data["snapshot_date"])
         parse_result_data = cache_data["parse_result"]
         warehouse_summaries = [WarehouseSummary(**w) for w in cache_data["warehouse_summaries"]]
@@ -779,6 +834,14 @@ async def confirm_siesa_upload(preview_id: str):
                 products_synced=synced_count,
                 date=actual_date.isoformat(),
             )
+
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type=cache_data.get("upload_type", "siesa"),
+            file_hash=cache_data.get("file_hash", ""),
+            filename=cache_data.get("filename", "unknown"),
+            row_count=lots_created,
+        )
 
         # Delete preview from cache
         preview_cache_service.delete_preview(preview_id)

@@ -579,6 +579,23 @@ class ProductService:
     # UTILITY METHODS
     # ===================
 
+    def search(self, query: str, limit: int = 10) -> list[ProductResponse]:
+        """Search products by SKU or referencia substring match."""
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("active", True)
+                .ilike("sku", f"%{query}%")
+                .order("sku")
+                .limit(limit)
+                .execute()
+            )
+            return [ProductResponse(**row) for row in result.data]
+        except Exception as e:
+            logger.error("search_products_failed", error=str(e), query=query)
+            raise DatabaseError("search", str(e))
+
     def sku_exists(self, sku: str) -> bool:
         """Check if a SKU already exists."""
         return self.get_by_sku(sku) is not None

@@ -6,6 +6,7 @@ Handles uploading and parsing shipment documents from various sources.
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from typing import Optional
+import hashlib
 import structlog
 
 from models.ingest import (
@@ -35,6 +36,7 @@ from services.document_parser_service import get_parser_service
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
 from services.packing_list_parser_service import get_packing_list_parser_service
 from services import preview_cache_service
+from services.upload_history_service import get_upload_history_service
 from exceptions.errors import PDFParseError
 from services.shipment_service import get_shipment_service
 from services.port_service import get_port_service
@@ -1184,6 +1186,10 @@ async def preview_pdf_upload(
     try:
         # Read file contents
         pdf_bytes = await file.read()
+        pdf_file_hash = hashlib.sha256(pdf_bytes).hexdigest()
+
+        # Check for duplicate upload
+        pdf_duplicate = get_upload_history_service().check_duplicate("shipment_pdf", pdf_file_hash)
 
         if len(pdf_bytes) == 0:
             raise HTTPException(
@@ -1243,6 +1249,8 @@ async def preview_pdf_upload(
             "filename": file.filename,
             "source": source,
             "pdf_bytes": pdf_bytes.hex(),  # Store as hex string
+            "file_hash": pdf_file_hash,
+            "upload_type": "shipment_pdf",
         }
         preview_id = preview_cache_service.store_preview(cache_data)
 
@@ -1252,11 +1260,15 @@ async def preview_pdf_upload(
             filename=file.filename
         )
 
+        duplicate_msg = ""
+        if pdf_duplicate:
+            duplicate_msg = f" AVISO: Este archivo ya fue subido el {pdf_duplicate['uploaded_at'][:10]}."
+
         return IngestPreviewResponse(
             success=True,
             message=f"PDF parsed successfully ({parser_used}). Document type: {parsed_data.document_type}. "
                     f"Confidence: {parsed_data.overall_confidence:.0%}. "
-                    "Please review and confirm the data.",
+                    f"Please review and confirm the data.{duplicate_msg}",
             action="parsed_pending_confirmation",
             parsed_data=parsed_data,
             preview_id=preview_id,
@@ -1330,6 +1342,14 @@ async def confirm_pdf_preview(preview_id: str, data: ConfirmIngestRequest) -> In
     # Call the existing confirm logic
     # The existing /confirm endpoint has all the business logic we need
     result = await confirm_ingest(data)
+
+    # Record upload history
+    get_upload_history_service().record_upload(
+        upload_type=cached.get("upload_type", "shipment_pdf"),
+        file_hash=cached.get("file_hash", ""),
+        filename=cached.get("filename", "unknown"),
+        row_count=1,
+    )
 
     # Delete from cache after successful confirmation
     preview_cache_service.delete_preview(preview_id)

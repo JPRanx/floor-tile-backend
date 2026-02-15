@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import date
 from decimal import Decimal
+import hashlib
 import structlog
 
 from typing import Union
@@ -32,6 +33,9 @@ from models.production_schedule import (
 from services.production_schedule_parser_service import get_production_schedule_parser_service
 from services.production_schedule_service import get_production_schedule_service
 from services import preview_cache_service
+from services.upload_history_service import get_upload_history_service
+from services.product_service import get_product_service
+from models.manual_mapping import ManualMapping
 from exceptions import AppError, DatabaseError
 
 logger = structlog.get_logger(__name__)
@@ -348,6 +352,10 @@ async def preview_production_upload(
     try:
         # Read file content
         file_bytes = await file.read()
+        prod_file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+        # Check for duplicate upload
+        prod_duplicate = get_upload_history_service().check_duplicate("production_schedule", prod_file_hash)
 
         if len(file_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty file uploaded")
@@ -419,16 +427,21 @@ async def preview_production_upload(
 
         # Build warnings
         warnings = []
+        if prod_duplicate:
+            warnings.append(f"Este archivo ya fue subido el {prod_duplicate['uploaded_at'][:10]} ({prod_duplicate['filename']})")
         if unmatched_count > 0:
             warnings.append(f"{unmatched_count} items could not be matched to products")
         if existing_count > 0:
             warnings.append(f"Upload will replace {existing_count} existing schedule items")
 
-        # Store in cache
+        # Store in cache (include unmatched refs for manual resolution)
         preview_data = {
             "file_bytes": file_bytes,
             "filename": file.filename,
             "file_type": file_type,
+            "file_hash": prod_file_hash,
+            "upload_type": "production_schedule",
+            "unmatched_referencias": unmatched_referencias,
         }
         preview_id = preview_cache_service.store_preview(preview_data)
 
@@ -468,8 +481,11 @@ async def preview_production_upload(
 
 
 @router.post("/upload-replace/confirm/{preview_id}", response_model=ProductionImportResult)
-async def confirm_production_upload(preview_id: str):
-    """Save previously previewed production data (wipe and replace)."""
+async def confirm_production_upload(
+    preview_id: str,
+    manual_mappings: Optional[list[ManualMapping]] = None,
+):
+    """Save previously previewed production data (wipe and replace). Optionally resolve unmatched items."""
     try:
         # Retrieve from cache
         cached = preview_cache_service.retrieve_preview(preview_id)
@@ -494,6 +510,16 @@ async def confirm_production_upload(preview_id: str):
             file_bytes, filename=filename
         )
 
+        # Apply manual mappings to unmatched records
+        if manual_mappings:
+            mapping_dict = {m.original_key: m.mapped_product_id for m in manual_mappings}
+            product_service = get_product_service()
+            for record in production_records:
+                if not record.product_id and record.referencia in mapping_dict:
+                    product = product_service.get_by_id(mapping_dict[record.referencia])
+                    record.product_id = product.id
+                    record.sku = product.sku
+
         if not production_records:
             raise HTTPException(
                 status_code=400,
@@ -513,6 +539,14 @@ async def confirm_production_upload(preview_id: str):
 
         # Import using correct schema
         result = service.import_from_excel(production_records, match_products=True)
+
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type=cached.get("upload_type", "production_schedule"),
+            file_hash=cached.get("file_hash", ""),
+            filename=cached.get("filename", "unknown"),
+            row_count=result.total_rows_parsed,
+        )
 
         # Delete preview from cache
         preview_cache_service.delete_preview(preview_id)

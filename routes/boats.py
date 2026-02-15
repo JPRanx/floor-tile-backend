@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import date
 from io import BytesIO
+import hashlib
 import structlog
 
 from models.boat_schedule import (
@@ -25,6 +26,7 @@ from models.boat_schedule import (
 from services.boat_schedule_service import get_boat_schedule_service
 from parsers.tiba_parser import parse_tiba_excel
 from services import preview_cache_service
+from services.upload_history_service import get_upload_history_service
 from exceptions import (
     AppError,
     BoatScheduleNotFoundError,
@@ -189,7 +191,11 @@ async def preview_boat_upload(file: UploadFile = File(...)):
 
         # Read file content
         content = await file.read()
+        file_hash = hashlib.sha256(content).hexdigest()
         file_bytes = BytesIO(content)
+
+        # Check for duplicate upload
+        boat_duplicate = get_upload_history_service().check_duplicate("boats", file_hash)
 
         # Parse Excel
         parse_result = parse_tiba_excel(file_bytes)
@@ -266,10 +272,15 @@ async def preview_boat_upload(file: UploadFile = File(...)):
             earliest_departure = None
             latest_departure = None
 
+        if boat_duplicate:
+            warnings.insert(0, f"Este archivo ya fue subido el {boat_duplicate['uploaded_at'][:10]} ({boat_duplicate['filename']})")
+
         # Cache the file bytes for confirm
         cache_data = {
             "file_bytes": content,
             "filename": file.filename,
+            "file_hash": file_hash,
+            "upload_type": "boats",
         }
         preview_id = preview_cache_service.store_preview(cache_data)
 
@@ -334,6 +345,14 @@ async def confirm_boat_upload(preview_id: str):
             imported=result.imported,
             updated=result.updated,
             skipped=result.skipped,
+        )
+
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type=cached.get("upload_type", "boats"),
+            file_hash=cached.get("file_hash", ""),
+            filename=cached.get("filename", "unknown"),
+            row_count=result.imported + result.updated,
         )
 
         # Delete preview from cache

@@ -128,6 +128,19 @@ async def get_liquidation_products():
         return handle_error(e)
 
 
+@router.get("/search", response_model=list[ProductResponse])
+async def search_products(
+    q: str = Query(..., min_length=2, description="Search term (matches SKU)"),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Search products by SKU substring. Used for manual resolution dropdowns."""
+    try:
+        service = get_product_service()
+        return service.search(q, limit=limit)
+    except Exception as e:
+        return handle_error(e)
+
+
 @router.get("/{product_id}", response_model=ProductResponse)
 async def get_product(product_id: str):
     """

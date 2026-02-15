@@ -8,6 +8,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse
 from typing import Optional
+import hashlib
 import structlog
 
 from decimal import Decimal
@@ -32,6 +33,7 @@ from models.sales import (
 from services.sales_service import get_sales_service
 from services.product_service import get_product_service
 from services import preview_cache_service
+from services.upload_history_service import get_upload_history_service
 from parsers.excel_parser import parse_owner_excel
 from parsers.sac_parser import parse_sac_csv
 from utils.text_utils import normalize_customer_name, clean_customer_name, normalize_product_name
@@ -125,7 +127,16 @@ async def preview_sales_upload(file: UploadFile = File(...)):
     """Parse sales Excel and return preview. Nothing is saved."""
     try:
         contents = await file.read()
+        file_hash = hashlib.sha256(contents).hexdigest()
+
+        # Check for duplicate upload
+        history_service = get_upload_history_service()
+        duplicate = history_service.check_duplicate("sales", file_hash)
+
         sales_records, warnings, parse_result = _parse_sales_file(contents, filename=file.filename)
+
+        if duplicate:
+            warnings.insert(0, f"Este archivo ya fue subido el {duplicate['uploaded_at'][:10]} ({duplicate['filename']})")
 
         if not sales_records:
             raise ExcelParseError(
@@ -156,7 +167,12 @@ async def preview_sales_upload(file: UploadFile = File(...)):
             for r in sales_records[:10]
         ]
 
-        preview_id = preview_cache_service.store_preview(sales_records)
+        preview_id = preview_cache_service.store_preview({
+            "records": sales_records,
+            "file_hash": file_hash,
+            "filename": file.filename,
+            "upload_type": "sales",
+        })
 
         logger.info(
             "sales_preview_created",
@@ -188,10 +204,11 @@ async def preview_sales_upload(file: UploadFile = File(...)):
 async def confirm_sales_upload(preview_id: str):
     """Save previously previewed sales data."""
     try:
-        sales_records = preview_cache_service.retrieve_preview(preview_id)
-        if sales_records is None:
+        cached_data = preview_cache_service.retrieve_preview(preview_id)
+        if cached_data is None:
             raise HTTPException(status_code=404, detail="Preview expired")
 
+        sales_records = cached_data["records"]
         sales_service = get_sales_service()
         deleted = 0
         min_date = max_date = None
@@ -265,6 +282,14 @@ async def confirm_sales_upload(preview_id: str):
 
             if deleted > 0 and abs(deleted - len(sales_records)) > len(sales_records) * 0.5:
                 warnings.append(f"Deleted {deleted} rows but only inserted {len(sales_records)} — check if correct file was uploaded")
+
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type=cached_data.get("upload_type", "sales"),
+            file_hash=cached_data.get("file_hash", ""),
+            filename=cached_data.get("filename", "unknown"),
+            row_count=len(created),
+        )
 
         preview_cache_service.delete_preview(preview_id)
 
@@ -424,6 +449,12 @@ async def preview_sac_upload(file: UploadFile = File(...)):
 
         # Parse CSV file
         contents = await file.read()
+        file_hash = hashlib.sha256(contents).hexdigest()
+
+        # Check for duplicate upload
+        history_service = get_upload_history_service()
+        sac_duplicate = history_service.check_duplicate("sac_sales", file_hash)
+
         parse_result = parse_sac_csv(contents, known_sac_skus, known_product_names)
 
         if not parse_result.sales:
@@ -468,10 +499,13 @@ async def preview_sac_upload(file: UploadFile = File(...)):
                 matched_by=matched_by,
             ))
 
-        # Store both sales_records AND parse_result in cache
+        # Store sales_records, parse_result, and file hash in cache
         cache_data = {
             "sales_records": sales_records,
             "parse_result": parse_result,
+            "file_hash": file_hash,
+            "filename": file.filename,
+            "upload_type": "sac_sales",
         }
         preview_id = preview_cache_service.store_preview(cache_data)
 
@@ -499,7 +533,7 @@ async def preview_sac_upload(file: UploadFile = File(...)):
             top_product=parse_result.top_product,
             skipped_non_tile=parse_result.skipped_non_tile,
             skipped_products=list(parse_result.skipped_products)[:10],
-            warnings=[],
+            warnings=[f"Este archivo ya fue subido el {sac_duplicate['uploaded_at'][:10]} ({sac_duplicate['filename']})"] if sac_duplicate else [],
             sample_rows=sample_rows,
         )
 
@@ -543,6 +577,14 @@ async def confirm_sac_upload(preview_id: str):
             records_created=len(created),
             records_deleted=deleted,
             match_rate=f"{parse_result.match_rate:.1f}%"
+        )
+
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type=cached_data.get("upload_type", "sac_sales"),
+            file_hash=cached_data.get("file_hash", ""),
+            filename=cached_data.get("filename", "unknown"),
+            row_count=len(created),
         )
 
         # Delete preview from cache
