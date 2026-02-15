@@ -127,3 +127,34 @@ class ContainerEstimateResponse(BaseSchema):
     container_limit_kg: int
     containers_needed: int
     utilization_breakdown: list[dict]
+
+
+class SIESAPreviewLot(BaseSchema):
+    """Sample lot row shown in SIESA preview."""
+    sku: str
+    warehouse_name: Optional[str] = None
+    lot_number: str
+    quantity_m2: float
+    weight_kg: Optional[float] = None
+
+
+class SIESAPreview(BaseSchema):
+    """Preview response for SIESA inventory upload."""
+    preview_id: str
+    snapshot_date: date
+    total_rows: int
+    lots_count: int
+    unique_products: int
+    total_m2_available: float
+    total_weight_kg: float
+    containers_needed: int
+    container_utilization_pct: float
+    matched_by_siesa_item: int
+    matched_by_name: int
+    unmatched_count: int
+    match_rate_pct: float
+    unmatched_products: list[str] = Field(default_factory=list)
+    warehouses: list[WarehouseSummary] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    sample_lots: list[SIESAPreviewLot] = Field(default_factory=list)
+    expires_in_minutes: int = 30

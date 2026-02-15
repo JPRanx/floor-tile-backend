@@ -290,3 +290,29 @@ class BoatUploadResult(BaseSchema):
     skipped: int = Field(0, description="Number of rows skipped (unchanged)")
     skipped_rows: list[SkippedRowInfo] = Field(default_factory=list, description="Rows skipped due to bad data")
     errors: list[str] = Field(default_factory=list, description="Error messages")
+
+
+class BoatPreviewRow(BaseSchema):
+    """Sample row shown in boat preview."""
+    vessel_name: Optional[str] = None
+    departure_date: date
+    arrival_date: date
+    transit_days: int
+    origin_port: str = "Cartagena"
+    destination_port: str = "Puerto Quetzal"
+    action: str = "new"  # "new", "update", or "skip"
+
+
+class BoatPreview(BaseSchema):
+    """Preview response for boat schedule upload."""
+    preview_id: str
+    total_rows: int
+    new_boats: int = 0
+    updated_boats: int = 0
+    skipped_boats: int = 0
+    earliest_departure: Optional[date] = None
+    latest_departure: Optional[date] = None
+    skipped_rows: list[SkippedRowInfo] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    sample_rows: list[BoatPreviewRow] = Field(default_factory=list)
+    expires_in_minutes: int = 30

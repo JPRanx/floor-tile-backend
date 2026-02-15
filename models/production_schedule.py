@@ -612,3 +612,37 @@ class CanAddMoreAlert(BaseSchema):
         None,
         description="Human-readable alert: 'Add 1,000 m² before production starts!'"
     )
+
+
+# ===================
+# PRODUCTION PREVIEW MODELS
+# ===================
+
+class ProductionPreviewRow(BaseSchema):
+    """Sample row shown in production schedule preview."""
+    referencia: str
+    sku: Optional[str] = None
+    plant: str
+    requested_m2: Decimal = Decimal("0")
+    completed_m2: Decimal = Decimal("0")
+    status: str = "scheduled"
+    estimated_delivery_date: Optional[date] = None
+
+
+class ProductionPreview(BaseSchema):
+    """Preview response for production schedule upload."""
+    preview_id: str
+    filename: str
+    source_month: str
+    total_rows: int
+    rows_with_data: int
+    matched_to_products: int
+    unmatched_count: int
+    unmatched_referencias: list[str] = Field(default_factory=list)
+    total_requested_m2: Decimal = Decimal("0")
+    total_completed_m2: Decimal = Decimal("0")
+    status_breakdown: dict = Field(default_factory=dict, description="{'scheduled': X, 'in_progress': Y, 'completed': Z}")
+    existing_records_to_delete: int = 0
+    warnings: list[str] = Field(default_factory=list)
+    sample_rows: list[ProductionPreviewRow] = Field(default_factory=list)
+    expires_in_minutes: int = 30

@@ -193,3 +193,34 @@ class SACUploadResponse(BaseSchema):
 
     unmatched_products: list[str] = []
     errors: list[dict] = []
+
+
+class SACPreviewRow(BaseSchema):
+    """Sample row shown in SAC sales preview."""
+    sku: str
+    sale_date: date
+    quantity_m2: float
+    customer: Optional[str] = None
+    matched_by: str = "sac_sku"  # "sac_sku" or "name"
+
+
+class SACPreview(BaseSchema):
+    """Preview response for SAC sales upload."""
+    preview_id: str
+    row_count: int
+    total_m2: float
+    date_range_start: Optional[date] = None
+    date_range_end: Optional[date] = None
+    matched_by_sac_sku: int
+    matched_by_name: int
+    unmatched_count: int
+    match_rate_pct: float
+    unmatched_products: list[str] = Field(default_factory=list)
+    unique_customers: int = 0
+    unique_products: int = 0
+    top_product: Optional[str] = None
+    skipped_non_tile: int = 0
+    skipped_products: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    sample_rows: list[SACPreviewRow] = Field(default_factory=list)
+    expires_in_minutes: int = 30

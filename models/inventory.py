@@ -210,3 +210,26 @@ class BulkInventoryCreate(BaseSchema):
     """
 
     snapshots: list[InventorySnapshotCreate]
+
+
+class InventoryPreviewRow(BaseSchema):
+    """Sample row shown in inventory preview."""
+    sku: str
+    warehouse_qty: float
+    in_transit_qty: float = 0
+    snapshot_date: date
+
+
+class InventoryPreview(BaseSchema):
+    """Preview response for inventory upload."""
+    preview_id: str
+    row_count: int
+    product_count: int
+    snapshot_date: date
+    auto_created_products: list[str] = Field(default_factory=list, description="SKUs that will be auto-created")
+    auto_created_count: int = 0
+    zero_filled_count: int = 0
+    zero_filled_products: list[str] = Field(default_factory=list, description="SKUs that will get zero-quantity records")
+    warnings: list[str] = Field(default_factory=list)
+    sample_rows: list[InventoryPreviewRow] = Field(default_factory=list)
+    expires_in_minutes: int = 30

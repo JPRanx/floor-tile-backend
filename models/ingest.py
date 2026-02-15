@@ -202,6 +202,13 @@ class IngestResponse(BaseModel):
     )
 
 
+class IngestPreviewResponse(IngestResponse):
+    """Ingest response with preview_id for cache."""
+
+    preview_id: str
+    expires_in_minutes: int = 30
+
+
 class EmailAttachment(BaseModel):
     """
     Email attachment (normalized format).

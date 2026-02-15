@@ -14,6 +14,7 @@ from models.ingest import (
     ConfirmIngestRequest,
     StructuredIngestRequest,
     IngestResponse,
+    IngestPreviewResponse,
     CandidateShipment,
     # Packing list models
     PackingListLineItem,
@@ -33,6 +34,7 @@ from models.shipment import (
 from services.document_parser_service import get_parser_service
 from services.claude_parser_service import get_claude_parser_service, CLAUDE_AVAILABLE
 from services.packing_list_parser_service import get_packing_list_parser_service
+from services import preview_cache_service
 from exceptions.errors import PDFParseError
 from services.shipment_service import get_shipment_service
 from services.port_service import get_port_service
@@ -1135,6 +1137,205 @@ async def confirm_ingest(data: ConfirmIngestRequest) -> IngestResponse:
             status_code=500,
             detail=f"Error confirming ingestion: {str(e)}"
         )
+
+
+@router.post("/pdf/preview", response_model=IngestPreviewResponse)
+async def preview_pdf_upload(
+    file: UploadFile = File(..., description="PDF document to parse"),
+    source: str = Form("pdf_upload", description="Source of upload")
+) -> IngestPreviewResponse:
+    """
+    Upload and parse a shipment PDF document (preview only - nothing is saved).
+
+    Parses the PDF and returns data with confidence scores for user review.
+    The parsed result is cached with a preview_id. User must then call
+    /pdf/confirm/{preview_id} endpoint to create/update shipment.
+
+    Supported document types:
+    - Booking confirmations
+    - Departure notices
+    - Bills of lading (HBL/MBL)
+    - Arrival notices
+
+    Args:
+        file: PDF file upload
+        source: Source of upload (pdf_upload or email_forward)
+
+    Returns:
+        IngestPreviewResponse with parsed data, confidence scores, and preview_id
+
+    Raises:
+        400: Invalid file or parsing failed
+    """
+    logger.info(
+        "pdf_preview_started",
+        filename=file.filename,
+        content_type=file.content_type,
+        source=source
+    )
+
+    # Validate file type
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=400,
+            detail="File must be a PDF"
+        )
+
+    try:
+        # Read file contents
+        pdf_bytes = await file.read()
+
+        if len(pdf_bytes) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file is empty"
+            )
+
+        parsed_data = None
+        parser_used = "pdfplumber"
+
+        # Try pdfplumber first (fast, free for native text PDFs)
+        try:
+            parser = get_parser_service()
+            parsed_data = parser.parse_pdf(pdf_bytes)
+            logger.info("pdf_parsed_with_pdfplumber", filename=file.filename)
+
+        except PDFParseError as parse_error:
+            # Check if we should fall back to Claude Vision
+            if parse_error.details and parse_error.details.get("use_claude_vision"):
+                logger.info(
+                    "falling_back_to_claude_vision",
+                    filename=file.filename,
+                    reason="insufficient_text"
+                )
+
+                if not CLAUDE_AVAILABLE:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="PDF appears to be scanned but Claude Vision is not configured. "
+                               "Set ANTHROPIC_API_KEY environment variable to enable."
+                    )
+
+                # Use Claude Vision for scanned PDFs
+                claude_parser = get_claude_parser_service()
+                parsed_data = await claude_parser.parse_pdf(pdf_bytes)
+                parser_used = "claude_vision"
+                logger.info("pdf_parsed_with_claude_vision", filename=file.filename)
+            else:
+                # Re-raise other PDFParseErrors
+                raise
+
+        logger.info(
+            "pdf_parsed_successfully",
+            filename=file.filename,
+            parser_used=parser_used,
+            document_type=parsed_data.document_type,
+            overall_confidence=parsed_data.overall_confidence,
+            has_shp=bool(parsed_data.shp_number),
+            has_booking=bool(parsed_data.booking_number),
+            containers_count=len(parsed_data.containers)
+        )
+
+        # Store in cache
+        cache_data = {
+            "parsed_data": parsed_data.model_dump(),
+            "parser_used": parser_used,
+            "filename": file.filename,
+            "source": source,
+            "pdf_bytes": pdf_bytes.hex(),  # Store as hex string
+        }
+        preview_id = preview_cache_service.store_preview(cache_data)
+
+        logger.info(
+            "pdf_preview_cached",
+            preview_id=preview_id,
+            filename=file.filename
+        )
+
+        return IngestPreviewResponse(
+            success=True,
+            message=f"PDF parsed successfully ({parser_used}). Document type: {parsed_data.document_type}. "
+                    f"Confidence: {parsed_data.overall_confidence:.0%}. "
+                    "Please review and confirm the data.",
+            action="parsed_pending_confirmation",
+            parsed_data=parsed_data,
+            preview_id=preview_id,
+            expires_in_minutes=30
+        )
+
+    except PDFParseError as e:
+        logger.error("pdf_parsing_failed", filename=file.filename, error=str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse PDF: {str(e)}"
+        )
+    except ValueError as e:
+        logger.error("pdf_parsing_failed", filename=file.filename, error=str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse PDF: {str(e)}"
+        )
+    except Exception as e:
+        logger.error("pdf_preview_error", filename=file.filename, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing PDF: {str(e)}"
+        )
+
+
+@router.post("/pdf/confirm/{preview_id}", response_model=IngestResponse)
+async def confirm_pdf_preview(preview_id: str, data: ConfirmIngestRequest) -> IngestResponse:
+    """
+    Confirm previously previewed PDF data and create or update shipment.
+
+    Retrieves cached parse result using preview_id, then uses confirmed/corrected
+    data to create or update shipment. System will:
+    - Create new shipment if SHP/booking number doesn't exist
+    - Update existing shipment if found
+    - Create shipment event for audit trail
+
+    Args:
+        preview_id: UUID of cached preview data
+        data: Confirmed shipment data from user
+
+    Returns:
+        IngestResponse with created/updated shipment details
+
+    Raises:
+        400: Invalid data, missing required fields, or preview not found/expired
+        500: Database error
+    """
+    logger.info(
+        "confirm_pdf_preview_started",
+        preview_id=preview_id,
+        shp_number=data.shp_number,
+        booking_number=data.booking_number,
+        document_type=data.document_type
+    )
+
+    # Retrieve from cache
+    cached = preview_cache_service.retrieve_preview(preview_id)
+    if not cached:
+        raise HTTPException(
+            status_code=400,
+            detail="Preview not found or expired. Please re-upload the PDF."
+        )
+
+    logger.info(
+        "preview_retrieved",
+        preview_id=preview_id,
+        filename=cached.get("filename")
+    )
+
+    # Call the existing confirm logic
+    # The existing /confirm endpoint has all the business logic we need
+    result = await confirm_ingest(data)
+
+    # Delete from cache after successful confirmation
+    preview_cache_service.delete_preview(preview_id)
+    logger.info("preview_cache_deleted", preview_id=preview_id)
+
+    return result
 
 
 @router.post("/structured", response_model=IngestResponse)

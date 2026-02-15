@@ -19,8 +19,12 @@ from models.boat_schedule import (
     BoatScheduleResponse,
     BoatScheduleListResponse,
     BoatUploadResult,
+    BoatPreview,
+    BoatPreviewRow,
 )
 from services.boat_schedule_service import get_boat_schedule_service
+from parsers.tiba_parser import parse_tiba_excel
+from services import preview_cache_service
 from exceptions import (
     AppError,
     BoatScheduleNotFoundError,
@@ -162,6 +166,180 @@ async def create_boat_schedule(data: BoatScheduleCreate):
         service = get_boat_schedule_service()
         schedule = service.create(data)
         return schedule
+
+    except Exception as e:
+        return handle_error(e)
+
+
+@router.post("/upload/preview", response_model=BoatPreview)
+async def preview_boat_upload(file: UploadFile = File(...)):
+    """Parse TIBA Excel and return preview. Nothing is saved."""
+    try:
+        # Validate file type
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "INVALID_FILE_TYPE",
+                        "message": "File must be an Excel file (.xlsx or .xls)"
+                    }
+                }
+            )
+
+        # Read file content
+        content = await file.read()
+        file_bytes = BytesIO(content)
+
+        # Parse Excel
+        parse_result = parse_tiba_excel(file_bytes)
+
+        if not parse_result.success:
+            # Fatal parse errors
+            errors = [
+                f"Row {e.row}: {e.error}"
+                for e in parse_result.errors
+            ]
+            raise BoatScheduleUploadError(errors)
+
+        # Convert skipped rows
+        skipped_rows = [
+            {"row": s.row, "reason": s.reason}
+            for s in parse_result.skipped_rows
+        ]
+
+        # Calculate preview stats
+        service = get_boat_schedule_service()
+        total_rows = len(parse_result.schedules)
+        new_boats = 0
+        updated_boats = 0
+        skipped_boats = 0
+        sample_rows = []
+        warnings = []
+
+        # Check current date to detect past departures
+        from datetime import date as date_type
+        today = date_type.today()
+
+        for record in parse_result.schedules:
+            # Check if exists
+            existing = service._find_existing(
+                record.departure_date,
+                record.vessel_name
+            )
+
+            if existing:
+                # Check if needs update
+                if service._needs_update(existing, record):
+                    action = "update"
+                    updated_boats += 1
+                else:
+                    action = "skip"
+                    skipped_boats += 1
+            else:
+                action = "new"
+                new_boats += 1
+
+            # Add to sample rows
+            sample_rows.append(BoatPreviewRow(
+                vessel_name=record.vessel_name,
+                departure_date=record.departure_date,
+                arrival_date=record.arrival_date,
+                transit_days=record.transit_days,
+                origin_port=record.origin_port,
+                destination_port=record.destination_port,
+                action=action,
+            ))
+
+            # Check for past departures
+            if record.departure_date < today:
+                warnings.append(
+                    f"Boat departing {record.departure_date} has already passed"
+                )
+
+        # Calculate date range
+        if parse_result.schedules:
+            dates = [s.departure_date for s in parse_result.schedules]
+            earliest_departure = min(dates)
+            latest_departure = max(dates)
+        else:
+            earliest_departure = None
+            latest_departure = None
+
+        # Cache the file bytes for confirm
+        cache_data = {
+            "file_bytes": content,
+            "filename": file.filename,
+        }
+        preview_id = preview_cache_service.store_preview(cache_data)
+
+        logger.info(
+            "boat_preview_created",
+            preview_id=preview_id,
+            total_rows=total_rows,
+            new_boats=new_boats,
+            updated_boats=updated_boats,
+            skipped_boats=skipped_boats,
+        )
+
+        return BoatPreview(
+            preview_id=preview_id,
+            total_rows=total_rows,
+            new_boats=new_boats,
+            updated_boats=updated_boats,
+            skipped_boats=skipped_boats,
+            earliest_departure=earliest_departure,
+            latest_departure=latest_departure,
+            skipped_rows=skipped_rows,
+            warnings=warnings[:10],  # Limit warnings
+            sample_rows=sample_rows,
+            expires_in_minutes=30,
+        )
+
+    except BoatScheduleUploadError as e:
+        return handle_error(e)
+    except Exception as e:
+        return handle_error(e)
+
+
+@router.post("/upload/confirm/{preview_id}", response_model=BoatUploadResult)
+async def confirm_boat_upload(preview_id: str):
+    """Save previously previewed boat data."""
+    try:
+        # Retrieve cached data
+        cached = preview_cache_service.retrieve_preview(preview_id)
+        if cached is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "PREVIEW_EXPIRED",
+                        "message": "Preview has expired. Please upload the file again."
+                    }
+                }
+            )
+
+        # Extract file data
+        file_bytes = cached["file_bytes"]
+        filename = cached["filename"]
+
+        # Re-process the file (ensures fresh DB state for upsert logic)
+        file_io = BytesIO(file_bytes)
+        service = get_boat_schedule_service()
+        result = service.import_from_excel(file_io, filename)
+
+        logger.info(
+            "boat_confirm_complete",
+            preview_id=preview_id,
+            imported=result.imported,
+            updated=result.updated,
+            skipped=result.skipped,
+        )
+
+        # Delete preview from cache
+        preview_cache_service.delete_preview(preview_id)
+
+        return result
 
     except Exception as e:
         return handle_error(e)

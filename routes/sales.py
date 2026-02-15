@@ -26,6 +26,8 @@ from models.sales import (
     SalesPreview,
     SalesPreviewRow,
     SACUploadResponse,
+    SACPreview,
+    SACPreviewRow,
 )
 from services.sales_service import get_sales_service
 from services.product_service import get_product_service
@@ -395,6 +397,183 @@ async def upload_sales(file: UploadFile = File(...)):
         return handle_error(e)
     except Exception as e:
         logger.error("sales_upload_failed", error=str(e))
+        return handle_error(e)
+
+
+@router.post("/upload-sac/preview", response_model=SACPreview)
+async def preview_sac_upload(file: UploadFile = File(...)):
+    """Parse SAC CSV and return preview. Nothing is saved."""
+    try:
+        # Get products with sac_sku and name mappings
+        product_service = get_product_service()
+        products, _ = product_service.get_all(page=1, page_size=1000, active_only=False)
+
+        # Build lookup: sac_sku (int) -> product_id
+        known_sac_skus = {
+            p.sac_sku: p.id
+            for p in products
+            if p.sac_sku is not None
+        }
+
+        # Build lookup: normalized product name -> product_id
+        known_product_names = {
+            normalize_product_name(p.sku): p.id
+            for p in products
+            if p.sku
+        }
+
+        # Parse CSV file
+        contents = await file.read()
+        parse_result = parse_sac_csv(contents, known_sac_skus, known_product_names)
+
+        if not parse_result.sales:
+            raise SACParseError(
+                message="No valid sales records found in file",
+                details={"total_rows": parse_result.total_rows, "errors": len(parse_result.errors)}
+            )
+
+        # Convert parsed records to SalesRecordCreate
+        sales_records = [
+            SalesRecordCreate(
+                product_id=record.product_id,
+                week_start=record.sale_date,
+                quantity_m2=record.quantity_m2,
+                customer=record.customer,
+                customer_normalized=record.customer_normalized,
+                unit_price_usd=record.unit_price_usd,
+                total_price_usd=record.total_price_usd,
+            )
+            for record in parse_result.sales
+        ]
+
+        # Build reverse lookup: product_id -> sku (for sample rows)
+        pid_to_sku: dict[str, str] = {}
+        for record in parse_result.sales:
+            if record.product_id and record.product_id not in pid_to_sku:
+                pid_to_sku[record.product_id] = record.sku_name
+
+        # Build sample rows (first 10 matched records)
+        sample_rows = []
+        for record in parse_result.sales[:10]:
+            # Determine matched_by from parse_result
+            matched_by = "name"  # default
+            if record.sac_sku and record.sac_sku in known_sac_skus:
+                matched_by = "sac_sku"
+
+            sample_rows.append(SACPreviewRow(
+                sku=pid_to_sku.get(record.product_id, record.sku_name[:40]),
+                sale_date=record.sale_date,
+                quantity_m2=float(record.quantity_m2),
+                customer=record.customer,
+                matched_by=matched_by,
+            ))
+
+        # Store both sales_records AND parse_result in cache
+        cache_data = {
+            "sales_records": sales_records,
+            "parse_result": parse_result,
+        }
+        preview_id = preview_cache_service.store_preview(cache_data)
+
+        logger.info(
+            "sac_preview_created",
+            preview_id=preview_id,
+            row_count=len(sales_records),
+            total_m2=float(parse_result.total_m2_sold),
+            match_rate=f"{parse_result.match_rate:.1f}%"
+        )
+
+        return SACPreview(
+            preview_id=preview_id,
+            row_count=len(sales_records),
+            total_m2=float(parse_result.total_m2_sold),
+            date_range_start=parse_result.date_range[0],
+            date_range_end=parse_result.date_range[1],
+            matched_by_sac_sku=parse_result.matched_by_sac_sku,
+            matched_by_name=parse_result.matched_by_name,
+            unmatched_count=len(parse_result.unmatched_products),
+            match_rate_pct=round(parse_result.match_rate, 1),
+            unmatched_products=list(parse_result.unmatched_products)[:20],
+            unique_customers=len(parse_result.unique_customers),
+            unique_products=len(parse_result.unique_products),
+            top_product=parse_result.top_product,
+            skipped_non_tile=parse_result.skipped_non_tile,
+            skipped_products=list(parse_result.skipped_products)[:10],
+            warnings=[],
+            sample_rows=sample_rows,
+        )
+
+    except (SACParseError, SACMissingColumnsError, AppError) as e:
+        return handle_error(e)
+    except Exception as e:
+        logger.error("sac_preview_failed", error=str(e))
+        return handle_error(e)
+
+
+@router.post("/upload-sac/confirm/{preview_id}", response_model=SACUploadResponse)
+async def confirm_sac_upload(preview_id: str):
+    """Save previously previewed SAC sales data."""
+    try:
+        # Retrieve from cache
+        cached_data = preview_cache_service.retrieve_preview(preview_id)
+        if cached_data is None:
+            raise HTTPException(status_code=404, detail="Preview expired")
+
+        # Extract sales_records and parse_result
+        sales_records = cached_data["sales_records"]
+        parse_result = cached_data["parse_result"]
+
+        sales_service = get_sales_service()
+        deleted = 0
+
+        if sales_records:
+            # Make upload idempotent: delete existing records in date range
+            min_date, max_date = parse_result.date_range
+            if min_date and max_date:
+                deleted = sales_service.delete_by_date_range(min_date, max_date)
+                if deleted > 0:
+                    logger.info("sac_sales_deleted_before_upload", count=deleted)
+
+        # Bulk create
+        created = sales_service.bulk_create(sales_records)
+
+        logger.info(
+            "sac_confirm_complete",
+            preview_id=preview_id,
+            records_created=len(created),
+            records_deleted=deleted,
+            match_rate=f"{parse_result.match_rate:.1f}%"
+        )
+
+        # Delete preview from cache
+        preview_cache_service.delete_preview(preview_id)
+
+        return SACUploadResponse(
+            created=len(created),
+            deleted=deleted,
+            total_rows=parse_result.total_rows,
+            matched_by_sac_sku=parse_result.matched_by_sac_sku,
+            matched_by_name=parse_result.matched_by_name,
+            unmatched_count=len(parse_result.unmatched_products),
+            match_rate_pct=round(parse_result.match_rate, 1),
+            date_range_start=parse_result.date_range[0],
+            date_range_end=parse_result.date_range[1],
+            total_m2_sold=float(parse_result.total_m2_sold),
+            unique_customers=len(parse_result.unique_customers),
+            unique_products=len(parse_result.unique_products),
+            top_product=parse_result.top_product,
+            skipped_non_tile=parse_result.skipped_non_tile,
+            skipped_products=list(parse_result.skipped_products)[:10],
+            unmatched_products=list(parse_result.unmatched_products)[:20],
+            errors=[e.__dict__ for e in parse_result.errors[:20]],
+        )
+
+    except HTTPException:
+        raise
+    except (AppError,) as e:
+        return handle_error(e)
+    except Exception as e:
+        logger.error("sac_confirm_failed", error=str(e), preview_id=preview_id)
         return handle_error(e)
 
 

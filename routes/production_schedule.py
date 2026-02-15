@@ -25,9 +25,13 @@ from models.production_schedule import (
     MapProductResponse,
     UnmappedProduct,
     ProductFactoryStatus,
+    # Preview models
+    ProductionPreview,
+    ProductionPreviewRow,
 )
 from services.production_schedule_parser_service import get_production_schedule_parser_service
 from services.production_schedule_service import get_production_schedule_service
+from services import preview_cache_service
 from exceptions import AppError, DatabaseError
 
 logger = structlog.get_logger(__name__)
@@ -325,6 +329,212 @@ async def rematch_products():
 # ===================
 # ORDER BUILDER INTEGRATION
 # ===================
+
+@router.post("/upload-replace/preview", response_model=ProductionPreview)
+async def preview_production_upload(
+    file: UploadFile = File(..., description="Production schedule Excel file")
+):
+    """Parse production schedule Excel and return preview. Nothing is saved."""
+    # Validate file type
+    file_type = _validate_file_type(file.filename)
+
+    # Excel only for preview
+    if file_type != 'excel':
+        raise HTTPException(
+            status_code=400,
+            detail="Preview only supports Excel files (.xlsx, .xls). PDF uploads not supported."
+        )
+
+    try:
+        # Read file content
+        file_bytes = await file.read()
+
+        if len(file_bytes) == 0:
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
+
+        if len(file_bytes) > 10 * 1024 * 1024:  # 10MB limit
+            raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+
+        logger.info(
+            "production_schedule_preview_started",
+            filename=file.filename,
+            size=len(file_bytes)
+        )
+
+        # Parse Excel
+        parser = get_production_schedule_parser_service()
+        parsed_data, production_records = await parser.parse_excel(
+            file_bytes, filename=file.filename
+        )
+
+        if not production_records:
+            raise HTTPException(
+                status_code=400,
+                detail="No production items could be extracted from the Excel"
+            )
+
+        # Get current record count (will be deleted on confirm)
+        from config import get_supabase_client
+        db = get_supabase_client()
+        existing = db.table("production_schedule").select("id", count="exact").execute()
+        existing_count = existing.count or 0
+
+        # Count matched vs unmatched
+        matched_count = sum(1 for r in production_records if r.product_id)
+        unmatched_count = len(production_records) - matched_count
+        unmatched_referencias = [
+            r.referencia for r in production_records
+            if not r.product_id
+        ]
+
+        # Build status breakdown
+        status_breakdown = {
+            "scheduled": 0,
+            "in_progress": 0,
+            "completed": 0
+        }
+        for r in production_records:
+            status_breakdown[r.status] = status_breakdown.get(r.status, 0) + 1
+
+        # Calculate totals
+        total_requested_m2 = sum(r.requested_m2 for r in production_records)
+        total_completed_m2 = sum(r.completed_m2 for r in production_records)
+
+        # Build sample rows (first 15)
+        sample_rows = [
+            ProductionPreviewRow(
+                referencia=r.referencia,
+                sku=r.sku,
+                plant=r.plant,
+                requested_m2=r.requested_m2,
+                completed_m2=r.completed_m2,
+                status=r.status,
+                estimated_delivery_date=r.estimated_delivery_date
+            )
+            for r in production_records[:15]
+        ]
+
+        # Determine source month
+        source_month = production_records[0].source_month if production_records else "Unknown"
+
+        # Build warnings
+        warnings = []
+        if unmatched_count > 0:
+            warnings.append(f"{unmatched_count} items could not be matched to products")
+        if existing_count > 0:
+            warnings.append(f"Upload will replace {existing_count} existing schedule items")
+
+        # Store in cache
+        preview_data = {
+            "file_bytes": file_bytes,
+            "filename": file.filename,
+            "file_type": file_type,
+        }
+        preview_id = preview_cache_service.store_preview(preview_data)
+
+        logger.info(
+            "production_preview_created",
+            preview_id=preview_id,
+            total_rows=len(production_records),
+            matched=matched_count,
+            unmatched=unmatched_count
+        )
+
+        return ProductionPreview(
+            preview_id=preview_id,
+            filename=file.filename,
+            source_month=source_month,
+            total_rows=len(production_records),
+            rows_with_data=len(production_records),
+            matched_to_products=matched_count,
+            unmatched_count=unmatched_count,
+            unmatched_referencias=unmatched_referencias,
+            total_requested_m2=total_requested_m2,
+            total_completed_m2=total_completed_m2,
+            status_breakdown=status_breakdown,
+            existing_records_to_delete=existing_count,
+            warnings=warnings,
+            sample_rows=sample_rows,
+            expires_in_minutes=30
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.error("production_schedule_preview_error", error=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        return handle_error(e)
+
+
+@router.post("/upload-replace/confirm/{preview_id}", response_model=ProductionImportResult)
+async def confirm_production_upload(preview_id: str):
+    """Save previously previewed production data (wipe and replace)."""
+    try:
+        # Retrieve from cache
+        cached = preview_cache_service.retrieve_preview(preview_id)
+        if cached is None:
+            raise HTTPException(status_code=404, detail="Preview expired or not found")
+
+        file_bytes = cached["file_bytes"]
+        filename = cached["filename"]
+        file_type = cached["file_type"]
+
+        logger.info(
+            "production_schedule_confirm_started",
+            preview_id=preview_id,
+            filename=filename
+        )
+
+        # Re-parse the file
+        parser = get_production_schedule_parser_service()
+        service = get_production_schedule_service()
+
+        parsed_data, production_records = await parser.parse_excel(
+            file_bytes, filename=filename
+        )
+
+        if not production_records:
+            raise HTTPException(
+                status_code=400,
+                detail="No production items could be extracted from the Excel"
+            )
+
+        # Wipe existing data
+        try:
+            from config import get_supabase_client
+            db = get_supabase_client()
+            db.table("production_schedule").delete().neq(
+                "id", "00000000-0000-0000-0000-000000000000"
+            ).execute()
+            logger.info("existing_schedule_deleted")
+        except Exception as e:
+            logger.warning("delete_existing_failed", error=str(e))
+
+        # Import using correct schema
+        result = service.import_from_excel(production_records, match_products=True)
+
+        # Delete preview from cache
+        preview_cache_service.delete_preview(preview_id)
+
+        logger.info(
+            "production_schedule_confirm_complete",
+            preview_id=preview_id,
+            total_rows=result.total_rows_parsed,
+            matched=result.matched_to_products,
+            unmatched=len(result.unmatched_referencias)
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.error("production_schedule_confirm_error", error=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        return handle_error(e)
+
 
 @router.post("/upload-replace", response_model=ProductionImportResult)
 async def upload_and_replace_schedule(

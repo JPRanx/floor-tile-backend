@@ -5,7 +5,7 @@ See BUILDER_BLUEPRINT.md for endpoint specifications.
 See STANDARDS_ERRORS.md for error response format.
 """
 
-from fastapi import APIRouter, Query, UploadFile, File
+from fastapi import APIRouter, Query, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import date
@@ -20,6 +20,8 @@ from models.inventory import (
     InventoryCurrentResponse,
     InventoryUploadResponse,
     InTransitUploadResponse,
+    InventoryPreview,
+    InventoryPreviewRow,
 )
 from models.product import ProductCreate, Category, Rotation
 from services.inventory_service import get_inventory_service
@@ -40,6 +42,8 @@ from models.inventory_lot import (
     RowError,
     ProductLotSummary,
     ContainerEstimateResponse,
+    SIESAPreview,
+    SIESAPreviewLot,
 )
 from parsers.siesa_parser import parse_siesa_bytes
 from config.shipping import (
@@ -49,6 +53,7 @@ from config.shipping import (
 )
 from utils.text_utils import normalize_product_name
 from config import get_supabase_client
+from services import preview_cache_service
 
 logger = structlog.get_logger(__name__)
 
@@ -120,6 +125,228 @@ async def get_current_inventory():
         )
 
     except Exception as e:
+        return handle_error(e)
+
+
+@router.post("/upload/preview", response_model=InventoryPreview)
+async def preview_inventory_upload(file: UploadFile = File(...)):
+    """Parse inventory Excel and return preview. Nothing is saved."""
+    try:
+        # Read file content
+        content = await file.read()
+        file_obj = BytesIO(content)
+
+        product_service = get_product_service()
+
+        # STEP 1: Extract products from Excel
+        extracted_products = extract_products_from_excel(BytesIO(content))
+
+        # Determine which products will be auto-created
+        products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+
+        # Build lookup: owner_code -> product
+        known_owner_codes = {
+            p.owner_code: p
+            for p in products
+            if p.owner_code is not None
+        }
+
+        # Build lookup: normalized SKU name -> product
+        known_sku_names = {
+            _normalize_sku_name(p.sku): p
+            for p in products
+            if p.sku
+        }
+
+        # Determine which products would be auto-created
+        auto_created_skus = []
+        products_to_upsert = []
+        for p in extracted_products:
+            # Check if product already exists
+            normalized_sku = _normalize_sku_name(p.sku)
+            exists = (p.owner_code and p.owner_code in known_owner_codes) or (normalized_sku in known_sku_names)
+
+            if not exists:
+                auto_created_skus.append(p.sku)
+                try:
+                    products_to_upsert.append(ProductCreate(
+                        sku=p.sku,
+                        category=Category(p.category),
+                        rotation=Rotation(p.rotation) if p.rotation else None,
+                    ))
+                except ValueError:
+                    continue
+
+        # STEP 2: Parse INVENTARIO sheet
+        # Build lookup dicts for parsing (includes existing products)
+        known_owner_codes_ids = {
+            p.owner_code: p.id
+            for p in products
+            if p.owner_code is not None
+        }
+        known_sku_names_ids = {
+            _normalize_sku_name(p.sku): p.id
+            for p in products
+            if p.sku
+        }
+
+        parse_result = parse_owner_excel(file_obj, known_owner_codes_ids, known_sku_names_ids)
+
+        if parse_result.errors:
+            inventory_errors = [
+                e for e in parse_result.errors
+                if e.sheet.upper().startswith("INVENTARIO")
+            ]
+            if inventory_errors:
+                raise InventoryUploadError([
+                    {
+                        "sheet": e.sheet,
+                        "row": e.row,
+                        "field": e.field,
+                        "error": e.error
+                    }
+                    for e in inventory_errors
+                ])
+
+        # Convert parsed records to create models
+        snapshots_to_create = [
+            InventorySnapshotCreate(
+                product_id=record.product_id,
+                warehouse_qty=record.warehouse_qty,
+                in_transit_qty=record.in_transit_qty,
+                snapshot_date=record.snapshot_date,
+                notes=record.notes,
+            )
+            for record in parse_result.inventory
+        ]
+
+        # STEP 3: Determine which products would get zero-filled
+        zero_filled_skus = []
+        if snapshots_to_create:
+            snapshot_date = snapshots_to_create[0].snapshot_date
+            uploaded_product_ids = {s.product_id for s in snapshots_to_create}
+
+            missing_products = [
+                p for p in products
+                if p.id not in uploaded_product_ids
+            ]
+
+            if missing_products:
+                zero_filled_skus = [p.sku for p in missing_products]
+                for p in missing_products:
+                    snapshots_to_create.append(
+                        InventorySnapshotCreate(
+                            product_id=p.id,
+                            warehouse_qty=0,
+                            in_transit_qty=0,
+                            snapshot_date=snapshot_date,
+                        )
+                    )
+
+        # Build stats
+        row_count = len(snapshots_to_create)
+        product_count = len(set(s.product_id for s in snapshots_to_create))
+        snapshot_date = snapshots_to_create[0].snapshot_date if snapshots_to_create else date.today()
+
+        # Build sample rows (first 10)
+        sku_lookup = {p.id: p.sku for p in products}
+        sample_rows = [
+            InventoryPreviewRow(
+                sku=sku_lookup.get(s.product_id, "UNKNOWN"),
+                warehouse_qty=float(s.warehouse_qty),
+                in_transit_qty=float(s.in_transit_qty),
+                snapshot_date=s.snapshot_date,
+            )
+            for s in snapshots_to_create[:10]
+        ]
+
+        # Store in cache
+        cache_data = {
+            "products_to_upsert": [p.model_dump() for p in products_to_upsert],
+            "snapshots_to_create": [s.model_dump() for s in snapshots_to_create],
+            "auto_created_skus": auto_created_skus,
+            "zero_filled_skus": zero_filled_skus,
+        }
+        preview_id = preview_cache_service.store_preview(cache_data)
+
+        logger.info(
+            "inventory_preview_created",
+            preview_id=preview_id,
+            row_count=row_count,
+            product_count=product_count,
+            auto_created_count=len(auto_created_skus),
+            zero_filled_count=len(zero_filled_skus),
+        )
+
+        return InventoryPreview(
+            preview_id=preview_id,
+            row_count=row_count,
+            product_count=product_count,
+            snapshot_date=snapshot_date,
+            auto_created_products=auto_created_skus,
+            auto_created_count=len(auto_created_skus),
+            zero_filled_count=len(zero_filled_skus),
+            zero_filled_products=zero_filled_skus[:20],  # Limit to 20
+            warnings=[],
+            sample_rows=sample_rows,
+        )
+
+    except (InventoryUploadError, AppError) as e:
+        return handle_error(e)
+    except Exception as e:
+        logger.error("inventory_preview_failed", error=str(e))
+        return handle_error(e)
+
+
+@router.post("/upload/confirm/{preview_id}", response_model=InventoryUploadResponse)
+async def confirm_inventory_upload(preview_id: str):
+    """Save previously previewed inventory data."""
+    try:
+        cache_data = preview_cache_service.retrieve_preview(preview_id)
+        if cache_data is None:
+            raise HTTPException(status_code=404, detail="Preview expired")
+
+        product_service = get_product_service()
+        inventory_service = get_inventory_service()
+
+        # Retrieve cached data
+        products_to_upsert = [ProductCreate(**p) for p in cache_data["products_to_upsert"]]
+        snapshots_to_create = [InventorySnapshotCreate(**s) for s in cache_data["snapshots_to_create"]]
+
+        # Bulk upsert auto-created products
+        if products_to_upsert:
+            created, updated = product_service.bulk_upsert(products_to_upsert)
+            logger.info("products_auto_created", created=created, updated=updated)
+
+        # Delete existing snapshots for the dates (idempotent)
+        if snapshots_to_create:
+            unique_dates = list(set(s.snapshot_date for s in snapshots_to_create))
+            deleted = inventory_service.delete_by_dates(unique_dates)
+            if deleted > 0:
+                logger.info("inventory_deleted_before_upload", count=deleted)
+
+            # Bulk insert snapshots
+            inventory_service.bulk_create(snapshots_to_create)
+
+        # Delete preview from cache
+        preview_cache_service.delete_preview(preview_id)
+
+        logger.info(
+            "inventory_confirm_complete",
+            preview_id=preview_id,
+            records_created=len(snapshots_to_create),
+        )
+
+        return InventoryUploadResponse(
+            success=True,
+            records_created=len(snapshots_to_create),
+            message=f"Successfully uploaded {len(snapshots_to_create)} inventory records"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("inventory_confirm_failed", error=str(e), preview_id=preview_id)
         return handle_error(e)
 
 
@@ -293,6 +520,304 @@ async def upload_inventory(file: UploadFile = File(...)):
 # ===================
 # SIESA INVENTORY (LOT-LEVEL)
 # ===================
+
+@router.post("/siesa/upload/preview", response_model=SIESAPreview)
+async def preview_siesa_upload(
+    file: UploadFile = File(...),
+    snapshot_date: Optional[date] = Query(None, description="Snapshot date (defaults to today)")
+):
+    """Parse SIESA XLS and return preview. Nothing is saved."""
+    actual_date = snapshot_date or date.today()
+
+    try:
+        # Read file content
+        content = await file.read()
+
+        # Build product lookup dictionaries
+        product_service = get_product_service()
+        products, _ = product_service.get_all(page=1, page_size=10000, active_only=False)
+
+        # siesa_item -> (product_id, sku)
+        products_by_siesa_item: dict[int, tuple[str, str]] = {}
+        # normalized_name -> (product_id, sku)
+        products_by_normalized_name: dict[str, tuple[str, str]] = {}
+
+        for p in products:
+            if p.siesa_item:
+                products_by_siesa_item[p.siesa_item] = (p.id, p.sku)
+            normalized = normalize_product_name(p.sku)
+            if normalized:
+                products_by_normalized_name[normalized] = (p.id, p.sku)
+
+        # Parse the file
+        parse_result = parse_siesa_bytes(
+            file_content=content,
+            filename=file.filename or "siesa.xls",
+            snapshot_date=actual_date,
+            products_by_siesa_item=products_by_siesa_item,
+            products_by_normalized_name=products_by_normalized_name,
+        )
+
+        # Build lots_to_insert list
+        lots_to_insert = []
+        for match in parse_result.matched_lots:
+            lot = match.lot
+            lots_to_insert.append({
+                "product_id": match.product_id,
+                "lot_number": lot.lot_number,
+                "quantity_m2": float(lot.quantity_m2),
+                "weight_kg": float(lot.weight_kg) if lot.weight_kg else None,
+                "quality": lot.quality,
+                "warehouse_code": lot.warehouse_code,
+                "warehouse_name": lot.warehouse_name,
+                "snapshot_date": actual_date.isoformat(),
+                "siesa_item": lot.siesa_item,
+                "siesa_description": lot.siesa_description,
+            })
+
+        # Calculate container stats
+        total_weight = float(parse_result.total_weight_kg)
+        containers_needed = calculate_containers_needed(total_weight, CONTAINER_WEIGHT_LIMIT_KG)
+        utilization = 0.0
+        if containers_needed > 0:
+            utilization = (total_weight / (containers_needed * CONTAINER_WEIGHT_LIMIT_KG)) * 100
+
+        # Build warehouse summaries
+        warehouse_summaries = [
+            WarehouseSummary(
+                code=wh.code,
+                name=wh.name,
+                total_m2=float(wh.total_m2),
+                total_weight_kg=float(wh.total_weight_kg),
+                lot_count=wh.lot_count,
+            )
+            for wh in parse_result.warehouses.values()
+        ]
+
+        # Calculate match stats
+        total_matched = parse_result.matched_by_siesa_item + parse_result.matched_by_name
+        total_processed = total_matched + parse_result.unmatched_count
+        match_rate = (total_matched / total_processed * 100) if total_processed > 0 else 0.0
+
+        # Get unmatched product descriptions
+        unmatched_products = list(set(
+            m.lot.siesa_description or f"Item {m.lot.siesa_item}"
+            for m in parse_result.unmatched_lots
+        ))[:20]
+
+        # Build SKU lookup for sample lots
+        sku_lookup = {p.id: p.sku for p in products}
+
+        # Build sample lots (first 10 matched)
+        sample_lots = [
+            SIESAPreviewLot(
+                sku=sku_lookup.get(match.product_id, "UNKNOWN"),
+                warehouse_name=match.lot.warehouse_name,
+                lot_number=match.lot.lot_number,
+                quantity_m2=float(match.lot.quantity_m2),
+                weight_kg=float(match.lot.weight_kg) if match.lot.weight_kg else None,
+            )
+            for match in parse_result.matched_lots[:10]
+        ]
+
+        # Store in cache
+        cache_data = {
+            "lots_to_insert": lots_to_insert,
+            "snapshot_date": actual_date.isoformat(),
+            "parse_result": {
+                "total_rows": parse_result.total_rows,
+                "processed_rows": parse_result.processed_rows,
+                "skipped_errors": parse_result.skipped_errors,
+                "unique_siesa_items": parse_result.unique_siesa_items,
+            },
+            "warehouse_summaries": [w.model_dump() for w in warehouse_summaries],
+            "unmatched_products": unmatched_products,
+            "match_stats": {
+                "matched_by_siesa_item": parse_result.matched_by_siesa_item,
+                "matched_by_name": parse_result.matched_by_name,
+                "unmatched_count": parse_result.unmatched_count,
+                "match_rate_pct": round(match_rate, 1),
+            },
+            "container_stats": {
+                "containers_needed": containers_needed,
+                "container_utilization_pct": round(utilization, 1),
+            },
+        }
+        preview_id = preview_cache_service.store_preview(cache_data)
+
+        logger.info(
+            "siesa_preview_created",
+            preview_id=preview_id,
+            total_rows=parse_result.total_rows,
+            lots_count=len(lots_to_insert),
+            match_rate_pct=round(match_rate, 1),
+        )
+
+        return SIESAPreview(
+            preview_id=preview_id,
+            snapshot_date=actual_date,
+            total_rows=parse_result.total_rows,
+            lots_count=len(lots_to_insert),
+            unique_products=parse_result.unique_siesa_items,
+            total_m2_available=float(parse_result.total_m2),
+            total_weight_kg=float(parse_result.total_weight_kg),
+            containers_needed=containers_needed,
+            container_utilization_pct=round(utilization, 1),
+            matched_by_siesa_item=parse_result.matched_by_siesa_item,
+            matched_by_name=parse_result.matched_by_name,
+            unmatched_count=parse_result.unmatched_count,
+            match_rate_pct=round(match_rate, 1),
+            unmatched_products=unmatched_products,
+            warehouses=warehouse_summaries,
+            warnings=[],
+            sample_lots=sample_lots,
+        )
+
+    except SIESAMissingColumnsError as e:
+        logger.error("siesa_preview_missing_columns", missing=e.details.get("missing_columns"))
+        return handle_error(e)
+    except SIESAParseError as e:
+        logger.error("siesa_preview_error", error=str(e))
+        return handle_error(e)
+    except Exception as e:
+        logger.error("siesa_preview_failed", error=str(e), type=type(e).__name__)
+        return handle_error(e)
+
+
+@router.post("/siesa/upload/confirm/{preview_id}", response_model=SIESAUploadResponse)
+async def confirm_siesa_upload(preview_id: str):
+    """Save previously previewed SIESA data."""
+    try:
+        cache_data = preview_cache_service.retrieve_preview(preview_id)
+        if cache_data is None:
+            raise HTTPException(status_code=404, detail="Preview expired")
+
+        # Retrieve cached data
+        lots_to_insert = cache_data["lots_to_insert"]
+        actual_date = date.fromisoformat(cache_data["snapshot_date"])
+        parse_result_data = cache_data["parse_result"]
+        warehouse_summaries = [WarehouseSummary(**w) for w in cache_data["warehouse_summaries"]]
+        unmatched_products = cache_data["unmatched_products"]
+        match_stats = cache_data["match_stats"]
+        container_stats = cache_data["container_stats"]
+
+        # Get database client
+        db = get_supabase_client()
+
+        # Delete existing lots for this snapshot_date (idempotent)
+        delete_result = db.table("inventory_lots").delete().eq(
+            "snapshot_date", actual_date.isoformat()
+        ).execute()
+        deleted_count = len(delete_result.data) if delete_result.data else 0
+        if deleted_count > 0:
+            logger.info("siesa_deleted_existing_lots", count=deleted_count, date=actual_date)
+
+        # Batch insert lots
+        lots_created = 0
+        if lots_to_insert:
+            chunk_size = 100
+            for i in range(0, len(lots_to_insert), chunk_size):
+                chunk = lots_to_insert[i:i + chunk_size]
+                db.table("inventory_lots").insert(chunk).execute()
+                lots_created += len(chunk)
+
+        # Sync to inventory_snapshots
+        if lots_created > 0:
+            product_stats: dict[str, dict] = {}
+            for lot in lots_to_insert:
+                pid = lot["product_id"]
+                qty = lot["quantity_m2"]
+                lot_num = lot.get("lot_number", "")
+
+                if pid not in product_stats:
+                    product_stats[pid] = {
+                        "total_m2": 0.0,
+                        "lot_count": 0,
+                        "largest_lot_m2": 0.0,
+                        "largest_lot_code": "",
+                    }
+
+                stats = product_stats[pid]
+                stats["total_m2"] += qty
+                stats["lot_count"] += 1
+
+                if qty > stats["largest_lot_m2"]:
+                    stats["largest_lot_m2"] = qty
+                    stats["largest_lot_code"] = lot_num
+
+            synced_count = 0
+            for pid, stats in product_stats.items():
+                existing = db.table("inventory_snapshots").select("id").eq(
+                    "product_id", pid
+                ).eq("snapshot_date", actual_date.isoformat()).limit(1).execute()
+
+                factory_data = {
+                    "factory_available_m2": stats["total_m2"],
+                    "factory_lot_count": stats["lot_count"],
+                    "factory_largest_lot_m2": stats["largest_lot_m2"],
+                    "factory_largest_lot_code": stats["largest_lot_code"],
+                }
+
+                if existing.data:
+                    snapshot_id = existing.data[0]["id"]
+                    db.table("inventory_snapshots").update(factory_data).eq(
+                        "id", snapshot_id
+                    ).execute()
+                else:
+                    db.table("inventory_snapshots").insert({
+                        "product_id": pid,
+                        "warehouse_qty": 0,
+                        "in_transit_qty": 0,
+                        "snapshot_date": actual_date.isoformat(),
+                        **factory_data,
+                    }).execute()
+
+                synced_count += 1
+
+            logger.info(
+                "siesa_synced_to_snapshots",
+                products_synced=synced_count,
+                date=actual_date.isoformat(),
+            )
+
+        # Delete preview from cache
+        preview_cache_service.delete_preview(preview_id)
+
+        logger.info(
+            "siesa_confirm_complete",
+            preview_id=preview_id,
+            lots_created=lots_created,
+        )
+
+        # Build response
+        return SIESAUploadResponse(
+            success=True,
+            snapshot_date=actual_date,
+            total_rows=parse_result_data["total_rows"],
+            processed_rows=parse_result_data["processed_rows"],
+            skipped_errors=parse_result_data["skipped_errors"],
+            errors=[],
+            lots_created=lots_created,
+            unique_products=parse_result_data["unique_siesa_items"],
+            total_m2_available=sum(lot["quantity_m2"] for lot in lots_to_insert),
+            total_weight_kg=sum(lot.get("weight_kg") or 0 for lot in lots_to_insert),
+            container_limit_kg=CONTAINER_WEIGHT_LIMIT_KG,
+            containers_needed=container_stats["containers_needed"],
+            container_utilization_pct=container_stats["container_utilization_pct"],
+            matched_by_siesa_item=match_stats["matched_by_siesa_item"],
+            matched_by_name=match_stats["matched_by_name"],
+            unmatched_count=match_stats["unmatched_count"],
+            match_rate_pct=match_stats["match_rate_pct"],
+            unmatched_products=unmatched_products,
+            warehouses=warehouse_summaries,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("siesa_confirm_failed", error=str(e), preview_id=preview_id)
+        return handle_error(e)
+
 
 @router.post("/siesa/upload", response_model=SIESAUploadResponse)
 async def upload_siesa_inventory(
