@@ -86,6 +86,8 @@ from models.order_builder import (
     CustomerDemandCalculation,
     SelectionCalculation,
     FullCalculationBreakdown,
+    # Shipping cost config
+    ShippingCostConfig,
 )
 from models.recommendation import RecommendationPriority
 
@@ -298,6 +300,25 @@ class OrderBuilderService:
         # Step 12: Get liquidation clearance candidates (deactivated products with factory stock)
         liquidation_clearance = self._get_liquidation_clearance()
 
+        # Step 13: Read shipping cost config for frontend cost estimation
+        config_svc = get_config_service()
+        freight = config_svc.get_decimal("freight_per_container_usd", Decimal("460"))
+        destination = config_svc.get_decimal("destination_per_container_usd", Decimal("630"))
+        trucking = config_svc.get_decimal("trucking_per_container_usd", Decimal("261.10"))
+        other = config_svc.get_decimal("other_per_container_usd", Decimal("46.44"))
+        bl_fixed = config_svc.get_decimal("bl_fixed_costs_usd", Decimal("180.53"))
+        m2_container = config_svc.get_decimal("m2_per_container", Decimal("1881.6"))
+
+        shipping_cost_config = ShippingCostConfig(
+            freight_per_container_usd=freight,
+            destination_per_container_usd=destination,
+            trucking_per_container_usd=trucking,
+            other_per_container_usd=other,
+            bl_fixed_costs_usd=bl_fixed,
+            m2_per_container=m2_container,
+            per_container_total_usd=freight + destination + trucking + other,
+        )
+
         result = OrderBuilderResponse(
             boat=boat,
             next_boat=next_boat,
@@ -324,6 +345,8 @@ class OrderBuilderService:
             stability_forecast=stability_forecast,
             # Liquidation clearance (deactivated products with factory stock)
             liquidation_clearance=liquidation_clearance,
+            # Shipping cost config for frontend cost estimation
+            shipping_cost_config=shipping_cost_config,
         )
 
         logger.info(

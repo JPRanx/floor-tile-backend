@@ -1004,6 +1004,17 @@ class UnableToShipSummary(BaseSchema):
     items: list[UnableToShipItem] = Field(default_factory=list)
 
 
+class ShippingCostConfig(BaseSchema):
+    """Shipping cost parameters for frontend cost estimation."""
+    freight_per_container_usd: Decimal = Field(default=Decimal("460"))
+    destination_per_container_usd: Decimal = Field(default=Decimal("630"))
+    trucking_per_container_usd: Decimal = Field(default=Decimal("261.10"))
+    other_per_container_usd: Decimal = Field(default=Decimal("46.44"))
+    bl_fixed_costs_usd: Decimal = Field(default=Decimal("180.53"))
+    m2_per_container: Decimal = Field(default=Decimal("1881.6"))
+    per_container_total_usd: Decimal = Field(default=Decimal("1397.54"), description="Sum of all per-container costs")
+
+
 class OrderBuilderResponse(BaseSchema):
     """Complete Order Builder API response."""
 
@@ -1089,6 +1100,9 @@ class OrderBuilderResponse(BaseSchema):
 
     # === Liquidation Clearance (deactivated products with factory stock) ===
     liquidation_clearance: list[LiquidationClearanceProduct] = Field(default_factory=list)
+
+    # === Shipping Cost Config (for frontend cost estimation) ===
+    shipping_cost_config: Optional[ShippingCostConfig] = None
 
 
 # ===================
