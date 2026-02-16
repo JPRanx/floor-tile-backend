@@ -91,6 +91,11 @@ class BoatScheduleCreate(BaseSchema):
         max_length=255,
         description="Original filename from upload"
     )
+    carrier: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Freight carrier (e.g., TIBA, SEABOARD)"
+    )
 
     @model_validator(mode='after')
     def validate_dates(self):
@@ -167,6 +172,11 @@ class BoatScheduleUpdate(BaseSchema):
         None,
         description="Schedule status"
     )
+    carrier: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Freight carrier"
+    )
 
 
 class BoatScheduleStatusUpdate(BaseSchema):
@@ -198,6 +208,7 @@ class BoatScheduleResponse(BaseSchema, TimestampMixin):
     booking_deadline: date = Field(..., description="Last date to book cargo (3 days before departure)")
     status: BoatStatus = Field(..., description="Current status")
     source_file: Optional[str] = Field(None, description="Source filename")
+    carrier: Optional[str] = Field(None, description="Freight carrier (e.g., TIBA, SEABOARD)")
 
     # Computed fields for UI
     days_until_departure: Optional[int] = Field(None, description="Days until departure")
@@ -237,6 +248,7 @@ class BoatScheduleResponse(BaseSchema, TimestampMixin):
             booking_deadline=deadline,
             status=row["status"],
             source_file=row.get("source_file"),
+            carrier=row.get("carrier"),
             created_at=row["created_at"],
             updated_at=row.get("updated_at"),
             days_until_departure=days_until_departure,
@@ -300,6 +312,7 @@ class BoatPreviewRow(BaseSchema):
     transit_days: int
     origin_port: str = "Cartagena"
     destination_port: str = "Puerto Quetzal"
+    carrier: Optional[str] = None
     action: str = "new"  # "new", "update", or "skip"
 
 

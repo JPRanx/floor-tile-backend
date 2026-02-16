@@ -440,6 +440,7 @@ class OrderBuilderService:
             booking_deadline=boat_data.booking_deadline,
             days_until_deadline=max(0, days_until_deadline),
             max_containers=5,  # Default, could be configurable per boat
+            carrier=boat_data.carrier,
         )
 
     def _get_coverage_buffer(

@@ -653,6 +653,7 @@ class OrderBuilderBoat(BaseSchema):
     booking_deadline: date
     days_until_deadline: int
     max_containers: int = Field(default=5, description="3-5, default 5")
+    carrier: Optional[str] = Field(None, description="Freight carrier (e.g., TIBA, SEABOARD)")
 
 
 class OrderBuilderAlert(BaseSchema):

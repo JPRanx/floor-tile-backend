@@ -453,6 +453,7 @@ class BoatScheduleService:
                 "booking_deadline": booking_deadline.isoformat(),
                 "status": "available",
                 "source_file": data.source_file,
+                "carrier": data.carrier,
             }
 
             result = (
@@ -799,6 +800,7 @@ class BoatScheduleService:
             "booking_deadline": record.booking_deadline.isoformat(),
             "status": "available",
             "source_file": source_file,
+            "carrier": "TIBA",
         }
 
         self.db.table(self.table).insert(insert_data).execute()
@@ -818,6 +820,7 @@ class BoatScheduleService:
             "booking_deadline": record.booking_deadline.isoformat(),
             "source_file": source_file,
         }
+        # Don't overwrite carrier on update — it may have been set manually
 
         self.db.table(self.table).update(update_data).eq("id", schedule_id).execute()
 
