@@ -221,6 +221,9 @@ class OrderBuilderService:
                 filtered_count=len(recommendations.recommendations)
             )
 
+        # Step 2a½: Get inventory snapshot once (reused by grouping, mode, summary)
+        inventory_snapshots = self.inventory_service.get_latest()
+
         # Step 2b: Get trend data for products
         t2 = time.time()
         trend_data = self._get_product_trends()
@@ -237,20 +240,29 @@ class OrderBuilderService:
             trend_data,
             boat_departure=boat.departure_date if boat.boat_id else None,  # Pass departure for factory status
             order_deadline=boat.order_deadline,  # Pass for availability breakdown calculation
-            coverage_buffer_days=coverage_buffer_days  # Dynamic buffer based on next boat
+            coverage_buffer_days=coverage_buffer_days,  # Dynamic buffer based on next boat
+            inventory_snapshots=inventory_snapshots,
         )
         timings["4_grouping"] = round(time.time() - t3, 2)
 
         logger.info("order_builder_timings", **timings)
 
+        # Pre-compute warehouse availability from cached inventory
+        warehouse_current_m2 = sum(
+            Decimal(str(inv.warehouse_qty)) for inv in inventory_snapshots
+        )
+        warehouse_available_pallets = max(0, WAREHOUSE_CAPACITY - int(warehouse_current_m2 / M2_PER_PALLET))
+
         # Step 4: Apply BL capacity logic (pre-select products) with constraint analysis
         all_products, constraint_analysis = self._apply_mode(
-            products_by_priority, num_bls, boat.max_containers, trend_data
+            products_by_priority, num_bls, boat.max_containers, trend_data,
+            warehouse_available_pallets=warehouse_available_pallets,
+            inventory_snapshots=inventory_snapshots,
         )
 
         # Step 5: Calculate summary (use BL capacity, not boat capacity)
         bl_max_containers = num_bls * MAX_CONTAINERS_PER_BL
-        summary = self._calculate_summary(all_products, bl_max_containers)
+        summary = self._calculate_summary(all_products, bl_max_containers, inventory_snapshots)
 
         # Step 6: Generate alerts
         alerts = self._generate_alerts(all_products, summary, boat)
@@ -1223,7 +1235,8 @@ class OrderBuilderService:
         trend_data: dict[str, dict],
         boat_departure: Optional[date] = None,
         order_deadline: Optional[date] = None,
-        coverage_buffer_days: Optional[int] = None
+        coverage_buffer_days: Optional[int] = None,
+        inventory_snapshots: Optional[list] = None,
     ) -> dict[str, list[OrderBuilderProduct]]:
         """Convert recommendations to OrderBuilderProducts grouped by priority."""
         groups = {
@@ -1256,7 +1269,8 @@ class OrderBuilderService:
         # Get factory availability (SIESA finished goods) for all products
         factory_availability_map = {}
         try:
-            inventory_snapshots = self.inventory_service.get_latest()
+            if inventory_snapshots is None:
+                inventory_snapshots = self.inventory_service.get_latest()
             for inv in inventory_snapshots:
                 factory_availability_map[inv.product_id] = {
                     "factory_available_m2": Decimal(str(inv.factory_available_m2 or 0)),
@@ -1795,7 +1809,8 @@ class OrderBuilderService:
 
     def _identify_liquidation_candidates(
         self,
-        trend_data: dict[str, dict]
+        trend_data: dict[str, dict],
+        inventory_snapshots: Optional[list] = None,
     ) -> list[LiquidationCandidate]:
         """
         Find slow movers that could be cleared to make room for fast movers.
@@ -1807,8 +1822,9 @@ class OrderBuilderService:
         """
         candidates = []
 
-        # Get inventory data
-        inventory_snapshots = self.inventory_service.get_latest()
+        # Get inventory data (use cached snapshot if provided)
+        if inventory_snapshots is None:
+            inventory_snapshots = self.inventory_service.get_latest()
 
         for inv in inventory_snapshots:
             warehouse_m2 = Decimal(str(inv.warehouse_qty or 0))
@@ -1883,7 +1899,8 @@ class OrderBuilderService:
         num_bls: int,
         boat_max_containers: int,
         trend_data: dict[str, dict],
-        warehouse_available_pallets: Optional[int] = None
+        warehouse_available_pallets: Optional[int] = None,
+        inventory_snapshots: Optional[list] = None,
     ) -> tuple[list[OrderBuilderProduct], ConstraintAnalysis]:
         """
         Apply BL capacity logic to pre-select products.
@@ -2066,7 +2083,7 @@ class OrderBuilderService:
             utilization_pct = round(Decimal(total_selected) / Decimal(effective_limit) * 100, 1)
 
         # Identify liquidation candidates (slow movers that could be cleared)
-        liquidation_candidates = self._identify_liquidation_candidates(trend_data)
+        liquidation_candidates = self._identify_liquidation_candidates(trend_data, inventory_snapshots=inventory_snapshots)
         total_liquidation_pallets = sum(c.current_pallets for c in liquidation_candidates)
         total_liquidation_m2 = sum(c.current_m2 for c in liquidation_candidates)
 
@@ -2113,11 +2130,13 @@ class OrderBuilderService:
     def _calculate_summary(
         self,
         products: list[OrderBuilderProduct],
-        boat_max_containers: int
+        boat_max_containers: int,
+        inventory_snapshots: Optional[list] = None,
     ) -> OrderBuilderSummary:
         """Calculate order summary from selected products with weight-based container limits."""
-        # Get current warehouse level
-        inventory_snapshots = self.inventory_service.get_latest()
+        # Get current warehouse level (use cached snapshot if provided)
+        if inventory_snapshots is None:
+            inventory_snapshots = self.inventory_service.get_latest()
         warehouse_current_m2 = sum(
             Decimal(str(inv.warehouse_qty))
             for inv in inventory_snapshots
