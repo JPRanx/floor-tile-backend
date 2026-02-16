@@ -516,7 +516,7 @@ def get_demand_forecast(
             pattern_demand_m2=round(pattern_m2, 2),
             recommended_m2=round(recommended, 2),
             customers_expecting=len(set(customers)),
-            customer_names=list(set(customers))[:5],  # Top 5 unique customers
+            customer_names=sorted(set(customers))[:5],  # Top 5 unique customers
         ))
 
     # Sort by recommended demand descending
