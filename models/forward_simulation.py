@@ -45,55 +45,40 @@ class BoatProjection(BaseSchema):
     """
 
     boat_id: str = Field(..., description="Boat UUID or generated projection ID")
-    vessel_name: Optional[str] = Field(None, description="Vessel name if known")
+    boat_name: str = Field("", description="Vessel name if known")
     departure_date: str = Field(..., description="Projected departure date (ISO format)")
     arrival_date: str = Field(..., description="Projected arrival date (ISO format)")
-    origin_port: str = Field(..., description="Port of origin for this shipment")
     days_until_departure: int = Field(..., description="Days from today until departure")
-    estimated_pallets_min: int = Field(
+    origin_port: str = Field(..., description="Port of origin for this shipment")
+    confidence: ConfidenceLevel = Field(
+        ...,
+        description="Qualitative confidence level for this projection"
+    )
+    projected_pallets_min: int = Field(
         ...,
         ge=0,
         description="Low end of estimated pallet count"
     )
-    estimated_pallets_max: int = Field(
+    projected_pallets_max: int = Field(
         ...,
         ge=0,
         description="High end of estimated pallet count"
-    )
-    estimated_containers: int = Field(
-        ...,
-        ge=0,
-        description="Estimated number of containers needed"
     )
     urgency_breakdown: UrgencyBreakdown = Field(
         default_factory=UrgencyBreakdown,
         description="Product counts per urgency level"
     )
-    confidence: ConfidenceLevel = Field(
-        ...,
-        description="Qualitative confidence level for this projection"
-    )
-    confidence_score: int = Field(
-        ...,
-        ge=0,
-        le=100,
-        description="Numeric confidence 0-100, maps to dots display"
-    )
-    is_active: bool = Field(
-        ...,
-        description="True if an existing draft exists, False if purely projected"
-    )
     draft_status: Optional[str] = Field(
         None,
         description="Draft lifecycle status: drafting, action_needed, ordered, confirmed"
     )
-    window_opens_date: Optional[str] = Field(
+    draft_id: Optional[str] = Field(
         None,
-        description="Date when the order window opens (ISO format)"
+        description="Draft UUID if one exists"
     )
-    window_opens_in_days: Optional[int] = Field(
-        None,
-        description="Days until the order window opens"
+    is_active: bool = Field(
+        ...,
+        description="True if an existing draft exists, False if purely projected"
     )
 
 
@@ -107,12 +92,12 @@ class PlanningHorizonResponse(BaseSchema):
 
     factory_id: str = Field(..., description="Factory UUID")
     factory_name: str = Field(..., description="Factory display name")
+    horizon_months: int = Field(..., ge=1, le=12, description="Months projected ahead")
+    generated_at: str = Field(
+        ...,
+        description="When this projection was computed (ISO timestamp)"
+    )
     projections: list[BoatProjection] = Field(
         default_factory=list,
         description="Projected boats in chronological order"
-    )
-    total_boats: int = Field(..., ge=0, description="Total number of boats in horizon")
-    projection_generated_at: str = Field(
-        ...,
-        description="When this projection was computed (ISO timestamp)"
     )

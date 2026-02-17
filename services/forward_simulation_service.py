@@ -110,28 +110,18 @@ class ForwardSimulationService:
                 )
                 boat_projections.append(projection)
 
-            # Totals across all boats
-            total_pallets = sum(bp["estimated_pallets"] for bp in boat_projections)
-            total_containers = math.ceil(total_pallets / CONTAINER_MAX_PALLETS) if total_pallets > 0 else 0
-
             result = {
                 "factory_id": factory_id,
                 "factory_name": factory.get("name", ""),
-                "generated_at": today.isoformat(),
                 "horizon_months": months,
-                "boats": boat_projections,
-                "summary": {
-                    "total_boats": len(boat_projections),
-                    "total_estimated_pallets": total_pallets,
-                    "total_estimated_containers": total_containers,
-                },
+                "generated_at": today.isoformat(),
+                "projections": boat_projections,
             }
 
             logger.info(
                 "planning_horizon_complete",
                 factory_id=factory_id,
                 boats=len(boat_projections),
-                total_pallets=total_pallets,
             )
             return result
 
@@ -242,21 +232,18 @@ class ForwardSimulationService:
 
         return {
             "boat_id": boat_id,
-            "boat_name": boat.get("name", ""),
+            "boat_name": boat.get("vessel_name", ""),
             "departure_date": boat["departure_date"],
             "arrival_date": boat["arrival_date"],
-            "days_until_arrival": days_until_arrival,
-            "window_opens": window_opens.isoformat(),
-            "estimated_pallets": total_pallets,
-            "estimated_pallets_min": estimated_pallets_min,
-            "estimated_pallets_max": estimated_pallets_max,
-            "estimated_containers": estimated_containers,
+            "days_until_departure": (departure_date - today).days,
+            "origin_port": factory["origin_port"],
             "confidence": confidence_label,
-            "confidence_score": confidence_score,
-            "urgency_counts": urgency_counts,
-            "has_draft": draft is not None,
+            "projected_pallets_min": estimated_pallets_min,
+            "projected_pallets_max": estimated_pallets_max,
+            "urgency_breakdown": urgency_counts,
+            "draft_status": draft.get("status") if draft else None,
             "draft_id": draft["id"] if draft else None,
-            "products": product_details,
+            "is_active": draft is not None,
         }
 
     # ------------------------------------------------------------------
@@ -294,7 +281,7 @@ class ForwardSimulationService:
         )
         try:
             result = (
-                self.db.table("boats")
+                self.db.table("boat_schedules")
                 .select("*")
                 .eq("origin_port", origin_port)
                 .gt("departure_date", start.isoformat())
