@@ -36,6 +36,20 @@ class UrgencyBreakdown(BaseSchema):
     ok: int = Field(0, ge=0, description="Products with healthy stock levels")
 
 
+class ProductProjection(BaseSchema):
+    """Per-product projection for a boat: projected stock, urgency, and suggested order."""
+
+    product_id: str = Field(..., description="Product UUID")
+    sku: str = Field("", description="Product SKU")
+    daily_velocity_m2: float = Field(0, ge=0, description="Daily sales velocity in m2")
+    current_stock_m2: float = Field(0, description="Current warehouse + in-transit stock in m2")
+    projected_stock_m2: float = Field(0, description="Projected stock at arrival in m2")
+    days_of_stock_at_arrival: float = Field(0, description="Days of stock remaining at arrival")
+    urgency: str = Field("ok", description="Urgency level: critical, urgent, soon, ok")
+    coverage_gap_m2: float = Field(0, ge=0, description="m2 needed to cover until next order cycle")
+    suggested_pallets: int = Field(0, ge=0, description="Suggested pallets to order")
+
+
 class BoatProjection(BaseSchema):
     """
     Projection for a single future boat in the planning horizon.
@@ -79,6 +93,10 @@ class BoatProjection(BaseSchema):
     is_active: bool = Field(
         ...,
         description="True if an existing draft exists, False if purely projected"
+    )
+    product_details: list[ProductProjection] = Field(
+        default_factory=list,
+        description="Per-product projections sorted by urgency (critical first)"
     )
 
 

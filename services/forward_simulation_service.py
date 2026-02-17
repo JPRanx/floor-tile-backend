@@ -196,7 +196,7 @@ class ForwardSimulationService:
 
             product_details.append({
                 "product_id": pid,
-                "product_name": product.get("sku", ""),
+                "sku": product.get("sku", ""),
                 "daily_velocity_m2": float(daily_vel.quantize(Decimal("0.01"))),
                 "current_stock_m2": float(stock.quantize(Decimal("0.01"))),
                 "projected_stock_m2": float(projected_stock.quantize(Decimal("0.01"))),
@@ -230,6 +230,10 @@ class ForwardSimulationService:
         # Existing draft
         draft = drafts_map.get(boat_id)
 
+        # Sort product details by urgency (critical first)
+        urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
+        product_details.sort(key=lambda d: urgency_order.get(d["urgency"], 99))
+
         return {
             "boat_id": boat_id,
             "boat_name": boat.get("vessel_name", ""),
@@ -244,6 +248,7 @@ class ForwardSimulationService:
             "draft_status": draft.get("status") if draft else None,
             "draft_id": draft["id"] if draft else None,
             "is_active": draft is not None,
+            "product_details": product_details,
         }
 
     # ------------------------------------------------------------------
