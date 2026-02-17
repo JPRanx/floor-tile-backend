@@ -219,6 +219,7 @@ from routes.intelligence import router as intelligence_router
 from routes.diagnostics import router as diagnostics_router
 from routes.warehouse_orders import router as warehouse_orders_router
 from routes.config import router as config_router
+from routes.factories import router as factories_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -245,6 +246,7 @@ app.include_router(intelligence_router)  # Prefix already in router
 app.include_router(diagnostics_router, prefix="/api/diagnostics", tags=["Diagnostics"])
 app.include_router(warehouse_orders_router)  # Prefix already in router
 app.include_router(config_router, prefix="/api/config", tags=["Config"])
+app.include_router(factories_router, prefix="/api/factories", tags=["Factories"])
 
 
 if __name__ == "__main__":
