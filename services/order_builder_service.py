@@ -141,6 +141,7 @@ class OrderBuilderService:
         boat_id: Optional[str] = None,
         num_bls: int = 1,
         excluded_skus: Optional[list[str]] = None,
+        factory_id: Optional[str] = None,
     ) -> OrderBuilderResponse:
         """
         Get complete Order Builder data.
@@ -220,6 +221,39 @@ class OrderBuilderService:
                 original_count=original_count,
                 filtered_count=len(recommendations.recommendations)
             )
+
+        # Step 2a¾: Filter by factory if specified (OB V2)
+        factory_data = None
+        factory_product_ids = None
+        if factory_id:
+            from services.factory_service import get_factory_service
+            factory_svc = get_factory_service()
+            factory_data = factory_svc.get_by_id(factory_id)
+            if factory_data:
+                # Get product IDs belonging to this factory
+                from config import get_supabase_client
+                db = get_supabase_client()
+                factory_products = (
+                    db.table("products")
+                    .select("id")
+                    .eq("factory_id", factory_id)
+                    .eq("active", True)
+                    .execute()
+                )
+                factory_product_ids = {p["id"] for p in factory_products.data}
+                # Filter recommendations to only this factory's products
+                original_count = len(recommendations.recommendations)
+                recommendations.recommendations = [
+                    rec for rec in recommendations.recommendations
+                    if rec.product_id in factory_product_ids
+                ]
+                logger.info(
+                    "factory_filter_applied",
+                    factory_id=factory_id,
+                    factory_name=factory_data["name"],
+                    original_count=original_count,
+                    filtered_count=len(recommendations.recommendations),
+                )
 
         # Step 2a½: Get inventory snapshot once (reused by grouping, mode, summary)
         inventory_snapshots = self.inventory_service.get_latest()
@@ -331,6 +365,25 @@ class OrderBuilderService:
             per_container_total_usd=freight + destination + trucking + other,
         )
 
+        # Step 14: Compute factory timeline milestones (OB V2)
+        factory_timeline = None
+        factory_name_str = None
+        if factory_data and boat.boat_id:
+            from services.factory_timeline_service import get_factory_timeline_service
+            timeline_svc = get_factory_timeline_service()
+            # Check if factory has scheduled production for this boat window
+            has_production = any(
+                p.production_status == "scheduled" and p.production_can_add_more
+                for p in all_products
+            ) if all_products else False
+            factory_timeline = timeline_svc.compute_milestones(
+                factory=factory_data,
+                departure_date=boat.departure_date,
+                arrival_date=boat.arrival_date,
+                has_scheduled_production=has_production,
+            )
+            factory_name_str = factory_data["name"]
+
         result = OrderBuilderResponse(
             boat=boat,
             next_boat=next_boat,
@@ -359,6 +412,10 @@ class OrderBuilderService:
             liquidation_clearance=liquidation_clearance,
             # Shipping cost config for frontend cost estimation
             shipping_cost_config=shipping_cost_config,
+            # Factory-aware fields (OB V2)
+            factory_id=factory_id,
+            factory_name=factory_name_str,
+            factory_timeline=factory_timeline,
         )
 
         logger.info(

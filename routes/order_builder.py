@@ -94,6 +94,10 @@ def get_order_builder(
         le=5,
         description="Number of BLs (1-5). Determines capacity: num_bls × 5 × 14 pallets. Default 1 (70 pallets)."
     ),
+    factory_id: Optional[str] = Query(
+        None,
+        description="Factory UUID. If provided, filters products/boats to this factory. Default: all products."
+    ),
 ) -> OrderBuilderResponse:
     """
     Get Order Builder data.
@@ -120,7 +124,7 @@ def get_order_builder(
     )
 
     service = get_order_builder_service()
-    result = service.get_order_builder(boat_id=boat_id, num_bls=num_bls)
+    result = service.get_order_builder(boat_id=boat_id, num_bls=num_bls, factory_id=factory_id)
 
     elapsed = time.time() - start_time
     logger.info("order_builder_complete", elapsed_seconds=round(elapsed, 2))

@@ -1105,6 +1105,11 @@ class OrderBuilderResponse(BaseSchema):
     # === Shipping Cost Config (for frontend cost estimation) ===
     shipping_cost_config: Optional[ShippingCostConfig] = None
 
+    # === Factory-Aware Fields (OB V2) ===
+    factory_id: Optional[str] = Field(None, description="Factory UUID if factory-scoped")
+    factory_name: Optional[str] = Field(None, description="Factory name if factory-scoped")
+    factory_timeline: Optional[dict] = Field(None, description="Factory-specific timeline milestones")
+
 
 # ===================
 # CONFIRM ORDER (Create Factory Order)

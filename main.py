@@ -220,6 +220,8 @@ from routes.diagnostics import router as diagnostics_router
 from routes.warehouse_orders import router as warehouse_orders_router
 from routes.config import router as config_router
 from routes.factories import router as factories_router
+from routes.drafts import router as drafts_router
+from routes.forward_simulation import router as planning_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -247,6 +249,8 @@ app.include_router(diagnostics_router, prefix="/api/diagnostics", tags=["Diagnos
 app.include_router(warehouse_orders_router)  # Prefix already in router
 app.include_router(config_router, prefix="/api/config", tags=["Config"])
 app.include_router(factories_router, prefix="/api/factories", tags=["Factories"])
+app.include_router(drafts_router, prefix="/api/drafts", tags=["Drafts"])
+app.include_router(planning_router, prefix="/api/planning", tags=["Planning"])
 
 
 if __name__ == "__main__":

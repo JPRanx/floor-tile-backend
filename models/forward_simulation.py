@@ -1,0 +1,118 @@
+"""
+Forward simulation schemas for the 3-month planning horizon.
+
+Represents projected orders for future boats, including confidence
+levels, urgency breakdowns, and draft status.
+
+See STANDARDS_VALIDATION.md for patterns.
+"""
+
+from pydantic import Field
+from typing import Optional
+from enum import Enum
+
+from models.base import BaseSchema
+
+
+class ConfidenceLevel(str, Enum):
+    """How confident the projection is, based on data freshness and horizon distance."""
+    VERY_HIGH = "very_high"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    VERY_LOW = "very_low"
+
+
+class UrgencyBreakdown(BaseSchema):
+    """
+    Count of products per urgency level for a projected boat.
+
+    Used to visualize urgency distribution in the Planning View.
+    """
+
+    critical: int = Field(0, ge=0, description="Products that must ship on this boat")
+    urgent: int = Field(0, ge=0, description="Products that should ship on this boat")
+    soon: int = Field(0, ge=0, description="Products approaching reorder point")
+    ok: int = Field(0, ge=0, description="Products with healthy stock levels")
+
+
+class BoatProjection(BaseSchema):
+    """
+    Projection for a single future boat in the planning horizon.
+
+    Combines real boat data (if scheduled) with forward simulation
+    of what products will need to ship by that date.
+    """
+
+    boat_id: str = Field(..., description="Boat UUID or generated projection ID")
+    vessel_name: Optional[str] = Field(None, description="Vessel name if known")
+    departure_date: str = Field(..., description="Projected departure date (ISO format)")
+    arrival_date: str = Field(..., description="Projected arrival date (ISO format)")
+    origin_port: str = Field(..., description="Port of origin for this shipment")
+    days_until_departure: int = Field(..., description="Days from today until departure")
+    estimated_pallets_min: int = Field(
+        ...,
+        ge=0,
+        description="Low end of estimated pallet count"
+    )
+    estimated_pallets_max: int = Field(
+        ...,
+        ge=0,
+        description="High end of estimated pallet count"
+    )
+    estimated_containers: int = Field(
+        ...,
+        ge=0,
+        description="Estimated number of containers needed"
+    )
+    urgency_breakdown: UrgencyBreakdown = Field(
+        default_factory=UrgencyBreakdown,
+        description="Product counts per urgency level"
+    )
+    confidence: ConfidenceLevel = Field(
+        ...,
+        description="Qualitative confidence level for this projection"
+    )
+    confidence_score: int = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="Numeric confidence 0-100, maps to dots display"
+    )
+    is_active: bool = Field(
+        ...,
+        description="True if an existing draft exists, False if purely projected"
+    )
+    draft_status: Optional[str] = Field(
+        None,
+        description="Draft lifecycle status: drafting, action_needed, ordered, confirmed"
+    )
+    window_opens_date: Optional[str] = Field(
+        None,
+        description="Date when the order window opens (ISO format)"
+    )
+    window_opens_in_days: Optional[int] = Field(
+        None,
+        description="Days until the order window opens"
+    )
+
+
+class PlanningHorizonResponse(BaseSchema):
+    """
+    Full planning horizon response for a single factory.
+
+    Contains all projected boats within the 3-month horizon,
+    used to render the Planning View landing page.
+    """
+
+    factory_id: str = Field(..., description="Factory UUID")
+    factory_name: str = Field(..., description="Factory display name")
+    projections: list[BoatProjection] = Field(
+        default_factory=list,
+        description="Projected boats in chronological order"
+    )
+    total_boats: int = Field(..., ge=0, description="Total number of boats in horizon")
+    projection_generated_at: str = Field(
+        ...,
+        description="When this projection was computed (ISO timestamp)"
+    )
