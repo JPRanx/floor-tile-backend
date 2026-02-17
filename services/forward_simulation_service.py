@@ -196,7 +196,7 @@ class ForwardSimulationService:
 
             product_details.append({
                 "product_id": pid,
-                "product_name": product.get("name", ""),
+                "product_name": product.get("sku", ""),
                 "daily_velocity_m2": float(daily_vel.quantize(Decimal("0.01"))),
                 "current_stock_m2": float(stock.quantize(Decimal("0.01"))),
                 "projected_stock_m2": float(projected_stock.quantize(Decimal("0.01"))),
@@ -301,7 +301,7 @@ class ForwardSimulationService:
         try:
             result = (
                 self.db.table("products")
-                .select("id, name, sku")
+                .select("id, sku")
                 .eq("factory_id", factory_id)
                 .eq("active", True)
                 .execute()
