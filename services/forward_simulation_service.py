@@ -225,10 +225,13 @@ class ForwardSimulationService:
         # Containers
         estimated_containers = math.ceil(total_pallets / CONTAINER_MAX_PALLETS) if total_pallets > 0 else 0
 
-        # Window opens
+        # Deadlines
         production_lead = int(factory.get("production_lead_days", 0))
         transport_to_port = int(factory.get("transport_to_port_days", 0))
-        window_opens = departure_date - timedelta(days=production_lead + transport_to_port)
+        # Factory order deadline: latest date to tell factory to start producing
+        factory_order_by = departure_date - timedelta(days=production_lead + transport_to_port)
+        # Shipping booking deadline: latest date to book container space
+        shipping_book_by = departure_date - timedelta(days=transport_to_port)
 
         # Existing draft
         draft = drafts_map.get(boat_id)
@@ -272,8 +275,10 @@ class ForwardSimulationService:
             "draft_status": draft.get("status") if draft else None,
             "draft_id": draft["id"] if draft else None,
             "is_active": draft is not None,
-            "order_by_date": window_opens.isoformat(),
-            "days_until_order_deadline": (window_opens - today).days,
+            "order_by_date": factory_order_by.isoformat(),
+            "days_until_order_deadline": (factory_order_by - today).days,
+            "shipping_book_by_date": shipping_book_by.isoformat(),
+            "days_until_shipping_deadline": (shipping_book_by - today).days,
             "product_details": product_details,
             "draft_bl_items": draft_bl_items,
             "has_bl_allocation": has_bl_allocation,

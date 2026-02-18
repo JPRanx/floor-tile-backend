@@ -105,11 +105,19 @@ class BoatProjection(BaseSchema):
     )
     order_by_date: Optional[str] = Field(
         None,
-        description="Deadline date to place the order (departure - production_lead - transport_to_port)"
+        description="Factory production order deadline (departure - production_lead - transport_to_port)"
     )
     days_until_order_deadline: Optional[int] = Field(
         None,
-        description="Days from today until order_by_date (negative = overdue)"
+        description="Days from today until factory order deadline (negative = overdue)"
+    )
+    shipping_book_by_date: Optional[str] = Field(
+        None,
+        description="Shipping booking deadline (departure - transport_to_port)"
+    )
+    days_until_shipping_deadline: Optional[int] = Field(
+        None,
+        description="Days from today until shipping booking deadline (negative = overdue)"
     )
     product_details: list[ProductProjection] = Field(
         default_factory=list,
