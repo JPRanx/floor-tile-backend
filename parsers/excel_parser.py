@@ -17,6 +17,7 @@ import structlog
 import pandas as pd
 
 from exceptions import ExcelParseError
+from utils.text_utils import PRODUCT_ALIASES
 
 logger = structlog.get_logger(__name__)
 
@@ -1038,6 +1039,9 @@ def _normalize_sku_name(sku: str) -> str:
 
     # Clean up whitespace
     sku = ' '.join(sku.split())
+
+    # Apply product aliases (e.g., MIRACLE → MIRACH)
+    sku = PRODUCT_ALIASES.get(sku, sku)
 
     return sku
 

@@ -93,6 +93,14 @@ _SAC_SUFFIXES = [
 ]
 
 
+# Known product aliases: common misspellings/variants → canonical product name.
+# Add new entries here as needed — all parsers using normalize_product_name()
+# or _normalize_sku_name() will pick them up automatically.
+PRODUCT_ALIASES: dict[str, str] = {
+    "MIRACLE": "MIRACH",
+}
+
+
 def normalize_product_name(name: Optional[str]) -> Optional[str]:
     """
     Normalize product name for matching across ERP systems.
@@ -149,4 +157,9 @@ def normalize_product_name(name: Optional[str]) -> Optional[str]:
     )
 
     # Uppercase for consistent comparison
-    return ascii_name.upper()
+    result = ascii_name.upper()
+
+    # Apply product aliases (e.g., MIRACLE → MIRACH)
+    result = PRODUCT_ALIASES.get(result, result)
+
+    return result
