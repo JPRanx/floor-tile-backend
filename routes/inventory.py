@@ -823,10 +823,19 @@ async def confirm_siesa_upload(
                         "id", snapshot_id
                     ).execute()
                 else:
+                    # Carry forward warehouse_qty and in_transit_qty from latest snapshot
+                    latest = db.table("inventory_snapshots").select(
+                        "warehouse_qty, in_transit_qty"
+                    ).eq("product_id", pid).order(
+                        "snapshot_date", desc=True
+                    ).limit(1).execute()
+                    carry_wh = float(latest.data[0]["warehouse_qty"]) if latest.data else 0
+                    carry_it = float(latest.data[0]["in_transit_qty"]) if latest.data else 0
+
                     db.table("inventory_snapshots").insert({
                         "product_id": pid,
-                        "warehouse_qty": 0,
-                        "in_transit_qty": 0,
+                        "warehouse_qty": carry_wh,
+                        "in_transit_qty": carry_it,
                         "snapshot_date": actual_date.isoformat(),
                         **factory_data,
                     }).execute()
@@ -1031,11 +1040,19 @@ async def upload_siesa_inventory(
                         "id", snapshot_id
                     ).execute()
                 else:
-                    # No snapshot for this date — create one
+                    # Carry forward warehouse_qty and in_transit_qty from latest snapshot
+                    latest = db.table("inventory_snapshots").select(
+                        "warehouse_qty, in_transit_qty"
+                    ).eq("product_id", pid).order(
+                        "snapshot_date", desc=True
+                    ).limit(1).execute()
+                    carry_wh = float(latest.data[0]["warehouse_qty"]) if latest.data else 0
+                    carry_it = float(latest.data[0]["in_transit_qty"]) if latest.data else 0
+
                     db.table("inventory_snapshots").insert({
                         "product_id": pid,
-                        "warehouse_qty": 0,
-                        "in_transit_qty": 0,
+                        "warehouse_qty": carry_wh,
+                        "in_transit_qty": carry_it,
                         "snapshot_date": actual_date.isoformat(),
                         **factory_data,
                     }).execute()
