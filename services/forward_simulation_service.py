@@ -8,6 +8,7 @@ estimates pallet/container counts with confidence scoring.
 """
 
 import math
+import uuid
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
@@ -81,7 +82,9 @@ class ForwardSimulationService:
 
             # Fetch all required data
             factory = self._get_factory(factory_id)
-            boats = self._get_upcoming_boats(factory["origin_port"], today, horizon_end)
+            real_boats = self._get_upcoming_boats(factory["origin_port"], today, horizon_end)
+            routes = self._get_shipping_routes(factory["origin_port"])
+            boats = _merge_with_phantom_boats(real_boats, routes, today, horizon_end)
             products = self._get_active_products(factory_id)
             inventory_map = self._get_latest_inventory(products)
             velocity_map = self._get_daily_velocities(products, today)
@@ -252,6 +255,9 @@ class ForwardSimulationService:
                     })
                 draft_bl_items.sort(key=lambda x: (x["bl_number"], x["sku"]))
 
+        is_estimated = boat.get("_is_estimated", False)
+        route_carrier = boat.get("_route_carrier")
+
         return {
             "boat_id": boat_id,
             "boat_name": boat.get("vessel_name", ""),
@@ -271,6 +277,8 @@ class ForwardSimulationService:
             "product_details": product_details,
             "draft_bl_items": draft_bl_items,
             "has_bl_allocation": has_bl_allocation,
+            "is_estimated": is_estimated,
+            "carrier": route_carrier or boat.get("shipping_line"),
         }
 
     # ------------------------------------------------------------------
@@ -413,6 +421,23 @@ class ForwardSimulationService:
             logger.error("fetch_sales_failed", error=str(e))
             raise DatabaseError("select", str(e))
 
+    def _get_shipping_routes(self, origin_port: str) -> list[dict]:
+        """Fetch active shipping routes for the given origin port."""
+        logger.debug("fetching_shipping_routes", origin_port=origin_port)
+        try:
+            result = (
+                self.db.table("shipping_routes")
+                .select("*")
+                .eq("origin_port", origin_port)
+                .eq("active", True)
+                .execute()
+            )
+            logger.debug("shipping_routes_found", count=len(result.data))
+            return result.data
+        except Exception as e:
+            logger.error("fetch_shipping_routes_failed", error=str(e))
+            return []  # Non-fatal: fall back to real boats only
+
     def _get_existing_drafts(
         self, factory_id: str, boats: list[dict]
     ) -> dict[str, dict]:
@@ -469,6 +494,75 @@ class ForwardSimulationService:
 # ----------------------------------------------------------------------
 # Pure helpers (no DB access)
 # ----------------------------------------------------------------------
+
+
+def _merge_with_phantom_boats(
+    real_boats: list[dict],
+    routes: list[dict],
+    start: date,
+    end: date,
+) -> list[dict]:
+    """
+    Fill gaps in the real boat schedule with phantom (estimated) boats
+    generated from shipping route patterns.
+
+    For each route, generates expected departure dates within the horizon.
+    If a real boat already departs within +/- 2 days of an expected date,
+    the phantom is skipped (real boat takes priority).
+    """
+    if not routes:
+        return real_boats
+
+    # Build set of real departure dates for quick lookup
+    real_departure_dates = set()
+    for boat in real_boats:
+        real_departure_dates.add(_parse_date(boat["departure_date"]))
+
+    phantoms: list[dict] = []
+
+    for route in routes:
+        dow = route["departure_day_of_week"]  # 0=Sun, 4=Thu
+        transit = route["transit_days"]
+        freq = route["frequency_weeks"]
+        carrier = route.get("carrier", "")
+        shipping_line = route.get("shipping_line", "")
+        route_name = route.get("name", carrier)
+        dest_port = route.get("destination_port", "Miami")
+
+        # Find first matching day-of-week after start
+        cursor = start + timedelta(days=1)  # start from tomorrow
+        days_ahead = (dow - cursor.weekday()) % 7
+        cursor = cursor + timedelta(days=days_ahead)
+
+        while cursor <= end:
+            # Check if any real boat departs within +/- 2 days
+            has_real = any(
+                abs((cursor - rd).days) <= 2 for rd in real_departure_dates
+            )
+
+            if not has_real:
+                arrival = cursor + timedelta(days=transit)
+                phantom_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"phantom-{route['id']}-{cursor.isoformat()}"))
+                phantoms.append({
+                    "id": phantom_id,
+                    "vessel_name": f"{route_name} (est.)",
+                    "shipping_line": shipping_line,
+                    "departure_date": cursor.isoformat(),
+                    "arrival_date": arrival.isoformat(),
+                    "transit_days": transit,
+                    "origin_port": route["origin_port"],
+                    "destination_port": dest_port,
+                    "status": "estimated",
+                    "_is_estimated": True,
+                    "_route_carrier": carrier,
+                })
+
+            cursor += timedelta(weeks=freq)
+
+    # Merge and sort by departure date
+    all_boats = real_boats + phantoms
+    all_boats.sort(key=lambda b: b["departure_date"])
+    return all_boats
 
 
 def _parse_date(value: str) -> date:

@@ -123,6 +123,14 @@ class BoatProjection(BaseSchema):
         False,
         description="True if the draft has BL assignments"
     )
+    is_estimated: bool = Field(
+        False,
+        description="True if this is a phantom boat generated from a shipping route pattern"
+    )
+    carrier: Optional[str] = Field(
+        None,
+        description="Freight forwarder or carrier name (e.g., TIBA, SEABOARD)"
+    )
 
 
 class PlanningHorizonResponse(BaseSchema):
