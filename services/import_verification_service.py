@@ -3,6 +3,9 @@ Import verification service — post-import database checks.
 
 Validates that all data landed correctly after a unified import.
 Can run standalone or as part of the unified import pipeline.
+
+Queries the new source tables (warehouse_snapshots, factory_snapshots,
+transit_snapshots) instead of the legacy inventory_snapshots table.
 """
 
 from dataclasses import dataclass
@@ -29,41 +32,27 @@ def run_verification(snapshot_date: date) -> list[CheckResult]:
     db = get_supabase_client()
     results = []
 
-    # ── 1. Snapshot count (all active products should have a row) ──
+    # ── 1. Warehouse snapshot count ──
     active_products = db.table("products").select("id", count="exact").eq(
         "active", True
     ).execute()
     expected_count = active_products.count or 0
 
-    snapshots = db.table("inventory_snapshots").select("id", count="exact").eq(
+    wh_snapshots = db.table("warehouse_snapshots").select("id", count="exact").eq(
         "snapshot_date", snapshot_date.isoformat()
     ).execute()
-    actual_count = snapshots.count or 0
+    actual_count = wh_snapshots.count or 0
 
     results.append(CheckResult(
-        name="Snapshot count",
-        description="All active products have snapshot rows",
+        name="Warehouse snapshot count",
+        description="Active products with warehouse data on date",
         expected=str(expected_count),
         actual=str(actual_count),
         passed=actual_count == expected_count,
     ))
 
-    # ── 2. Single date check ──
-    date_check = db.table("inventory_snapshots").select("snapshot_date").eq(
-        "snapshot_date", snapshot_date.isoformat()
-    ).limit(1).execute()
-    distinct_dates = 1 if date_check.data else 0
-
-    results.append(CheckResult(
-        name="All same date",
-        description="All snapshots on target date",
-        expected="1",
-        actual=str(distinct_dates),
-        passed=distinct_dates == 1,
-    ))
-
-    # ── 3. Warehouse m² total ──
-    wh_data = db.table("inventory_snapshots").select("warehouse_qty").eq(
+    # ── 2. Warehouse m² total ──
+    wh_data = db.table("warehouse_snapshots").select("warehouse_qty").eq(
         "snapshot_date", snapshot_date.isoformat()
     ).execute()
     wh_total = sum(float(r["warehouse_qty"] or 0) for r in wh_data.data)
@@ -76,25 +65,25 @@ def run_verification(snapshot_date: date) -> list[CheckResult]:
         passed=True,  # informational
     ))
 
-    # ── 4. SIESA factory m² total ──
-    siesa_snap = db.table("inventory_snapshots").select("factory_available_m2").eq(
-        "snapshot_date", snapshot_date.isoformat()
-    ).execute()
-    siesa_total = sum(float(r["factory_available_m2"] or 0) for r in siesa_snap.data)
+    # ── 3. Factory (SIESA) m² total ──
+    factory_data = db.table("factory_snapshots").select(
+        "product_id, factory_available_m2"
+    ).eq("snapshot_date", snapshot_date.isoformat()).execute()
+    factory_total = sum(float(r["factory_available_m2"] or 0) for r in factory_data.data)
 
     results.append(CheckResult(
         name="SIESA m2",
-        description="Total factory inventory (from snapshots)",
+        description="Total factory inventory",
         expected="--",
-        actual=f"{siesa_total:,.0f}",
+        actual=f"{factory_total:,.0f}",
         passed=True,  # informational
     ))
 
-    # ── 5. In-transit m² total ──
-    it_data = db.table("inventory_snapshots").select("in_transit_qty").eq(
+    # ── 4. In-transit m² total ──
+    transit_data = db.table("transit_snapshots").select("in_transit_qty").eq(
         "snapshot_date", snapshot_date.isoformat()
     ).execute()
-    it_total = sum(float(r["in_transit_qty"] or 0) for r in it_data.data)
+    it_total = sum(float(r["in_transit_qty"] or 0) for r in transit_data.data)
 
     results.append(CheckResult(
         name="In-Transit m2",
@@ -104,7 +93,7 @@ def run_verification(snapshot_date: date) -> list[CheckResult]:
         passed=True,  # informational
     ))
 
-    # ── 6. SIESA lots match synced snapshots ──
+    # ── 5. SIESA lots match factory_snapshots ──
     lots_data = db.table("inventory_lots").select("product_id, quantity_m2").eq(
         "snapshot_date", snapshot_date.isoformat()
     ).execute()
@@ -114,35 +103,26 @@ def run_verification(snapshot_date: date) -> list[CheckResult]:
         pid = r["product_id"]
         lots_by_product[pid] = lots_by_product.get(pid, 0) + float(r["quantity_m2"] or 0)
 
-    snap_by_product: dict[str, float] = {}
-    for r in siesa_snap.data:
-        # We need product_id — re-query with it
-        pass
-
-    # Re-query snapshots with product_id for cross-check
-    snap_with_pid = db.table("inventory_snapshots").select(
-        "product_id, factory_available_m2"
-    ).eq("snapshot_date", snapshot_date.isoformat()).execute()
-
-    for r in snap_with_pid.data:
+    factory_by_product: dict[str, float] = {}
+    for r in factory_data.data:
         pid = r["product_id"]
         val = float(r["factory_available_m2"] or 0)
         if val > 0:
-            snap_by_product[pid] = val
+            factory_by_product[pid] = val
 
     lots_total = sum(lots_by_product.values())
-    snap_factory_total = sum(snap_by_product.values())
+    snap_factory_total = sum(factory_by_product.values())
     match = abs(lots_total - snap_factory_total) < 0.01
 
     results.append(CheckResult(
         name="SIESA lots match",
-        description="Lots total matches snapshot factory_available_m2",
+        description="Lots total matches factory_snapshots",
         expected="YES",
         actual="YES" if match else f"NO (lots={lots_total:,.0f}, snap={snap_factory_total:,.0f})",
         passed=match,
     ))
 
-    # ── 7. Production schedule records ──
+    # ── 6. Production schedule records ──
     prod_data = db.table("production_schedule").select("id", count="exact").execute()
     prod_count = prod_data.count or 0
 
@@ -154,9 +134,8 @@ def run_verification(snapshot_date: date) -> list[CheckResult]:
         passed=True,  # informational
     ))
 
-    # ── 8. Upcoming boats ──
-    from datetime import date as date_type
-    today = date_type.today()
+    # ── 7. Upcoming boats ──
+    today = date.today()
     boats_data = db.table("boat_schedules").select("id", count="exact").gte(
         "departure_date", today.isoformat()
     ).execute()

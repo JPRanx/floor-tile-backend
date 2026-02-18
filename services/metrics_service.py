@@ -77,18 +77,15 @@ class MetricsService:
         ).in_("category", tile_categories).execute()
         products_by_id = {p["id"]: p for p in products_result.data}
 
-        # Inventory (from canonical source: inventory_snapshots)
-        # Include factory fields (SIESA) for visibility
-        inventory_result = self.db.table("inventory_snapshots").select(
+        # Inventory from inventory_current view (latest per source, no dedup needed)
+        inventory_result = self.db.table("inventory_current").select(
             "product_id, warehouse_qty, in_transit_qty, factory_available_m2, factory_lot_count, snapshot_date"
-        ).order("snapshot_date", desc=True).execute()
+        ).execute()
 
-        # Get latest inventory per product
-        inventory_by_product: Dict[str, dict] = {}
-        for snap in inventory_result.data:
-            pid = snap.get("product_id")
-            if pid and pid not in inventory_by_product:
-                inventory_by_product[pid] = snap
+        inventory_by_product: Dict[str, dict] = {
+            snap["product_id"]: snap for snap in inventory_result.data
+            if snap.get("product_id")
+        }
 
         # Sales (fetch period + comparison period)
         today = date.today()

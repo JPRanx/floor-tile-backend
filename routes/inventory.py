@@ -332,15 +332,24 @@ async def confirm_inventory_upload(preview_id: str):
             created, updated = product_service.bulk_upsert(products_to_upsert)
             logger.info("products_auto_created", created=created, updated=updated)
 
-        # Delete existing snapshots for the dates (idempotent)
+        # Upsert to warehouse_snapshots (each upload only touches its own table)
         if snapshots_to_create:
-            unique_dates = list(set(s.snapshot_date for s in snapshots_to_create))
-            deleted = inventory_service.delete_by_dates(unique_dates)
-            if deleted > 0:
-                logger.info("inventory_deleted_before_upload", count=deleted)
-
-            # Bulk insert snapshots
-            inventory_service.bulk_create(snapshots_to_create)
+            db = get_supabase_client()
+            rows = [
+                {
+                    "product_id": s.product_id,
+                    "snapshot_date": s.snapshot_date.isoformat(),
+                    "warehouse_qty": s.warehouse_qty,
+                }
+                for s in snapshots_to_create
+            ]
+            # Batch upsert in chunks
+            chunk_size = 100
+            for i in range(0, len(rows), chunk_size):
+                chunk = rows[i:i + chunk_size]
+                db.table("warehouse_snapshots").upsert(
+                    chunk, on_conflict="product_id,snapshot_date"
+                ).execute()
 
         # Record upload history
         get_upload_history_service().record_upload(
@@ -512,14 +521,22 @@ async def upload_inventory(file: UploadFile = File(...)):
                 )
 
         if snapshots_to_create:
-            # Make upload idempotent: delete existing records for these dates
-            unique_dates = list(set(s.snapshot_date for s in snapshots_to_create))
-            deleted = inventory_service.delete_by_dates(unique_dates)
-            if deleted > 0:
-                logger.info("inventory_deleted_before_upload", count=deleted)
-
-            # Bulk insert
-            inventory_service.bulk_create(snapshots_to_create)
+            # Upsert to warehouse_snapshots (idempotent, only touches warehouse_qty)
+            db = get_supabase_client()
+            rows = [
+                {
+                    "product_id": s.product_id,
+                    "snapshot_date": s.snapshot_date.isoformat(),
+                    "warehouse_qty": s.warehouse_qty,
+                }
+                for s in snapshots_to_create
+            ]
+            chunk_size = 100
+            for i in range(0, len(rows), chunk_size):
+                chunk = rows[i:i + chunk_size]
+                db.table("warehouse_snapshots").upsert(
+                    chunk, on_conflict="product_id,snapshot_date"
+                ).execute()
 
         logger.info(
             "inventory_upload_completed",
@@ -780,7 +797,7 @@ async def confirm_siesa_upload(
                 db.table("inventory_lots").insert(chunk).execute()
                 lots_created += len(chunk)
 
-        # Sync to inventory_snapshots
+        # Sync to factory_snapshots (independent table — no carry-forward needed)
         if lots_created > 0:
             product_stats: dict[str, dict] = {}
             for lot in lots_to_insert:
@@ -806,44 +823,18 @@ async def confirm_siesa_upload(
 
             synced_count = 0
             for pid, stats in product_stats.items():
-                existing = db.table("inventory_snapshots").select("id").eq(
-                    "product_id", pid
-                ).eq("snapshot_date", actual_date.isoformat()).limit(1).execute()
-
-                factory_data = {
+                db.table("factory_snapshots").upsert({
+                    "product_id": pid,
+                    "snapshot_date": actual_date.isoformat(),
                     "factory_available_m2": stats["total_m2"],
                     "factory_lot_count": stats["lot_count"],
                     "factory_largest_lot_m2": stats["largest_lot_m2"],
                     "factory_largest_lot_code": stats["largest_lot_code"],
-                }
-
-                if existing.data:
-                    snapshot_id = existing.data[0]["id"]
-                    db.table("inventory_snapshots").update(factory_data).eq(
-                        "id", snapshot_id
-                    ).execute()
-                else:
-                    # Carry forward warehouse_qty and in_transit_qty from latest snapshot
-                    latest = db.table("inventory_snapshots").select(
-                        "warehouse_qty, in_transit_qty"
-                    ).eq("product_id", pid).order(
-                        "snapshot_date", desc=True
-                    ).limit(1).execute()
-                    carry_wh = float(latest.data[0]["warehouse_qty"]) if latest.data else 0
-                    carry_it = float(latest.data[0]["in_transit_qty"]) if latest.data else 0
-
-                    db.table("inventory_snapshots").insert({
-                        "product_id": pid,
-                        "warehouse_qty": carry_wh,
-                        "in_transit_qty": carry_it,
-                        "snapshot_date": actual_date.isoformat(),
-                        **factory_data,
-                    }).execute()
-
+                }, on_conflict="product_id,snapshot_date").execute()
                 synced_count += 1
 
             logger.info(
-                "siesa_synced_to_snapshots",
+                "siesa_synced_to_factory_snapshots",
                 products_synced=synced_count,
                 date=actual_date.isoformat(),
             )
@@ -989,10 +980,10 @@ async def upload_siesa_inventory(
                 lots_created += len(chunk)
 
         # ===================
-        # SYNC TO INVENTORY_SNAPSHOTS
+        # SYNC TO FACTORY_SNAPSHOTS
         # ===================
-        # Aggregate lots by product_id and update inventory_snapshots.factory_available_m2
-        # SIESA data is FACTORY finished goods (not US warehouse), so write to factory_* fields
+        # Aggregate lots by product_id and upsert to factory_snapshots
+        # SIESA data is FACTORY finished goods — independent table, no carry-forward needed
         if lots_created > 0:
             # Aggregate quantities and find largest lot per product
             product_stats: dict[str, dict] = {}
@@ -1017,50 +1008,20 @@ async def upload_siesa_inventory(
                     stats["largest_lot_m2"] = qty
                     stats["largest_lot_code"] = lot_num
 
-            # Update inventory_snapshots with factory availability
-            # Target the specific snapshot_date so all data lands on the same date
             synced_count = 0
             for pid, stats in product_stats.items():
-                # Find snapshot for this product ON the target date
-                existing = db.table("inventory_snapshots").select("id").eq(
-                    "product_id", pid
-                ).eq("snapshot_date", actual_date.isoformat()).limit(1).execute()
-
-                factory_data = {
+                db.table("factory_snapshots").upsert({
+                    "product_id": pid,
+                    "snapshot_date": actual_date.isoformat(),
                     "factory_available_m2": stats["total_m2"],
                     "factory_lot_count": stats["lot_count"],
                     "factory_largest_lot_m2": stats["largest_lot_m2"],
                     "factory_largest_lot_code": stats["largest_lot_code"],
-                }
-
-                if existing.data:
-                    # Update existing snapshot for this date
-                    snapshot_id = existing.data[0]["id"]
-                    db.table("inventory_snapshots").update(factory_data).eq(
-                        "id", snapshot_id
-                    ).execute()
-                else:
-                    # Carry forward warehouse_qty and in_transit_qty from latest snapshot
-                    latest = db.table("inventory_snapshots").select(
-                        "warehouse_qty, in_transit_qty"
-                    ).eq("product_id", pid).order(
-                        "snapshot_date", desc=True
-                    ).limit(1).execute()
-                    carry_wh = float(latest.data[0]["warehouse_qty"]) if latest.data else 0
-                    carry_it = float(latest.data[0]["in_transit_qty"]) if latest.data else 0
-
-                    db.table("inventory_snapshots").insert({
-                        "product_id": pid,
-                        "warehouse_qty": carry_wh,
-                        "in_transit_qty": carry_it,
-                        "snapshot_date": actual_date.isoformat(),
-                        **factory_data,
-                    }).execute()
-
+                }, on_conflict="product_id,snapshot_date").execute()
                 synced_count += 1
 
             logger.info(
-                "siesa_synced_to_snapshots",
+                "siesa_synced_to_factory_snapshots",
                 products_synced=synced_count,
                 date=actual_date.isoformat(),
             )
@@ -1268,36 +1229,21 @@ async def upload_in_transit(
     """
     Upload dispatch schedule to update in-transit quantities.
 
-    Parses PROGRAMACIÓN DE DESPACHO Excel and updates in_transit_qty
-    on inventory_snapshots for the target snapshot_date.
-
-    If snapshot_date is not provided, automatically uses the most recent
-    snapshot date in inventory_snapshots. This ensures in-transit data
-    always updates the correct inventory rows regardless of upload timing.
+    Parses PROGRAMACIÓN DE DESPACHO Excel and upserts to transit_snapshots.
+    Each upload only touches in_transit_qty — warehouse and factory data
+    are in separate tables and cannot be affected.
 
     Products in the dispatch file get their aggregated m².
     Products NOT in the dispatch file get in_transit_qty reset to 0.
-    Only updates rows matching the target snapshot_date.
     """
     # Parse received_orders from comma-separated string
     excluded = []
     if received_orders:
         excluded = [o.strip() for o in received_orders.split(",") if o.strip()]
 
-    # Auto-resolve snapshot_date to latest if not provided
+    # Auto-resolve snapshot_date: default to today (no longer tied to inventory_snapshots dates)
     if snapshot_date is None:
-        db = get_supabase_client()
-        latest = (
-            db.table("inventory_snapshots")
-            .select("snapshot_date")
-            .order("snapshot_date", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if latest.data:
-            snapshot_date = date.fromisoformat(latest.data[0]["snapshot_date"])
-        else:
-            snapshot_date = date.today()
+        snapshot_date = date.today()
 
     logger.info(
         "in_transit_upload_started",
@@ -1329,44 +1275,30 @@ async def upload_in_transit(
         # Build set of product IDs with in-transit stock
         in_transit_pids = {p.product_id for p in parse_result.products}
 
-        # Reset in_transit_qty=0 for ALL snapshots on this date
-        # that are NOT in the dispatch file
-        all_snapshots = db.table("inventory_snapshots").select("id, product_id").eq(
-            "snapshot_date", snapshot_date.isoformat()
-        ).execute()
+        # Get all active product IDs for resetting non-dispatch products
+        all_active_pids = {p.id for p in products}
 
+        # Reset in_transit_qty=0 for active products NOT in dispatch file
+        reset_pids = all_active_pids - in_transit_pids
         reset_count = 0
-        for snap in all_snapshots.data:
-            if snap["product_id"] not in in_transit_pids:
-                db.table("inventory_snapshots").update(
-                    {"in_transit_qty": 0}
-                ).eq("id", snap["id"]).execute()
-                reset_count += 1
+        for pid in reset_pids:
+            db.table("transit_snapshots").upsert({
+                "product_id": pid,
+                "snapshot_date": snapshot_date.isoformat(),
+                "in_transit_qty": 0,
+            }, on_conflict="product_id,snapshot_date").execute()
+            reset_count += 1
 
-        # Update in_transit_qty for products in the dispatch file
+        # Upsert in_transit_qty for products in the dispatch file
         updated_count = 0
         details = []
         for product in parse_result.products:
-            # Find snapshot for this product on the target date
-            existing = db.table("inventory_snapshots").select("id").eq(
-                "product_id", product.product_id
-            ).eq("snapshot_date", snapshot_date.isoformat()).limit(1).execute()
-
-            if existing.data:
-                db.table("inventory_snapshots").update(
-                    {"in_transit_qty": product.in_transit_m2}
-                ).eq("id", existing.data[0]["id"]).execute()
-                updated_count += 1
-            else:
-                # No snapshot for this date — create one
-                db.table("inventory_snapshots").insert({
-                    "product_id": product.product_id,
-                    "warehouse_qty": 0,
-                    "in_transit_qty": product.in_transit_m2,
-                    "snapshot_date": snapshot_date.isoformat(),
-                }).execute()
-                updated_count += 1
-
+            db.table("transit_snapshots").upsert({
+                "product_id": product.product_id,
+                "snapshot_date": snapshot_date.isoformat(),
+                "in_transit_qty": product.in_transit_m2,
+            }, on_conflict="product_id,snapshot_date").execute()
+            updated_count += 1
             details.append({"sku": product.sku, "in_transit_m2": product.in_transit_m2})
 
         logger.info(

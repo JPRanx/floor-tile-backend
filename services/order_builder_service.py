@@ -1805,18 +1805,16 @@ class OrderBuilderService:
         if not products_result.data:
             return []
 
-        # 2. Get latest inventory snapshots (factory_available_m2, warehouse_qty)
+        # 2. Get latest inventory from inventory_current view
         product_ids = [p["id"] for p in products_result.data]
         inventory_result = (
-            self.inventory_service.db.table("inventory_snapshots")
+            self.inventory_service.db.table("inventory_current")
             .select("product_id, factory_available_m2, factory_lot_count, warehouse_qty, snapshot_date")
             .in_("product_id", product_ids)
-            .order("product_id")
-            .order("snapshot_date", desc=True)
             .execute()
         )
 
-        # Build dict of latest snapshot per product
+        # Build dict — view already returns one row per product, no dedup needed
         latest_inv = {}
         seen = set()
         for inv in (inventory_result.data or []):

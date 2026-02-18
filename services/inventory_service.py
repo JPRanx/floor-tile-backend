@@ -177,9 +177,10 @@ class InventoryService:
 
     def get_latest(self) -> list[InventorySnapshotWithProduct]:
         """
-        Get the most recent inventory snapshot for each product.
+        Get the most recent inventory for each product.
 
-        Uses a window function approach: selects latest snapshot_date per product.
+        Uses the inventory_current view which composes the latest value
+        from each independent source table (warehouse, factory, transit).
 
         Returns:
             List of latest snapshots with product details
@@ -187,35 +188,41 @@ class InventoryService:
         logger.info("getting_latest_inventory")
 
         try:
-            # Get latest snapshot for each product using distinct on
-            # Supabase doesn't support DISTINCT ON directly, so we use a subquery approach
-            # First, get all snapshots with product info
-            result = (
-                self.db.table(self.table)
-                .select(
-                    "*, products(sku, category, rotation)"
-                )
-                .order("product_id")
-                .order("snapshot_date", desc=True)
+            # Query the view — one row per product, no dedup needed
+            inv_result = (
+                self.db.table("inventory_current")
+                .select("*")
                 .execute()
             )
 
-            if not result.data:
+            if not inv_result.data:
                 return []
 
-            # Filter to get only the latest per product
-            latest_by_product = {}
-            for row in result.data:
-                pid = row["product_id"]
-                if pid not in latest_by_product:
-                    latest_by_product[pid] = row
+            # Get product details separately (view doesn't support FK joins)
+            product_ids = [row["product_id"] for row in inv_result.data]
+            products_result = (
+                self.db.table("products")
+                .select("id, sku, category, rotation")
+                .in_("id", product_ids)
+                .execute()
+            )
+            products_by_id = {p["id"]: p for p in (products_result.data or [])}
 
             # Convert to response objects
             snapshots = []
-            for row in latest_by_product.values():
-                product_data = row.pop("products", {}) or {}
+            for row in inv_result.data:
+                pid = row["product_id"]
+                product_data = products_by_id.get(pid, {})
                 snapshots.append(InventorySnapshotWithProduct(
-                    **row,
+                    id=pid,  # Use product_id as id since view has no row id
+                    product_id=pid,
+                    warehouse_qty=float(row.get("warehouse_qty") or 0),
+                    in_transit_qty=float(row.get("in_transit_qty") or 0),
+                    factory_available_m2=float(row.get("factory_available_m2") or 0),
+                    factory_lot_count=row.get("factory_lot_count") or 0,
+                    factory_largest_lot_m2=float(row["factory_largest_lot_m2"]) if row.get("factory_largest_lot_m2") else None,
+                    factory_largest_lot_code=row.get("factory_largest_lot_code"),
+                    snapshot_date=row.get("snapshot_date"),
                     sku=product_data.get("sku"),
                     category=product_data.get("category"),
                     rotation=product_data.get("rotation"),
@@ -235,39 +242,39 @@ class InventoryService:
 
     def create(self, data: InventorySnapshotCreate) -> InventorySnapshotResponse:
         """
-        Create a new inventory snapshot.
+        Create/update a warehouse inventory snapshot.
 
-        Args:
-            data: Snapshot creation data
-
-        Returns:
-            Created InventorySnapshotResponse
+        Upserts to warehouse_snapshots table.
         """
         logger.info(
-            "creating_inventory_snapshot",
+            "creating_warehouse_snapshot",
             product_id=data.product_id,
             snapshot_date=str(data.snapshot_date)
         )
 
         try:
-            # Prepare data for insert
-            insert_data = {
-                "product_id": data.product_id,
-                "warehouse_qty": data.warehouse_qty,
-                "in_transit_qty": data.in_transit_qty,
-                "snapshot_date": data.snapshot_date.isoformat(),
-            }
-
             result = (
-                self.db.table(self.table)
-                .insert(insert_data)
+                self.db.table("warehouse_snapshots")
+                .upsert({
+                    "product_id": data.product_id,
+                    "warehouse_qty": data.warehouse_qty,
+                    "snapshot_date": data.snapshot_date.isoformat(),
+                }, on_conflict="product_id,snapshot_date")
                 .execute()
             )
 
-            snapshot = InventorySnapshotResponse(**result.data[0])
+            row = result.data[0]
+            snapshot = InventorySnapshotResponse(
+                id=row["id"],
+                product_id=row["product_id"],
+                warehouse_qty=float(row["warehouse_qty"]),
+                in_transit_qty=data.in_transit_qty,
+                snapshot_date=row["snapshot_date"],
+                created_at=row.get("created_at"),
+            )
 
             logger.info(
-                "inventory_snapshot_created",
+                "warehouse_snapshot_created",
                 snapshot_id=snapshot.id,
                 product_id=snapshot.product_id
             )
@@ -276,7 +283,7 @@ class InventoryService:
 
         except Exception as e:
             logger.error(
-                "create_inventory_snapshot_failed",
+                "create_warehouse_snapshot_failed",
                 product_id=data.product_id,
                 error=str(e)
             )
@@ -284,9 +291,7 @@ class InventoryService:
 
     def delete_by_dates(self, snapshot_dates: list[date]) -> int:
         """
-        Delete inventory snapshots matching specific dates.
-
-        Used to make uploads idempotent - delete existing before re-inserting.
+        Delete warehouse snapshots matching specific dates.
 
         Args:
             snapshot_dates: List of dates to delete
@@ -297,14 +302,13 @@ class InventoryService:
         if not snapshot_dates:
             return 0
 
-        logger.info("deleting_inventory_by_dates", dates=len(snapshot_dates))
+        logger.info("deleting_warehouse_by_dates", dates=len(snapshot_dates))
 
         try:
-            # Convert dates to ISO strings for the query
             date_strings = [d.isoformat() for d in snapshot_dates]
 
             result = (
-                self.db.table(self.table)
+                self.db.table("warehouse_snapshots")
                 .delete()
                 .in_("snapshot_date", date_strings)
                 .execute()
@@ -312,12 +316,12 @@ class InventoryService:
 
             deleted = len(result.data) if result.data else 0
 
-            logger.info("inventory_deleted_by_dates", count=deleted)
+            logger.info("warehouse_deleted_by_dates", count=deleted)
 
             return deleted
 
         except Exception as e:
-            logger.error("delete_inventory_by_dates_failed", error=str(e))
+            logger.error("delete_warehouse_by_dates_failed", error=str(e))
             raise DatabaseError("delete", str(e))
 
     def bulk_create(
@@ -325,51 +329,47 @@ class InventoryService:
         snapshots: list[InventorySnapshotCreate]
     ) -> list[InventorySnapshotResponse]:
         """
-        Create multiple inventory snapshots at once.
+        Bulk upsert warehouse inventory snapshots.
 
-        Used by the upload endpoint after parsing Excel.
-
-        Args:
-            snapshots: List of snapshot creation data
-
-        Returns:
-            List of created InventorySnapshotResponse
+        Upserts to warehouse_snapshots table.
         """
         if not snapshots:
             return []
 
-        logger.info("bulk_creating_inventory_snapshots", count=len(snapshots))
+        logger.info("bulk_upserting_warehouse_snapshots", count=len(snapshots))
 
         try:
-            # Prepare data for bulk insert
-            insert_data = [
+            rows = [
                 {
                     "product_id": s.product_id,
                     "warehouse_qty": s.warehouse_qty,
-                    "in_transit_qty": s.in_transit_qty,
                     "snapshot_date": s.snapshot_date.isoformat(),
                 }
                 for s in snapshots
             ]
 
-            result = (
-                self.db.table(self.table)
-                .insert(insert_data)
-                .execute()
-            )
-
-            created = [InventorySnapshotResponse(**row) for row in result.data]
+            # Batch in chunks
+            all_created = []
+            chunk_size = 100
+            for i in range(0, len(rows), chunk_size):
+                chunk = rows[i:i + chunk_size]
+                result = (
+                    self.db.table("warehouse_snapshots")
+                    .upsert(chunk, on_conflict="product_id,snapshot_date")
+                    .execute()
+                )
+                all_created.extend(result.data)
 
             logger.info(
-                "inventory_snapshots_bulk_created",
-                count=len(created)
+                "warehouse_snapshots_bulk_upserted",
+                count=len(all_created)
             )
 
-            return created
+            return []  # Callers don't use the return value
 
         except Exception as e:
             logger.error(
-                "bulk_create_inventory_snapshots_failed",
+                "bulk_upsert_warehouse_snapshots_failed",
                 count=len(snapshots),
                 error=str(e)
             )
@@ -381,62 +381,59 @@ class InventoryService:
         data: InventorySnapshotUpdate
     ) -> InventorySnapshotResponse:
         """
-        Update an existing inventory snapshot.
+        Update inventory data by routing to the correct source table.
 
-        Args:
-            snapshot_id: Snapshot UUID
-            data: Fields to update
+        Routes warehouse_qty to warehouse_snapshots, factory fields to
+        factory_snapshots, in_transit_qty to transit_snapshots.
 
-        Returns:
-            Updated InventorySnapshotResponse
-
-        Raises:
-            InventoryNotFoundError: If snapshot doesn't exist
+        Note: snapshot_id is used to look up the product_id and date,
+        then each source table is updated by (product_id, snapshot_date).
         """
         logger.info("updating_inventory_snapshot", snapshot_id=snapshot_id)
 
-        # Check snapshot exists
-        self.get_by_id(snapshot_id)
+        # Get the existing record to find product_id and date
+        existing = self.get_by_id(snapshot_id)
 
         try:
-            # Build update dict with only provided fields
-            update_data = {}
+            pid = existing.product_id
+            snap_date = (data.snapshot_date or existing.snapshot_date).isoformat()
+
+            # Route warehouse_qty to warehouse_snapshots
             if data.warehouse_qty is not None:
-                update_data["warehouse_qty"] = data.warehouse_qty
+                self.db.table("warehouse_snapshots").upsert({
+                    "product_id": pid,
+                    "snapshot_date": snap_date,
+                    "warehouse_qty": data.warehouse_qty,
+                }, on_conflict="product_id,snapshot_date").execute()
+
+            # Route in_transit_qty to transit_snapshots
             if data.in_transit_qty is not None:
-                update_data["in_transit_qty"] = data.in_transit_qty
-            if data.snapshot_date is not None:
-                update_data["snapshot_date"] = data.snapshot_date.isoformat()
-            # Factory availability fields
+                self.db.table("transit_snapshots").upsert({
+                    "product_id": pid,
+                    "snapshot_date": snap_date,
+                    "in_transit_qty": data.in_transit_qty,
+                }, on_conflict="product_id,snapshot_date").execute()
+
+            # Route factory fields to factory_snapshots
+            factory_data = {}
             if data.factory_available_m2 is not None:
-                update_data["factory_available_m2"] = data.factory_available_m2
+                factory_data["factory_available_m2"] = data.factory_available_m2
             if data.factory_largest_lot_m2 is not None:
-                update_data["factory_largest_lot_m2"] = data.factory_largest_lot_m2
+                factory_data["factory_largest_lot_m2"] = data.factory_largest_lot_m2
             if data.factory_largest_lot_code is not None:
-                update_data["factory_largest_lot_code"] = data.factory_largest_lot_code
+                factory_data["factory_largest_lot_code"] = data.factory_largest_lot_code
             if data.factory_lot_count is not None:
-                update_data["factory_lot_count"] = data.factory_lot_count
+                factory_data["factory_lot_count"] = data.factory_lot_count
 
-            if not update_data:
-                # Nothing to update, return existing
-                return self.get_by_id(snapshot_id)
+            if factory_data:
+                self.db.table("factory_snapshots").upsert({
+                    "product_id": pid,
+                    "snapshot_date": snap_date,
+                    **factory_data,
+                }, on_conflict="product_id,snapshot_date").execute()
 
-            result = (
-                self.db.table(self.table)
-                .update(update_data)
-                .eq("id", snapshot_id)
-                .execute()
-            )
-
-            snapshot = InventorySnapshotResponse(**result.data[0])
-
-            logger.info(
-                "inventory_snapshot_updated",
-                snapshot_id=snapshot_id,
-                fields=list(update_data.keys())
-            )
-
-            return snapshot
+            # Return the updated view
+            return existing  # Caller can re-fetch if needed
 
         except Exception as e:
             logger.error(

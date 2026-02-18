@@ -512,7 +512,10 @@ class ForwardSimulationService:
 
     def _get_latest_inventory(self, products: list[dict]) -> dict[str, dict]:
         """
-        Get latest inventory snapshot per product.
+        Get latest inventory per product from inventory_current view.
+
+        The view composes the latest value from each independent source
+        (warehouse_snapshots, factory_snapshots, transit_snapshots).
 
         Returns:
             Mapping of product_id -> {warehouse_qty, in_transit_qty, factory_available_m2}
@@ -523,18 +526,14 @@ class ForwardSimulationService:
         logger.debug("fetching_inventory", product_count=len(products))
         try:
             result = (
-                self.db.table("inventory_snapshots")
+                self.db.table("inventory_current")
                 .select("product_id, warehouse_qty, in_transit_qty, factory_available_m2")
-                .order("created_at", desc=True)
                 .execute()
             )
 
-            # Deduplicate: keep first (latest) per product_id
-            inventory_map: dict[str, dict] = {}
-            for row in result.data:
-                pid = row["product_id"]
-                if pid not in inventory_map:
-                    inventory_map[pid] = row
+            inventory_map: dict[str, dict] = {
+                row["product_id"]: row for row in result.data
+            }
 
             logger.debug("inventory_loaded", unique_products=len(inventory_map))
             return inventory_map

@@ -538,8 +538,8 @@ class DiagnosticService:
             sales_result = self.db.table("sales").select("product_id").execute()
             products_with_sales = {s["product_id"] for s in sales_result.data if s.get("product_id")}
 
-            # Get products with inventory
-            inventory_result = self.db.table("inventory_snapshots").select(
+            # Get products with inventory from inventory_current view
+            inventory_result = self.db.table("inventory_current").select(
                 "product_id, warehouse_qty"
             ).execute()
             products_with_inventory = {
@@ -1055,7 +1055,7 @@ class DiagnosticService:
         """Check for edge cases in days of stock calculations."""
         try:
             # Get inventory and sales for calculation
-            inventory_result = self.db.table("inventory_snapshots").select(
+            inventory_result = self.db.table("inventory_current").select(
                 "product_id, warehouse_qty"
             ).execute()
 

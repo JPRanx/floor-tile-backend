@@ -628,27 +628,20 @@ class ProductService:
                 logger.info("liquidation_products_retrieved", count=0)
                 return []
 
-            # 2. Get latest inventory_snapshots per product
-            # Follow the inventory_service.get_latest() pattern:
-            # - Query inventory_snapshots table, order by product_id then snapshot_date DESC
-            # - Loop through results, keep only the first (latest) per product_id
+            # 2. Get latest inventory from inventory_current view (no dedup needed)
             inventory_result = (
-                self.db.table("inventory_snapshots")
+                self.db.table("inventory_current")
                 .select("product_id, warehouse_qty, factory_available_m2, snapshot_date")
-                .order("product_id")
-                .order("snapshot_date", desc=True)
                 .execute()
             )
 
-            # Build dict of latest warehouse_qty and factory_available_m2 per product_id
-            latest_inventory = {}
-            for row in (inventory_result.data or []):
-                pid = row["product_id"]
-                if pid not in latest_inventory:
-                    latest_inventory[pid] = {
-                        "warehouse_m2": float(row.get("warehouse_qty") or 0),
-                        "factory_m2": float(row.get("factory_available_m2") or 0),
-                    }
+            latest_inventory = {
+                row["product_id"]: {
+                    "warehouse_m2": float(row.get("warehouse_qty") or 0),
+                    "factory_m2": float(row.get("factory_available_m2") or 0),
+                }
+                for row in (inventory_result.data or [])
+            }
 
             # 3. Filter inactive products to those with warehouse_qty > 0 OR factory_m2 > 0
             candidates = []
