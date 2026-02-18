@@ -234,6 +234,24 @@ class ForwardSimulationService:
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
         product_details.sort(key=lambda d: urgency_order.get(d["urgency"], 99))
 
+        # Build BL items from draft if available
+        draft_bl_items: list[dict] = []
+        has_bl_allocation = False
+        if draft and draft.get("items"):
+            products_by_id = {p["id"]: p for p in products}
+            bl_items = [i for i in draft["items"] if i.get("bl_number") is not None]
+            if bl_items:
+                has_bl_allocation = True
+                for item in bl_items:
+                    prod = products_by_id.get(item["product_id"], {})
+                    draft_bl_items.append({
+                        "product_id": item["product_id"],
+                        "sku": prod.get("sku", ""),
+                        "selected_pallets": item["selected_pallets"],
+                        "bl_number": item["bl_number"],
+                    })
+                draft_bl_items.sort(key=lambda x: (x["bl_number"], x["sku"]))
+
         return {
             "boat_id": boat_id,
             "boat_name": boat.get("vessel_name", ""),
@@ -251,6 +269,8 @@ class ForwardSimulationService:
             "order_by_date": window_opens.isoformat(),
             "days_until_order_deadline": (window_opens - today).days,
             "product_details": product_details,
+            "draft_bl_items": draft_bl_items,
+            "has_bl_allocation": has_bl_allocation,
         }
 
     # ------------------------------------------------------------------
@@ -420,6 +440,23 @@ class ForwardSimulationService:
             drafts_map: dict[str, dict] = {}
             for row in result.data:
                 drafts_map[row["boat_id"]] = row
+
+            # Fetch draft items with BL assignments
+            if drafts_map:
+                draft_ids = [d["id"] for d in drafts_map.values()]
+                items_result = (
+                    self.db.table("draft_items")
+                    .select("*")
+                    .in_("draft_id", draft_ids)
+                    .execute()
+                )
+                # Group items by draft_id
+                items_by_draft: dict[str, list[dict]] = {}
+                for item in items_result.data:
+                    items_by_draft.setdefault(item["draft_id"], []).append(item)
+
+                for draft in drafts_map.values():
+                    draft["items"] = items_by_draft.get(draft["id"], [])
 
             logger.debug("drafts_found", count=len(drafts_map))
             return drafts_map

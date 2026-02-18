@@ -36,6 +36,11 @@ class DraftItemCreate(BaseSchema):
         ge=0,
         description="Number of pallets selected for this product"
     )
+    bl_number: Optional[int] = Field(
+        None,
+        ge=1,
+        description="BL number this product is assigned to (null = not yet allocated)"
+    )
     notes: Optional[str] = Field(
         None,
         description="Optional notes for this line item"
@@ -53,6 +58,7 @@ class DraftItemResponse(BaseSchema, TimestampMixin):
     draft_id: str = Field(..., description="Parent draft UUID")
     product_id: str = Field(..., description="Product UUID")
     selected_pallets: int = Field(..., description="Number of pallets selected")
+    bl_number: Optional[int] = Field(None, description="BL number assignment")
     notes: Optional[str] = Field(None, description="Optional notes for this line item")
 
 

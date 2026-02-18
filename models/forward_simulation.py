@@ -50,6 +50,15 @@ class ProductProjection(BaseSchema):
     suggested_pallets: int = Field(0, ge=0, description="Suggested pallets to order")
 
 
+class DraftBLItem(BaseSchema):
+    """A product assigned to a specific BL in a draft."""
+
+    product_id: str = Field(..., description="Product UUID")
+    sku: str = Field("", description="Product SKU for display")
+    selected_pallets: int = Field(0, ge=0, description="Pallets assigned")
+    bl_number: int = Field(..., ge=1, description="BL number")
+
+
 class BoatProjection(BaseSchema):
     """
     Projection for a single future boat in the planning horizon.
@@ -105,6 +114,14 @@ class BoatProjection(BaseSchema):
     product_details: list[ProductProjection] = Field(
         default_factory=list,
         description="Per-product projections sorted by urgency (critical first)"
+    )
+    draft_bl_items: list[DraftBLItem] = Field(
+        default_factory=list,
+        description="Draft items with BL assignments (empty if no BLs allocated)"
+    )
+    has_bl_allocation: bool = Field(
+        False,
+        description="True if the draft has BL assignments"
     )
 
 

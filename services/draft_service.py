@@ -235,6 +235,7 @@ class DraftService:
                         "draft_id": draft_id,
                         "product_id": item["product_id"],
                         "selected_pallets": item["selected_pallets"],
+                        "bl_number": item.get("bl_number"),
                         "notes": item.get("notes"),
                     }
                     for item in items
