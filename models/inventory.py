@@ -136,7 +136,7 @@ class InventorySnapshotResponse(BaseSchema):
     product_id: str = Field(..., description="Product UUID")
     warehouse_qty: float = Field(..., description="Warehouse quantity in m²")
     in_transit_qty: float = Field(default=0, description="In-transit quantity in m²")
-    snapshot_date: date = Field(..., description="Date of inventory count")
+    snapshot_date: Optional[date] = Field(default=None, description="Date of inventory count")
     notes: Optional[str] = Field(None, description="Optional notes")
     created_at: Optional[datetime] = Field(default=None, description="Record creation timestamp")
     # Factory availability fields

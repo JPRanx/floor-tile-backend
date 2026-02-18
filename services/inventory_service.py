@@ -208,9 +208,12 @@ class InventoryService:
             )
             products_by_id = {p["id"]: p for p in (products_result.data or [])}
 
-            # Convert to response objects
+            # Convert to response objects — skip products with no data at all
             snapshots = []
             for row in inv_result.data:
+                # Products with no inventory in any source table have NULL snapshot_date
+                if not row.get("snapshot_date"):
+                    continue
                 pid = row["product_id"]
                 product_data = products_by_id.get(pid, {})
                 snapshots.append(InventorySnapshotWithProduct(
