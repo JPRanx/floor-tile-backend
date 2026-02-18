@@ -97,7 +97,7 @@ _SAC_SUFFIXES = [
 # Add new entries here as needed — all parsers using normalize_product_name()
 # or _normalize_sku_name() will pick them up automatically.
 PRODUCT_ALIASES: dict[str, str] = {
-    "MIRACLE": "MIRACH",
+    "MIRACH": "MIRACLE",
 }
 
 
