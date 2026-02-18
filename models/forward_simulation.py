@@ -94,6 +94,14 @@ class BoatProjection(BaseSchema):
         ...,
         description="True if an existing draft exists, False if purely projected"
     )
+    order_by_date: Optional[str] = Field(
+        None,
+        description="Deadline date to place the order (departure - production_lead - transport_to_port)"
+    )
+    days_until_order_deadline: Optional[int] = Field(
+        None,
+        description="Days from today until order_by_date (negative = overdue)"
+    )
     product_details: list[ProductProjection] = Field(
         default_factory=list,
         description="Per-product projections sorted by urgency (critical first)"

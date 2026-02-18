@@ -248,6 +248,8 @@ class ForwardSimulationService:
             "draft_status": draft.get("status") if draft else None,
             "draft_id": draft["id"] if draft else None,
             "is_active": draft is not None,
+            "order_by_date": window_opens.isoformat(),
+            "days_until_order_deadline": (window_opens - today).days,
             "product_details": product_details,
         }
 
