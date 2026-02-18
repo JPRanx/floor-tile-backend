@@ -6,7 +6,7 @@ Returns timestamps and status for all data sources.
 
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 import structlog
 
 from config import get_supabase_client
@@ -159,3 +159,39 @@ async def get_data_freshness():
             "status": _get_freshness_status(boats_last_updated),
         },
     }
+
+
+UPLOAD_TYPE_LABELS = {
+    "sales": "Ventas (SAC)",
+    "inventory": "Inventario",
+    "siesa": "Inventario (SIESA)",
+    "boats": "Barcos",
+    "in_transit": "Despacho / En Transito",
+    "production_schedule": "Programacion Produccion",
+    "shipment_pdf": "BL / Embarque",
+}
+
+
+@router.get("/upload-history")
+async def get_upload_history(
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Recent upload history for the Data Hub activity log."""
+    db = get_supabase_client()
+    result = (
+        db.table("upload_history")
+        .select("upload_type, filename, row_count, uploaded_at")
+        .order("uploaded_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    items = []
+    for row in (result.data or []):
+        items.append({
+            "upload_type": row["upload_type"],
+            "label": UPLOAD_TYPE_LABELS.get(row["upload_type"], row["upload_type"]),
+            "filename": row["filename"],
+            "row_count": row["row_count"],
+            "uploaded_at": row["uploaded_at"],
+        })
+    return {"items": items}

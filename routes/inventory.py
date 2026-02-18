@@ -9,7 +9,9 @@ from fastapi import APIRouter, Query, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import date
+from decimal import Decimal
 from io import BytesIO
+from collections import defaultdict
 import hashlib
 import structlog
 
@@ -23,6 +25,8 @@ from models.inventory import (
     InTransitUploadResponse,
     InventoryPreview,
     InventoryPreviewRow,
+    ReconciliationItem,
+    ReconciliationSummary,
 )
 from models.product import ProductCreate, Category, Rotation
 from services.inventory_service import get_inventory_service
@@ -1133,26 +1137,150 @@ async def upload_siesa_inventory(
 # IN-TRANSIT / DISPATCH
 # ===================
 
+M2_PER_PALLET = Decimal("134.4")
+RECONCILIATION_TOLERANCE_M2 = 10.0  # m² difference considered a "match"
+
+
+def _reconcile_dispatch_vs_drafts(db, parse_result, products) -> Optional[ReconciliationSummary]:
+    """Compare dispatch upload quantities against ordered/confirmed drafts."""
+    try:
+        # Get all ordered/confirmed drafts
+        drafts_result = (
+            db.table("boat_factory_drafts")
+            .select("id, boat_id, status")
+            .in_("status", ["ordered", "confirmed"])
+            .execute()
+        )
+        if not drafts_result.data:
+            return None
+
+        # Get draft items
+        draft_ids = [d["id"] for d in drafts_result.data]
+        items_result = (
+            db.table("draft_items")
+            .select("draft_id, product_id, selected_pallets")
+            .in_("draft_id", draft_ids)
+            .execute()
+        )
+
+        # Get boat names for display
+        boat_ids = list({d["boat_id"] for d in drafts_result.data})
+        boats_result = (
+            db.table("boat_schedules")
+            .select("id, vessel_name")
+            .in_("id", boat_ids)
+            .execute()
+        )
+        boat_names = {b["id"]: b["vessel_name"] for b in (boats_result.data or [])}
+        draft_boat = {d["id"]: d["boat_id"] for d in drafts_result.data}
+
+        # Aggregate draft m² per product (across all ordered/confirmed drafts)
+        draft_m2_by_pid: dict[str, float] = defaultdict(float)
+        draft_boat_by_pid: dict[str, str] = {}
+        for item in (items_result.data or []):
+            pid = item["product_id"]
+            pallets = item["selected_pallets"]
+            m2 = float(Decimal(str(pallets)) * M2_PER_PALLET)
+            draft_m2_by_pid[pid] += m2
+            # Track boat name (use latest if multiple)
+            boat_id = draft_boat.get(item["draft_id"])
+            if boat_id:
+                draft_boat_by_pid[pid] = boat_names.get(boat_id, "")
+
+        # Build SKU lookup from products
+        pid_to_sku = {p.id: p.sku for p in products}
+
+        # Dispatch m² by product
+        dispatch_m2_by_pid = {p.product_id: p.in_transit_m2 for p in parse_result.products}
+
+        # All product IDs from both sources
+        all_pids = set(dispatch_m2_by_pid.keys()) | set(draft_m2_by_pid.keys())
+
+        items: list[ReconciliationItem] = []
+        matched = mismatched = dispatch_only = draft_only = 0
+
+        for pid in sorted(all_pids, key=lambda p: pid_to_sku.get(p, "")):
+            d_m2 = dispatch_m2_by_pid.get(pid, 0.0)
+            dr_m2 = draft_m2_by_pid.get(pid, 0.0)
+            diff = round(d_m2 - dr_m2, 2)
+            sku = pid_to_sku.get(pid, pid[:8])
+            boat_name = draft_boat_by_pid.get(pid)
+
+            if d_m2 > 0 and dr_m2 == 0:
+                status = "dispatch_only"
+                dispatch_only += 1
+            elif d_m2 == 0 and dr_m2 > 0:
+                status = "draft_only"
+                draft_only += 1
+            elif abs(diff) <= RECONCILIATION_TOLERANCE_M2:
+                status = "match"
+                matched += 1
+            else:
+                status = "mismatch"
+                mismatched += 1
+
+            # Only include non-matches and mismatches to keep response concise
+            if status != "match":
+                items.append(ReconciliationItem(
+                    sku=sku,
+                    dispatch_m2=round(d_m2, 2),
+                    draft_m2=round(dr_m2, 2),
+                    diff_m2=diff,
+                    status=status,
+                    boat_name=boat_name,
+                ))
+
+        return ReconciliationSummary(
+            matched=matched,
+            mismatched=mismatched,
+            dispatch_only=dispatch_only,
+            draft_only=draft_only,
+            items=items,
+        )
+    except Exception as e:
+        logger.error("reconciliation_failed", error=str(e))
+        return None
+
+
 @router.post("/in-transit/upload", response_model=InTransitUploadResponse)
 async def upload_in_transit(
     file: UploadFile = File(...),
-    snapshot_date: date = Query(..., description="Target snapshot date (must match warehouse upload)"),
+    snapshot_date: Optional[date] = Query(None, description="Target snapshot date. If omitted, uses the latest existing snapshot date."),
     received_orders: Optional[str] = Query(None, description="Comma-separated order numbers to exclude (e.g., 'OC002,OC003')"),
 ):
     """
     Upload dispatch schedule to update in-transit quantities.
 
     Parses PROGRAMACIÓN DE DESPACHO Excel and updates in_transit_qty
-    on inventory_snapshots for the specified snapshot_date.
+    on inventory_snapshots for the target snapshot_date.
+
+    If snapshot_date is not provided, automatically uses the most recent
+    snapshot date in inventory_snapshots. This ensures in-transit data
+    always updates the correct inventory rows regardless of upload timing.
 
     Products in the dispatch file get their aggregated m².
     Products NOT in the dispatch file get in_transit_qty reset to 0.
-    Only updates rows matching the specified snapshot_date.
+    Only updates rows matching the target snapshot_date.
     """
     # Parse received_orders from comma-separated string
     excluded = []
     if received_orders:
         excluded = [o.strip() for o in received_orders.split(",") if o.strip()]
+
+    # Auto-resolve snapshot_date to latest if not provided
+    if snapshot_date is None:
+        db = get_supabase_client()
+        latest = (
+            db.table("inventory_snapshots")
+            .select("snapshot_date")
+            .order("snapshot_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if latest.data:
+            snapshot_date = date.fromisoformat(latest.data[0]["snapshot_date"])
+        else:
+            snapshot_date = date.today()
 
     logger.info(
         "in_transit_upload_started",
@@ -1232,6 +1360,17 @@ async def upload_in_transit(
             snapshot_date=snapshot_date.isoformat(),
         )
 
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type="in_transit",
+            file_hash=hashlib.md5(content).hexdigest(),
+            filename=file.filename or "in_transit.xlsx",
+            row_count=updated_count,
+        )
+
+        # --- Reconciliation: compare dispatch vs ordered/confirmed drafts ---
+        reconciliation = _reconcile_dispatch_vs_drafts(db, parse_result, products)
+
         return InTransitUploadResponse(
             success=True,
             snapshot_date=snapshot_date,
@@ -1239,6 +1378,7 @@ async def upload_in_transit(
             products_reset=reset_count,
             total_in_transit_m2=parse_result.total_m2,
             excluded_orders=excluded,
+            reconciliation=reconciliation,
             unmatched_skus=parse_result.unmatched_skus,
             details=details,
         )

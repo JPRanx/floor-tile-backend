@@ -190,6 +190,25 @@ class InTransitProductDetail(BaseSchema):
     in_transit_m2: float
 
 
+class ReconciliationItem(BaseSchema):
+    """One product's reconciliation between dispatch and draft."""
+    sku: str
+    dispatch_m2: float
+    draft_m2: float
+    diff_m2: float
+    status: str  # "match" | "mismatch" | "dispatch_only" | "draft_only"
+    boat_name: Optional[str] = None
+
+
+class ReconciliationSummary(BaseSchema):
+    """Comparison of dispatch upload vs ordered/confirmed drafts."""
+    matched: int = 0
+    mismatched: int = 0
+    dispatch_only: int = 0
+    draft_only: int = 0
+    items: list[ReconciliationItem] = Field(default_factory=list)
+
+
 class InTransitUploadResponse(BaseSchema):
     """Response from in-transit dispatch upload."""
     success: bool
@@ -200,6 +219,7 @@ class InTransitUploadResponse(BaseSchema):
     excluded_orders: list[str] = Field(default_factory=list)
     unmatched_skus: list[str] = Field(default_factory=list)
     details: list[InTransitProductDetail] = Field(default_factory=list)
+    reconciliation: Optional[ReconciliationSummary] = None
 
 
 class BulkInventoryCreate(BaseSchema):

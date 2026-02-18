@@ -791,7 +791,8 @@ def _merge_with_phantom_boats(
     phantoms: list[dict] = []
 
     for route in routes:
-        dow = route["departure_day_of_week"]  # 0=Sun, 4=Thu
+        db_dow = route["departure_day_of_week"]  # DB uses 0=Sun, 4=Thu
+        python_dow = (db_dow - 1) % 7  # Convert to Python's 0=Mon convention
         transit = route["transit_days"]
         freq = route["frequency_weeks"]
         carrier = route.get("carrier", "")
@@ -801,7 +802,7 @@ def _merge_with_phantom_boats(
 
         # Find first matching day-of-week after start
         cursor = start + timedelta(days=1)  # start from tomorrow
-        days_ahead = (dow - cursor.weekday()) % 7
+        days_ahead = (python_dow - cursor.weekday()) % 7
         cursor = cursor + timedelta(days=days_ahead)
 
         while cursor <= end:
