@@ -36,6 +36,15 @@ class UrgencyBreakdown(BaseSchema):
     ok: int = Field(0, ge=0, description="Products with healthy stock levels")
 
 
+class SupplySource(BaseSchema):
+    """Breakdown of supply sources contributing to a product's available stock for a boat."""
+
+    warehouse_m2: float = Field(0, description="Current warehouse stock in m2")
+    factory_siesa_m2: float = Field(0, description="Factory SIESA finished goods available for this boat")
+    production_pipeline_m2: float = Field(0, description="Production completing before this boat's departure")
+    in_transit_m2: float = Field(0, description="In-transit from ordered/confirmed drafts on earlier boats")
+
+
 class ProductProjection(BaseSchema):
     """Per-product projection for a boat: projected stock, urgency, and suggested order."""
 
@@ -48,6 +57,14 @@ class ProductProjection(BaseSchema):
     urgency: str = Field("ok", description="Urgency level: critical, urgent, soon, ok")
     coverage_gap_m2: float = Field(0, ge=0, description="m2 needed to cover until next order cycle")
     suggested_pallets: int = Field(0, ge=0, description="Suggested pallets to order")
+    supply_breakdown: Optional[SupplySource] = Field(
+        None,
+        description="Breakdown of supply sources contributing to available stock"
+    )
+    is_draft_committed: bool = Field(
+        False,
+        description="True if this quantity comes from a saved draft (not a simulation suggestion)"
+    )
 
 
 class DraftBLItem(BaseSchema):
@@ -138,6 +155,46 @@ class BoatProjection(BaseSchema):
     carrier: Optional[str] = Field(
         None,
         description="Freight forwarder or carrier name (e.g., TIBA, SEABOARD)"
+    )
+    is_draft_locked: bool = Field(
+        False,
+        description="True if editing this draft is blocked by a later boat's draft"
+    )
+    blocking_boat_name: Optional[str] = Field(
+        None,
+        description="Name of the boat whose draft blocks editing this one"
+    )
+    has_earlier_drafts: bool = Field(
+        False,
+        description="True if this boat's calculation depends on earlier boat drafts"
+    )
+    needs_review: bool = Field(
+        False,
+        description="True if this draft needs review (status=action_needed or earlier draft changed)"
+    )
+    review_reason: Optional[str] = Field(
+        None,
+        description="Why this draft needs attention (e.g., 'Borrador anterior modificado')"
+    )
+    earlier_draft_context: Optional[str] = Field(
+        None,
+        description="Summary of earlier drafts this depends on (e.g., 'Basado en borrador de GEMINI (48 paletas)')"
+    )
+    has_factory_siesa_supply: bool = Field(
+        False,
+        description="True if factory SIESA stock contributes to this boat's supply"
+    )
+    has_production_supply: bool = Field(
+        False,
+        description="True if production pipeline contributes to this boat's supply"
+    )
+    factory_siesa_total_m2: float = Field(
+        0,
+        description="Total factory SIESA m2 consumed by this boat"
+    )
+    production_total_m2: float = Field(
+        0,
+        description="Total production pipeline m2 consumed by this boat"
     )
 
 

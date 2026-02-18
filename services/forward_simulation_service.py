@@ -19,7 +19,6 @@ import structlog
 from config import get_supabase_client, DatabaseError
 from config.shipping import (
     M2_PER_PALLET,
-    CONTAINER_MAX_PALLETS,
     WAREHOUSE_BUFFER_DAYS,
     ORDERING_CYCLE_DAYS,
 )
@@ -90,14 +89,26 @@ class ForwardSimulationService:
             velocity_map = self._get_daily_velocities(products, today)
             drafts_map = self._get_existing_drafts(factory_id, boats)
 
-            # Build running stock tracker from current inventory
+            # NEW: Fetch enriched supply sources
+            production_pipeline = self._get_production_pipeline(products, horizon_end)
+            in_transit_drafts = self._get_in_transit_drafts(factory_id)
+
+            # Build running stock tracker — warehouse only (no lump-sum in_transit)
             current_stock: dict[str, Decimal] = {}
+            factory_siesa_map: dict[str, Decimal] = {}
             for p in products:
                 pid = p["id"]
                 inv = inventory_map.get(pid, {})
                 warehouse = Decimal(str(inv.get("warehouse_qty", 0)))
-                in_transit = Decimal(str(inv.get("in_transit_qty", 0)))
-                current_stock[pid] = warehouse + in_transit
+                current_stock[pid] = warehouse
+                # Factory SIESA finished goods
+                siesa = inv.get("factory_available_m2") or 0
+                if Decimal(str(siesa)) > 0:
+                    factory_siesa_map[pid] = Decimal(str(siesa))
+
+            # Track one-time supply consumption across boats
+            factory_siesa_consumed: set[str] = set()
+            production_consumed: set[str] = set()
 
             # Simulate each boat in departure order
             boat_projections: list[dict] = []
@@ -110,8 +121,57 @@ class ForwardSimulationService:
                     velocity_map=velocity_map,
                     drafts_map=drafts_map,
                     today=today,
+                    factory_siesa_map=factory_siesa_map,
+                    factory_siesa_consumed=factory_siesa_consumed,
+                    production_pipeline=production_pipeline,
+                    production_consumed=production_consumed,
+                    in_transit_drafts=in_transit_drafts,
                 )
                 boat_projections.append(projection)
+
+            # Post-processing: compute draft lock, review flags, and dependency context
+            for i, proj in enumerate(boat_projections):
+                # Draft lock: locked if any LATER boat has a draft
+                if proj["draft_id"] is not None:
+                    for j in range(i + 1, len(boat_projections)):
+                        later = boat_projections[j]
+                        if later["draft_id"] is not None:
+                            proj["is_draft_locked"] = True
+                            proj["blocking_boat_name"] = later["boat_name"]
+                            break
+
+                # Earlier draft dependency: check if any EARLIER boat has a draft
+                earlier_draft_names: list[str] = []
+                earlier_total_pallets = 0
+                for j in range(0, i):
+                    earlier = boat_projections[j]
+                    if earlier["draft_id"] is not None:
+                        earlier_pallets = sum(
+                            d.get("suggested_pallets", 0) for d in earlier["product_details"]
+                        )
+                        earlier_draft_names.append(earlier["boat_name"])
+                        earlier_total_pallets += earlier_pallets
+
+                if earlier_draft_names:
+                    proj["has_earlier_drafts"] = True
+                    if len(earlier_draft_names) == 1:
+                        proj["earlier_draft_context"] = (
+                            f"Basado en borrador de {earlier_draft_names[0]} ({earlier_total_pallets} paletas)"
+                        )
+                    else:
+                        proj["earlier_draft_context"] = (
+                            f"Basado en {len(earlier_draft_names)} borradores anteriores ({earlier_total_pallets} paletas)"
+                        )
+
+                # Review flags: needs_review if status is action_needed
+                if proj["draft_status"] == "action_needed":
+                    proj["needs_review"] = True
+                    # Use the draft's notes as the review reason (set by cascade)
+                    draft = drafts_map.get(proj["boat_id"])
+                    if draft and draft.get("notes"):
+                        proj["review_reason"] = draft["notes"]
+                    else:
+                        proj["review_reason"] = "Borrador necesita revision"
 
             result = {
                 "factory_id": factory_id,
@@ -151,12 +211,17 @@ class ForwardSimulationService:
         velocity_map: dict[str, Decimal],
         drafts_map: dict[str, dict],
         today: date,
+        factory_siesa_map: dict[str, Decimal],
+        factory_siesa_consumed: set[str],
+        production_pipeline: dict[str, list[dict]],
+        production_consumed: set[str],
+        in_transit_drafts: dict[str, list[dict]],
     ) -> dict:
         """
         Simulate a single boat: project stock at arrival, compute needs.
 
-        Mutates *current_stock* in place to subtract the suggested order
-        quantities so subsequent boats see the replenished inventory.
+        Mutates *current_stock*, *factory_siesa_consumed*, *production_consumed*,
+        and *in_transit_drafts* in place so subsequent boats see consumed supply.
         """
         boat_id = boat["id"]
         arrival_date = _parse_date(boat["arrival_date"])
@@ -167,6 +232,10 @@ class ForwardSimulationService:
             days_until_arrival = 1
 
         coverage_target = ORDERING_CYCLE_DAYS + days_until_arrival
+        transport_to_port = int(factory.get("transport_to_port_days", 0))
+
+        # Existing draft for this boat
+        draft = drafts_map.get(boat_id)
 
         # Per-product projections
         product_details: list[dict] = []
@@ -178,41 +247,115 @@ class ForwardSimulationService:
             daily_vel = velocity_map.get(pid, Decimal("0"))
             stock = current_stock.get(pid, Decimal("0"))
 
-            projected_stock = stock - (daily_vel * days_until_arrival)
+            # --- SUPPLY EVENTS ---
+            siesa_supply = Decimal("0")
+            prod_supply = Decimal("0")
+            transit_supply = Decimal("0")
+
+            # A. Factory SIESA (one-time, first eligible boat)
+            if pid not in factory_siesa_consumed:
+                siesa_m2 = factory_siesa_map.get(pid, Decimal("0"))
+                if siesa_m2 > 0:
+                    factory_ready_by = today + timedelta(days=transport_to_port)
+                    if departure_date >= factory_ready_by:
+                        siesa_supply = siesa_m2
+                        factory_siesa_consumed.add(pid)
+
+            # B. Production pipeline (one-time per row)
+            for prow in production_pipeline.get(pid, []):
+                if prow["id"] in production_consumed:
+                    continue
+                est_delivery = _parse_date(prow["estimated_delivery_date"])
+                prod_ready_by = est_delivery + timedelta(days=transport_to_port)
+                if prod_ready_by <= departure_date:
+                    if prow["status"] == "completed":
+                        contrib = Decimal(str(prow["completed_m2"] or 0))
+                    else:
+                        req = Decimal(str(prow["requested_m2"] or 0))
+                        comp = Decimal(str(prow["completed_m2"] or 0))
+                        contrib = max(Decimal("0"), req - comp)
+                    if contrib > 0:
+                        prod_supply += contrib
+                        production_consumed.add(prow["id"])
+
+            # C. In-transit from ordered/confirmed drafts
+            remaining_transit = []
+            for entry in in_transit_drafts.get(pid, []):
+                entry_arrival = _parse_date(entry["arrival_date"])
+                entry_warehouse = entry_arrival + timedelta(days=WAREHOUSE_BUFFER_DAYS)
+                boat_warehouse = arrival_date + timedelta(days=WAREHOUSE_BUFFER_DAYS)
+                if entry_warehouse <= boat_warehouse:
+                    transit_supply += entry["pallets_m2"]
+                else:
+                    remaining_transit.append(entry)
+            # Remove consumed entries so later boats don't double-count
+            if remaining_transit != in_transit_drafts.get(pid, []):
+                in_transit_drafts[pid] = remaining_transit
+
+            effective_stock = stock + siesa_supply + prod_supply + transit_supply
+            projected_stock = effective_stock - (daily_vel * days_until_arrival)
+
+            # --- DEMAND: use draft or compute suggestion ---
+            is_committed = False
+            if draft and draft.get("items"):
+                draft_item = next((i for i in draft["items"] if i["product_id"] == pid), None)
+                if draft_item:
+                    suggested_pallets = draft_item["selected_pallets"]
+                    is_committed = True
+                else:
+                    # Product not in draft — no order for this product on this boat
+                    suggested_pallets = 0
+                    is_committed = True
+            else:
+                # No draft — compute suggestion normally
+                coverage_gap_val = max(
+                    Decimal("0"),
+                    (daily_vel * coverage_target) - projected_stock,
+                )
+                suggested_pallets = math.ceil(coverage_gap_val / M2_PER_PALLET) if coverage_gap_val > 0 else 0
+
+            total_pallets += suggested_pallets
 
             # Urgency based on days of stock at arrival
             if daily_vel > 0:
                 days_of_stock = float(projected_stock / daily_vel)
             else:
-                days_of_stock = 999.0  # no demand -- effectively infinite
+                days_of_stock = 999.0
 
             urgency = _classify_urgency(days_of_stock)
             urgency_counts[urgency] += 1
 
-            # Replenishment need
+            # Coverage gap (for display — always computed even if draft committed)
             coverage_gap = max(
                 Decimal("0"),
                 (daily_vel * coverage_target) - projected_stock,
             )
-            suggested_pallets = math.ceil(coverage_gap / M2_PER_PALLET) if coverage_gap > 0 else 0
-            total_pallets += suggested_pallets
 
             product_details.append({
                 "product_id": pid,
                 "sku": product.get("sku", ""),
                 "daily_velocity_m2": float(daily_vel.quantize(Decimal("0.01"))),
-                "current_stock_m2": float(stock.quantize(Decimal("0.01"))),
+                "current_stock_m2": float(effective_stock.quantize(Decimal("0.01"))),
                 "projected_stock_m2": float(projected_stock.quantize(Decimal("0.01"))),
                 "days_of_stock_at_arrival": round(days_of_stock, 1),
                 "urgency": urgency,
                 "coverage_gap_m2": float(coverage_gap.quantize(Decimal("0.01"))),
                 "suggested_pallets": suggested_pallets,
+                "supply_breakdown": {
+                    "warehouse_m2": float(stock.quantize(Decimal("0.01"))),
+                    "factory_siesa_m2": float(siesa_supply.quantize(Decimal("0.01"))),
+                    "production_pipeline_m2": float(prod_supply.quantize(Decimal("0.01"))),
+                    "in_transit_m2": float(transit_supply.quantize(Decimal("0.01"))),
+                },
+                "is_draft_committed": is_committed,
             })
 
-            # Subtract ordered quantity from running stock so next boat sees it
+            # Cascade: update running stock for next boat
             if suggested_pallets > 0:
                 filled_m2 = Decimal(suggested_pallets) * M2_PER_PALLET
                 current_stock[pid] = projected_stock + filled_m2
+            else:
+                current_stock[pid] = projected_stock
 
         # Confidence
         days_out = (departure_date - today).days
@@ -222,19 +365,12 @@ class ForwardSimulationService:
         estimated_pallets_min = int(total_pallets * (confidence_score / 100))
         estimated_pallets_max = int(total_pallets * (2 - confidence_score / 100))
 
-        # Containers
-        estimated_containers = math.ceil(total_pallets / CONTAINER_MAX_PALLETS) if total_pallets > 0 else 0
-
         # Deadlines
         production_lead = int(factory.get("production_lead_days", 0))
-        transport_to_port = int(factory.get("transport_to_port_days", 0))
         # Factory order deadline: latest date to tell factory to start producing
         factory_order_by = departure_date - timedelta(days=production_lead + transport_to_port)
         # Shipping booking deadline: latest date to book container space
         shipping_book_by = departure_date - timedelta(days=transport_to_port)
-
-        # Existing draft
-        draft = drafts_map.get(boat_id)
 
         # Sort product details by urgency (critical first)
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
@@ -284,6 +420,28 @@ class ForwardSimulationService:
             "has_bl_allocation": has_bl_allocation,
             "is_estimated": is_estimated,
             "carrier": route_carrier or boat.get("shipping_line"),
+            "is_draft_locked": False,
+            "blocking_boat_name": None,
+            "has_earlier_drafts": False,
+            "needs_review": False,
+            "review_reason": None,
+            "earlier_draft_context": None,
+            "has_factory_siesa_supply": any(
+                d.get("supply_breakdown", {}).get("factory_siesa_m2", 0) > 0
+                for d in product_details
+            ),
+            "has_production_supply": any(
+                d.get("supply_breakdown", {}).get("production_pipeline_m2", 0) > 0
+                for d in product_details
+            ),
+            "factory_siesa_total_m2": float(sum(
+                Decimal(str(d.get("supply_breakdown", {}).get("factory_siesa_m2", 0)))
+                for d in product_details
+            )),
+            "production_total_m2": float(sum(
+                Decimal(str(d.get("supply_breakdown", {}).get("production_pipeline_m2", 0)))
+                for d in product_details
+            )),
         }
 
     # ------------------------------------------------------------------
@@ -357,7 +515,7 @@ class ForwardSimulationService:
         Get latest inventory snapshot per product.
 
         Returns:
-            Mapping of product_id -> {warehouse_qty, in_transit_qty}
+            Mapping of product_id -> {warehouse_qty, in_transit_qty, factory_available_m2}
         """
         if not products:
             return {}
@@ -366,7 +524,7 @@ class ForwardSimulationService:
         try:
             result = (
                 self.db.table("inventory_snapshots")
-                .select("product_id, warehouse_qty, in_transit_qty")
+                .select("product_id, warehouse_qty, in_transit_qty, factory_available_m2")
                 .order("created_at", desc=True)
                 .execute()
             )
@@ -384,6 +542,113 @@ class ForwardSimulationService:
         except Exception as e:
             logger.error("fetch_inventory_failed", error=str(e))
             raise DatabaseError("select", str(e))
+
+    def _get_production_pipeline(self, products: list[dict], horizon_end: date) -> dict[str, list[dict]]:
+        """
+        Get production schedule items that could contribute supply within the horizon.
+
+        Returns:
+            Mapping of product_id -> list of production rows
+        """
+        if not products:
+            return {}
+
+        product_ids = [p["id"] for p in products]
+        logger.debug("fetching_production_pipeline", product_count=len(product_ids))
+
+        try:
+            result = (
+                self.db.table("production_schedule")
+                .select("id, product_id, status, requested_m2, completed_m2, estimated_delivery_date")
+                .in_("status", ["scheduled", "in_progress", "completed"])
+                .not_.is_("product_id", "null")
+                .not_.is_("estimated_delivery_date", "null")
+                .lte("estimated_delivery_date", horizon_end.isoformat())
+                .execute()
+            )
+
+            # Filter to our products and group by product_id
+            pipeline: dict[str, list[dict]] = defaultdict(list)
+            product_set = set(product_ids)
+            for row in result.data:
+                if row["product_id"] in product_set:
+                    pipeline[row["product_id"]].append(row)
+
+            logger.debug("production_pipeline_loaded", rows=sum(len(v) for v in pipeline.values()))
+            return dict(pipeline)
+
+        except Exception as e:
+            logger.error("fetch_production_pipeline_failed", error=str(e))
+            return {}  # Non-fatal: fall back to no production data
+
+    def _get_in_transit_drafts(self, factory_id: str) -> dict[str, list[dict]]:
+        """
+        Get per-product in-transit quantities from ordered/confirmed drafts.
+
+        These are goods on the water whose per-boat breakdown we know
+        because the draft tells us what was ordered on each boat.
+
+        Returns:
+            Mapping of product_id -> list of {arrival_date, pallets_m2}
+        """
+        logger.debug("fetching_in_transit_drafts", factory_id=factory_id)
+
+        try:
+            # Get all ordered/confirmed drafts for this factory
+            drafts_result = (
+                self.db.table("boat_factory_drafts")
+                .select("id, boat_id, status")
+                .eq("factory_id", factory_id)
+                .in_("status", ["ordered", "confirmed"])
+                .execute()
+            )
+
+            if not drafts_result.data:
+                return {}
+
+            # Get boat arrival dates
+            boat_ids = [d["boat_id"] for d in drafts_result.data]
+            boats_result = (
+                self.db.table("boat_schedules")
+                .select("id, arrival_date")
+                .in_("id", boat_ids)
+                .execute()
+            )
+            arrival_by_boat = {b["id"]: b["arrival_date"] for b in boats_result.data}
+
+            # Get draft items
+            draft_ids = [d["id"] for d in drafts_result.data]
+            items_result = (
+                self.db.table("draft_items")
+                .select("draft_id, product_id, selected_pallets")
+                .in_("draft_id", draft_ids)
+                .execute()
+            )
+
+            # Map draft_id -> boat_id
+            draft_to_boat = {d["id"]: d["boat_id"] for d in drafts_result.data}
+
+            # Build per-product in-transit list
+            in_transit: dict[str, list[dict]] = defaultdict(list)
+            for item in items_result.data:
+                boat_id = draft_to_boat.get(item["draft_id"])
+                if not boat_id:
+                    continue
+                arrival = arrival_by_boat.get(boat_id)
+                if not arrival:
+                    continue
+                pallets_m2 = Decimal(str(item["selected_pallets"])) * M2_PER_PALLET
+                in_transit[item["product_id"]].append({
+                    "arrival_date": arrival,
+                    "pallets_m2": pallets_m2,
+                })
+
+            logger.debug("in_transit_drafts_loaded", products=len(in_transit))
+            return dict(in_transit)
+
+        except Exception as e:
+            logger.error("fetch_in_transit_drafts_failed", error=str(e))
+            return {}  # Non-fatal
 
     def _get_daily_velocities(
         self, products: list[dict], today: date
