@@ -121,6 +121,9 @@ class RecommendationService:
             weeks=self.sales_weeks
         )
 
+        # Pre-fetch unfulfilled demand for all products (one query)
+        unfulfilled_totals = self._get_unfulfilled_demand_all(lookback_days=90)
+
         allocations = []
         lead_time_sqrt = Decimal(str(sqrt(self.lead_time)))
 
@@ -154,6 +157,11 @@ class RecommendationService:
             total_sales = sum(weekly_sales)
             weekly_velocity = total_sales / weeks_of_data
             daily_velocity = weekly_velocity / 7
+
+            # Adjust velocity with unfulfilled demand signal
+            daily_velocity = self._adjust_velocity_with_unfulfilled(
+                product.id, daily_velocity, unfulfilled_totals
+            )
 
             # Standard deviation of weekly sales
             if weeks_of_data > 1:
@@ -777,6 +785,86 @@ class RecommendationService:
         )
 
         return result
+
+    def _get_unfulfilled_demand_all(self, lookback_days: int = 90) -> dict[str, Decimal]:
+        """
+        Fetch unfulfilled demand totals for all products in one query.
+
+        Args:
+            lookback_days: How many days back to look for unfulfilled demand
+
+        Returns:
+            Dict mapping product_id to total unfulfilled m²
+        """
+        try:
+            from config import get_supabase_client
+            db_client = get_supabase_client()
+
+            cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+            result = (
+                db_client.table("unfulfilled_demand")
+                .select("product_id, quantity_m2")
+                .gte("snapshot_date", cutoff)
+                .execute()
+            )
+
+            totals: dict[str, Decimal] = {}
+            for r in result.data or []:
+                pid = r["product_id"]
+                qty = Decimal(str(r["quantity_m2"]))
+                totals[pid] = totals.get(pid, Decimal("0")) + qty
+
+            if totals:
+                logger.info(
+                    "unfulfilled_demand_loaded",
+                    products_with_demand=len(totals),
+                    lookback_days=lookback_days,
+                )
+
+            return totals
+
+        except Exception as e:
+            logger.warning("unfulfilled_demand_load_failed", error=str(e))
+            return {}
+
+    def _adjust_velocity_with_unfulfilled(
+        self,
+        product_id: str,
+        base_daily_velocity: Decimal,
+        unfulfilled_totals: dict[str, Decimal],
+        lookback_days: int = 90,
+    ) -> Decimal:
+        """
+        Adjust velocity upward when unfulfilled demand exists.
+
+        Spreads the total unfulfilled demand over the lookback period
+        and adds it to the base daily velocity.
+
+        Args:
+            product_id: Product UUID
+            base_daily_velocity: Calculated daily velocity from sales
+            unfulfilled_totals: Pre-fetched unfulfilled demand totals
+            lookback_days: Period over which to spread unfulfilled demand
+
+        Returns:
+            Adjusted daily velocity (always >= base)
+        """
+        total = unfulfilled_totals.get(product_id, Decimal("0"))
+        if total == 0:
+            return base_daily_velocity
+
+        unfulfilled_daily = total / lookback_days
+        adjusted = base_daily_velocity + unfulfilled_daily
+
+        logger.debug(
+            "velocity_adjusted",
+            product_id=product_id,
+            base=float(base_daily_velocity),
+            unfulfilled_daily=float(unfulfilled_daily),
+            adjusted=float(adjusted),
+        )
+
+        return adjusted
 
     def _determine_priority(
         self,

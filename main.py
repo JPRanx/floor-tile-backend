@@ -222,6 +222,7 @@ from routes.config import router as config_router
 from routes.factories import router as factories_router
 from routes.drafts import router as drafts_router
 from routes.forward_simulation import router as planning_router
+from routes.unfulfilled_demand import router as unfulfilled_demand_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -251,6 +252,7 @@ app.include_router(config_router, prefix="/api/config", tags=["Config"])
 app.include_router(factories_router, prefix="/api/factories", tags=["Factories"])
 app.include_router(drafts_router, prefix="/api/drafts", tags=["Drafts"])
 app.include_router(planning_router, prefix="/api/planning", tags=["Planning"])
+app.include_router(unfulfilled_demand_router, prefix="/api/inventory/unfulfilled-demand", tags=["Unfulfilled Demand"])
 
 
 if __name__ == "__main__":
