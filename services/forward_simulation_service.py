@@ -95,7 +95,9 @@ class ForwardSimulationService:
 
             # NEW: Fetch enriched supply sources
             production_pipeline = self._get_production_pipeline(products, horizon_end)
-            in_transit_drafts = self._get_in_transit_drafts(factory_id)
+            # Exclude horizon boats — their drafts are already handled via drafts_map cascade
+            horizon_boat_ids = {b["id"] for b in boats}
+            in_transit_drafts = self._get_in_transit_drafts(factory_id, horizon_boat_ids)
 
             # Build running stock tracker — warehouse only (no lump-sum in_transit)
             current_stock: dict[str, Decimal] = {}
@@ -300,12 +302,13 @@ class ForwardSimulationService:
                         production_consumed.add(prow["id"])
 
             # C. In-transit from ordered/confirmed drafts
+            # Available when earlier boat's goods are in warehouse before
+            # this boat departs (per spec: entry_arrival + BUFFER <= departure)
             remaining_transit = []
             for entry in in_transit_drafts.get(pid, []):
                 entry_arrival = _parse_date(entry["arrival_date"])
                 entry_warehouse = entry_arrival + timedelta(days=WAREHOUSE_BUFFER_DAYS)
-                boat_warehouse = arrival_date + timedelta(days=WAREHOUSE_BUFFER_DAYS)
-                if entry_warehouse <= boat_warehouse:
+                if entry_warehouse <= departure_date:
                     transit_supply += entry["pallets_m2"]
                 else:
                     remaining_transit.append(entry)
@@ -614,12 +617,19 @@ class ForwardSimulationService:
             logger.error("fetch_production_pipeline_failed", error=str(e))
             return {}  # Non-fatal: fall back to no production data
 
-    def _get_in_transit_drafts(self, factory_id: str) -> dict[str, list[dict]]:
+    def _get_in_transit_drafts(
+        self, factory_id: str, exclude_boat_ids: Optional[set[str]] = None
+    ) -> dict[str, list[dict]]:
         """
         Get per-product in-transit quantities from ordered/confirmed drafts.
 
         These are goods on the water whose per-boat breakdown we know
         because the draft tells us what was ordered on each boat.
+
+        Args:
+            factory_id: Factory UUID
+            exclude_boat_ids: Boat IDs to exclude (horizon boats whose drafts
+                are already handled via the running stock cascade in _simulate_boat)
 
         Returns:
             Mapping of product_id -> list of {arrival_date, pallets_m2}
@@ -639,8 +649,14 @@ class ForwardSimulationService:
             if not drafts_result.data:
                 return {}
 
+            # Filter out horizon boats whose drafts are handled via running stock cascade
+            _exclude = exclude_boat_ids or set()
+            filtered_drafts = [d for d in drafts_result.data if d["boat_id"] not in _exclude]
+            if not filtered_drafts:
+                return {}
+
             # Get boat arrival dates
-            boat_ids = [d["boat_id"] for d in drafts_result.data]
+            boat_ids = [d["boat_id"] for d in filtered_drafts]
             boats_result = (
                 self.db.table("boat_schedules")
                 .select("id, arrival_date")
@@ -650,7 +666,7 @@ class ForwardSimulationService:
             arrival_by_boat = {b["id"]: b["arrival_date"] for b in boats_result.data}
 
             # Get draft items
-            draft_ids = [d["id"] for d in drafts_result.data]
+            draft_ids = [d["id"] for d in filtered_drafts]
             items_result = (
                 self.db.table("draft_items")
                 .select("draft_id, product_id, selected_pallets")
@@ -659,7 +675,7 @@ class ForwardSimulationService:
             )
 
             # Map draft_id -> boat_id
-            draft_to_boat = {d["id"]: d["boat_id"] for d in drafts_result.data}
+            draft_to_boat = {d["id"]: d["boat_id"] for d in filtered_drafts}
 
             # Build per-product in-transit list
             in_transit: dict[str, list[dict]] = defaultdict(list)

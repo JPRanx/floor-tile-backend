@@ -645,4 +645,24 @@ class ProductionPreview(BaseSchema):
     existing_records_to_delete: int = 0
     warnings: list[str] = Field(default_factory=list)
     sample_rows: list[ProductionPreviewRow] = Field(default_factory=list)
+    rows: list[ProductionPreviewRow] = Field(default_factory=list, description="All rows for inline editing")
     expires_in_minutes: int = 30
+
+
+class ProductionModification(BaseSchema):
+    """A single row modification during production schedule preview editing."""
+    row_index: int = Field(..., ge=0, description="Row index in the preview rows list")
+    requested_m2: Optional[Decimal] = Field(None, ge=0, description="New requested m² value")
+    status: Optional[str] = Field(None, description="New status value")
+
+
+class ProductionConfirmRequest(BaseSchema):
+    """Confirm production upload with optional manual mappings and inline edits."""
+    manual_mappings: list["ManualMapping"] = Field(default_factory=list)
+    modifications: list[ProductionModification] = Field(default_factory=list)
+    deletions: list[int] = Field(default_factory=list, description="Row indices to exclude from import")
+
+
+# Avoid circular import - ManualMapping is a simple model
+from models.manual_mapping import ManualMapping
+ProductionConfirmRequest.model_rebuild()

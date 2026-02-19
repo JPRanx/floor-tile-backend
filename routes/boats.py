@@ -5,7 +5,7 @@ See PHASE_2_BLUEPRINT.md for endpoint specifications.
 See STANDARDS_ERRORS.md for error response format.
 """
 
-from fastapi import APIRouter, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import date
@@ -22,9 +22,10 @@ from models.boat_schedule import (
     BoatUploadResult,
     BoatPreview,
     BoatPreviewRow,
+    BoatConfirmRequest,
 )
 from services.boat_schedule_service import get_boat_schedule_service
-from parsers.tiba_parser import parse_tiba_excel
+from parsers.tiba_parser import parse_tiba_excel, BoatScheduleRecord
 from services import preview_cache_service
 from services.upload_history_service import get_upload_history_service
 from exceptions import (
@@ -227,7 +228,7 @@ async def preview_boat_upload(file: UploadFile = File(...)):
         from datetime import date as date_type
         today = date_type.today()
 
-        for record in parse_result.schedules:
+        for idx, record in enumerate(parse_result.schedules):
             # Check if exists
             existing = service._find_existing(
                 record.departure_date,
@@ -246,14 +247,16 @@ async def preview_boat_upload(file: UploadFile = File(...)):
                 action = "new"
                 new_boats += 1
 
-            # Add to sample rows
+            # Add to sample rows with row_index
             sample_rows.append(BoatPreviewRow(
+                row_index=idx,
                 vessel_name=record.vessel_name,
                 departure_date=record.departure_date,
                 arrival_date=record.arrival_date,
                 transit_days=record.transit_days,
                 origin_port=record.origin_port,
                 destination_port=record.destination_port,
+                carrier=record.carrier if hasattr(record, 'carrier') else None,
                 action=action,
             ))
 
@@ -275,12 +278,29 @@ async def preview_boat_upload(file: UploadFile = File(...)):
         if boat_duplicate:
             warnings.insert(0, f"Este archivo ya fue subido el {boat_duplicate['uploaded_at'][:10]} ({boat_duplicate['filename']})")
 
-        # Cache the file bytes for confirm
+        # Cache the file bytes and parsed schedules for confirm
+        # Serialize schedules so modifications can be applied
+        cached_schedules = [
+            {
+                "vessel_name": r.vessel_name,
+                "departure_date": r.departure_date.isoformat(),
+                "arrival_date": r.arrival_date.isoformat(),
+                "transit_days": r.transit_days,
+                "origin_port": r.origin_port,
+                "destination_port": r.destination_port,
+                "carrier": r.carrier if hasattr(r, 'carrier') else None,
+                "shipping_line": r.shipping_line if hasattr(r, 'shipping_line') else None,
+                "route_type": r.route_type if hasattr(r, 'route_type') else None,
+                "source_file": r.source_file if hasattr(r, 'source_file') else None,
+            }
+            for r in parse_result.schedules
+        ]
         cache_data = {
             "file_bytes": content,
             "filename": file.filename,
             "file_hash": file_hash,
             "upload_type": "boats",
+            "schedules": cached_schedules,
         }
         preview_id = preview_cache_service.store_preview(cache_data)
 
@@ -303,7 +323,8 @@ async def preview_boat_upload(file: UploadFile = File(...)):
             latest_departure=latest_departure,
             skipped_rows=skipped_rows,
             warnings=warnings[:10],  # Limit warnings
-            sample_rows=sample_rows,
+            rows=sample_rows,  # All rows for inline editing
+            sample_rows=sample_rows,  # Backward compat
             expires_in_minutes=30,
         )
 
@@ -314,30 +335,98 @@ async def preview_boat_upload(file: UploadFile = File(...)):
 
 
 @router.post("/upload/confirm/{preview_id}", response_model=BoatUploadResult)
-async def confirm_boat_upload(preview_id: str):
-    """Save previously previewed boat data."""
+async def confirm_boat_upload(preview_id: str, request: Optional[BoatConfirmRequest] = None):
+    """Save previously previewed boat data with optional inline edits."""
     try:
         # Retrieve cached data
         cached = preview_cache_service.retrieve_preview(preview_id)
         if cached is None:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "code": "PREVIEW_EXPIRED",
-                        "message": "Preview has expired. Please upload the file again."
-                    }
-                }
-            )
+            raise HTTPException(status_code=404, detail="Preview expired")
 
-        # Extract file data
-        file_bytes = cached["file_bytes"]
-        filename = cached["filename"]
+        modifications = request.modifications if request else []
+        deletions = request.deletions if request else []
 
-        # Re-process the file (ensures fresh DB state for upsert logic)
-        file_io = BytesIO(file_bytes)
         service = get_boat_schedule_service()
-        result = service.import_from_excel(file_io, filename)
+
+        if modifications or deletions:
+            # Apply modifications/deletions to cached schedules
+            cached_schedules = cached.get("schedules", [])
+
+            if modifications:
+                mod_map = {m.row_index: m for m in modifications}
+                for i, sched in enumerate(cached_schedules):
+                    if i in mod_map:
+                        mod = mod_map[i]
+                        if mod.departure_date is not None:
+                            sched["departure_date"] = mod.departure_date
+                        if mod.arrival_date is not None:
+                            sched["arrival_date"] = mod.arrival_date
+                        if mod.vessel_name is not None:
+                            sched["vessel_name"] = mod.vessel_name
+                        if mod.carrier is not None:
+                            sched["carrier"] = mod.carrier
+                        # Recalculate transit_days if dates changed
+                        if mod.departure_date is not None or mod.arrival_date is not None:
+                            dep = date.fromisoformat(sched["departure_date"])
+                            arr = date.fromisoformat(sched["arrival_date"])
+                            sched["transit_days"] = (arr - dep).days
+                logger.info("boat_modifications_applied", count=len(modifications))
+
+            if deletions:
+                deletion_set = set(deletions)
+                cached_schedules = [
+                    s for i, s in enumerate(cached_schedules)
+                    if i not in deletion_set
+                ]
+                logger.info("boat_deletions_applied", count=len(deletions))
+
+            # Convert dicts back to BoatScheduleRecord and import
+            filename = cached.get("filename", "unknown")
+            from datetime import timedelta
+            from models.boat_schedule import BOOKING_BUFFER_DAYS
+
+            imported = 0
+            updated = 0
+            skipped = 0
+            errors_list = []
+
+            for sched_dict in cached_schedules:
+                try:
+                    dep = date.fromisoformat(sched_dict["departure_date"])
+                    arr = date.fromisoformat(sched_dict["arrival_date"])
+                    record = BoatScheduleRecord(
+                        departure_date=dep,
+                        arrival_date=arr,
+                        transit_days=sched_dict.get("transit_days", (arr - dep).days),
+                        booking_deadline=dep - timedelta(days=BOOKING_BUFFER_DAYS),
+                        vessel_name=sched_dict.get("vessel_name"),
+                        shipping_line=sched_dict.get("shipping_line"),
+                        origin_port=sched_dict.get("origin_port", "Cartagena"),
+                        destination_port=sched_dict.get("destination_port", "Puerto Quetzal"),
+                        route_type=sched_dict.get("route_type"),
+                    )
+                    upsert_result = service._upsert_schedule(record, filename)
+                    if upsert_result == "inserted":
+                        imported += 1
+                    elif upsert_result == "updated":
+                        updated += 1
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    errors_list.append(f"Failed to save schedule: {str(e)}")
+
+            result = BoatUploadResult(
+                imported=imported,
+                updated=updated,
+                skipped=skipped,
+                errors=errors_list,
+            )
+        else:
+            # No modifications — use original re-parse flow
+            file_bytes = cached["file_bytes"]
+            filename = cached["filename"]
+            file_io = BytesIO(file_bytes)
+            result = service.import_from_excel(file_io, filename)
 
         logger.info(
             "boat_confirm_complete",
@@ -345,6 +434,8 @@ async def confirm_boat_upload(preview_id: str):
             imported=result.imported,
             updated=result.updated,
             skipped=result.skipped,
+            modifications_count=len(modifications),
+            deletions_count=len(deletions),
         )
 
         # Record upload history
@@ -360,6 +451,8 @@ async def confirm_boat_upload(preview_id: str):
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         return handle_error(e)
 

@@ -26,6 +26,7 @@ from models.sales import (
     SalesMismatch,
     SalesPreview,
     SalesPreviewRow,
+    SalesConfirmRequest,
     SACUploadResponse,
     SACPreview,
     SACPreviewRow,
@@ -157,14 +158,16 @@ async def preview_sales_upload(file: UploadFile = File(...)):
             if r.product_id and r.product_id not in pid_to_sku:
                 pid_to_sku[r.product_id] = r.sku
 
-        sample_rows = [
+        # Build ALL rows with row_index for inline editing
+        all_rows = [
             SalesPreviewRow(
+                row_index=i,
                 sku=pid_to_sku.get(r.product_id, r.product_id[:8]),
                 week_start=r.week_start,
                 quantity_m2=float(r.quantity_m2),
                 customer=r.customer,
             )
-            for r in sales_records[:10]
+            for i, r in enumerate(sales_records)
         ]
 
         preview_id = preview_cache_service.store_preview({
@@ -190,7 +193,8 @@ async def preview_sales_upload(file: UploadFile = File(...)):
             date_range_start=date_range_start,
             date_range_end=date_range_end,
             warnings=warnings,
-            sample_rows=sample_rows,
+            rows=all_rows,
+            sample_rows=all_rows[:10],  # Backward compat
         )
 
     except (ExcelParseError, AppError) as e:
@@ -201,14 +205,39 @@ async def preview_sales_upload(file: UploadFile = File(...)):
 
 
 @router.post("/upload/confirm/{preview_id}", response_model=SalesUploadResponse)
-async def confirm_sales_upload(preview_id: str):
-    """Save previously previewed sales data."""
+async def confirm_sales_upload(preview_id: str, request: Optional[SalesConfirmRequest] = None):
+    """Save previously previewed sales data with optional inline edits."""
     try:
         cached_data = preview_cache_service.retrieve_preview(preview_id)
         if cached_data is None:
             raise HTTPException(status_code=404, detail="Preview expired")
 
         sales_records = cached_data["records"]
+
+        # Apply modifications from inline editing
+        modifications = request.modifications if request else []
+        deletions = request.deletions if request else []
+
+        if modifications:
+            mod_map = {m.row_index: m for m in modifications}
+            for i, record in enumerate(sales_records):
+                if i in mod_map:
+                    mod = mod_map[i]
+                    if mod.quantity_m2 is not None:
+                        record.quantity_m2 = mod.quantity_m2
+                    if mod.customer is not None:
+                        record.customer = mod.customer
+            logger.info("sales_modifications_applied", count=len(modifications))
+
+        # Apply deletions (filter out rows by index)
+        if deletions:
+            deletion_set = set(deletions)
+            sales_records = [
+                r for i, r in enumerate(sales_records)
+                if i not in deletion_set
+            ]
+            logger.info("sales_deletions_applied", count=len(deletions))
+
         sales_service = get_sales_service()
         deleted = 0
         min_date = max_date = None
@@ -227,6 +256,8 @@ async def confirm_sales_upload(preview_id: str):
             "sales_confirm_complete",
             preview_id=preview_id,
             records_created=len(created),
+            modifications_count=len(modifications),
+            deletions_count=len(deletions),
         )
 
         # --- Inline verification (bridge code — remove with Excel imports) ---

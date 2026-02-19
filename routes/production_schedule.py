@@ -29,13 +29,13 @@ from models.production_schedule import (
     # Preview models
     ProductionPreview,
     ProductionPreviewRow,
+    ProductionConfirmRequest,
 )
 from services.production_schedule_parser_service import get_production_schedule_parser_service
 from services.production_schedule_service import get_production_schedule_service
 from services import preview_cache_service
 from services.upload_history_service import get_upload_history_service
 from services.product_service import get_product_service
-from models.manual_mapping import ManualMapping
 from exceptions import AppError, DatabaseError
 
 logger = structlog.get_logger(__name__)
@@ -408,7 +408,7 @@ async def preview_production_upload(
         total_requested_m2 = sum(r.requested_m2 for r in production_records)
         total_completed_m2 = sum(r.completed_m2 for r in production_records)
 
-        # Build sample rows (first 15)
+        # Build sample rows (first 15) for backward compat
         sample_rows = [
             ProductionPreviewRow(
                 referencia=r.referencia,
@@ -420,6 +420,20 @@ async def preview_production_upload(
                 estimated_delivery_date=r.estimated_delivery_date
             )
             for r in production_records[:15]
+        ]
+
+        # Build ALL rows for inline editing
+        all_rows = [
+            ProductionPreviewRow(
+                referencia=r.referencia,
+                sku=r.sku,
+                plant=r.plant,
+                requested_m2=r.requested_m2,
+                completed_m2=r.completed_m2,
+                status=r.status,
+                estimated_delivery_date=r.estimated_delivery_date
+            )
+            for r in production_records
         ]
 
         # Determine source month
@@ -468,6 +482,7 @@ async def preview_production_upload(
             existing_records_to_delete=existing_count,
             warnings=warnings,
             sample_rows=sample_rows,
+            rows=all_rows,
             expires_in_minutes=30
         )
 
@@ -483,9 +498,9 @@ async def preview_production_upload(
 @router.post("/upload-replace/confirm/{preview_id}", response_model=ProductionImportResult)
 async def confirm_production_upload(
     preview_id: str,
-    manual_mappings: Optional[list[ManualMapping]] = None,
+    request: Optional[ProductionConfirmRequest] = None,
 ):
-    """Save previously previewed production data (wipe and replace). Optionally resolve unmatched items."""
+    """Save previously previewed production data (wipe and replace). Optionally resolve unmatched items and apply inline edits."""
     try:
         # Retrieve from cache
         cached = preview_cache_service.retrieve_preview(preview_id)
@@ -495,6 +510,11 @@ async def confirm_production_upload(
         file_bytes = cached["file_bytes"]
         filename = cached["filename"]
         file_type = cached["file_type"]
+
+        # Extract request fields (backward compatible)
+        manual_mappings = request.manual_mappings if request else []
+        modifications = request.modifications if request else []
+        deletions = request.deletions if request else []
 
         logger.info(
             "production_schedule_confirm_started",
@@ -519,6 +539,27 @@ async def confirm_production_upload(
                     product = product_service.get_by_id(mapping_dict[record.referencia])
                     record.product_id = product.id
                     record.sku = product.sku
+
+        # Apply inline modifications (update field values by row_index)
+        if modifications:
+            mod_map = {m.row_index: m for m in modifications}
+            for idx, record in enumerate(production_records):
+                if idx in mod_map:
+                    mod = mod_map[idx]
+                    if mod.requested_m2 is not None:
+                        record.requested_m2 = mod.requested_m2
+                    if mod.status is not None:
+                        record.status = mod.status
+            logger.info("production_modifications_applied", count=len(modifications))
+
+        # Apply inline deletions (exclude rows by index)
+        if deletions:
+            deletion_set = set(deletions)
+            production_records = [
+                r for idx, r in enumerate(production_records)
+                if idx not in deletion_set
+            ]
+            logger.info("production_deletions_applied", count=len(deletions))
 
         if not production_records:
             raise HTTPException(

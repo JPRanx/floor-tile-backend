@@ -50,6 +50,8 @@ from models.inventory_lot import (
     ContainerEstimateResponse,
     SIESAPreview,
     SIESAPreviewLot,
+    SIESAPreviewRow,
+    SIESAConfirmRequest,
 )
 from parsers.siesa_parser import parse_siesa_bytes
 from config.shipping import (
@@ -61,7 +63,6 @@ from utils.text_utils import normalize_product_name
 from config import get_supabase_client
 from services import preview_cache_service
 from services.upload_history_service import get_upload_history_service
-from models.manual_mapping import ManualMapping
 
 logger = structlog.get_logger(__name__)
 
@@ -694,6 +695,18 @@ async def preview_siesa_upload(
             for match in parse_result.matched_lots[:10]
         ]
 
+        # Build ALL rows for inline editing
+        all_rows = [
+            SIESAPreviewRow(
+                sku=sku_lookup.get(match.product_id, "UNKNOWN"),
+                lot_code=match.lot.lot_number,
+                warehouse_name=match.lot.warehouse_name,
+                factory_available_m2=float(match.lot.quantity_m2),
+                weight_kg=float(match.lot.weight_kg) if match.lot.weight_kg else None,
+            )
+            for match in parse_result.matched_lots
+        ]
+
         # Build unmatched lots for manual resolution
         unmatched_lots_raw = [
             {
@@ -765,6 +778,7 @@ async def preview_siesa_upload(
             warehouses=warehouse_summaries,
             warnings=[f"Este archivo ya fue subido el {siesa_duplicate['uploaded_at'][:10]} ({siesa_duplicate['filename']})"] if siesa_duplicate else [],
             sample_lots=sample_lots,
+            rows=all_rows,
         )
 
     except SIESAMissingColumnsError as e:
@@ -781,9 +795,9 @@ async def preview_siesa_upload(
 @router.post("/siesa/upload/confirm/{preview_id}", response_model=SIESAUploadResponse)
 async def confirm_siesa_upload(
     preview_id: str,
-    manual_mappings: Optional[list[ManualMapping]] = None,
+    request: Optional[SIESAConfirmRequest] = None,
 ):
-    """Save previously previewed SIESA data. Optionally resolve unmatched items."""
+    """Save previously previewed SIESA data. Optionally resolve unmatched items and apply inline edits."""
     try:
         cache_data = preview_cache_service.retrieve_preview(preview_id)
         if cache_data is None:
@@ -791,6 +805,11 @@ async def confirm_siesa_upload(
 
         # Retrieve cached data
         lots_to_insert = cache_data["lots_to_insert"]
+
+        # Extract request fields (backward compatible)
+        manual_mappings = request.manual_mappings if request else []
+        modifications = request.modifications if request else []
+        deletions = request.deletions if request else []
 
         # Apply manual mappings to unmatched lots
         if manual_mappings:
@@ -801,6 +820,27 @@ async def confirm_siesa_upload(
                 if key in mapping_dict:
                     lot_data["product_id"] = mapping_dict[key]
                     lots_to_insert.append(lot_data)
+
+        # Apply inline modifications (update lot quantities by lot_code)
+        if modifications:
+            mod_map = {m.lot_code: m for m in modifications}
+            for lot_data in lots_to_insert:
+                lot_code = lot_data.get("lot_number", "")
+                if lot_code in mod_map:
+                    mod = mod_map[lot_code]
+                    if mod.factory_available_m2 is not None:
+                        lot_data["quantity_m2"] = mod.factory_available_m2
+            logger.info("siesa_modifications_applied", count=len(modifications))
+
+        # Apply inline deletions (exclude lots by lot_code)
+        if deletions:
+            deletion_set = set(deletions)
+            lots_to_insert = [
+                lot for lot in lots_to_insert
+                if lot.get("lot_number", "") not in deletion_set
+            ]
+            logger.info("siesa_deletions_applied", count=len(deletions))
+
         actual_date = date.fromisoformat(cache_data["snapshot_date"])
         parse_result_data = cache_data["parse_result"]
         warehouse_summaries = [WarehouseSummary(**w) for w in cache_data["warehouse_summaries"]]

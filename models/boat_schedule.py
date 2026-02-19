@@ -306,6 +306,7 @@ class BoatUploadResult(BaseSchema):
 
 class BoatPreviewRow(BaseSchema):
     """Sample row shown in boat preview."""
+    row_index: int = 0
     vessel_name: Optional[str] = None
     departure_date: date
     arrival_date: date
@@ -314,6 +315,22 @@ class BoatPreviewRow(BaseSchema):
     destination_port: str = "Puerto Quetzal"
     carrier: Optional[str] = None
     action: str = "new"  # "new", "update", or "skip"
+
+
+class BoatModification(BaseSchema):
+    """A single row modification during boat preview editing."""
+    row_index: int = Field(..., description="Row index to modify")
+    departure_date: Optional[str] = Field(None, description="New departure date (ISO format)")
+    arrival_date: Optional[str] = Field(None, description="New arrival date (ISO format)")
+    vessel_name: Optional[str] = Field(None, description="New vessel name")
+    carrier: Optional[str] = Field(None, description="New carrier name")
+
+
+class BoatConfirmRequest(BaseSchema):
+    """Confirm boat upload with optional edits."""
+    preview_id: str
+    modifications: list[BoatModification] = Field(default_factory=list)
+    deletions: list[int] = Field(default_factory=list, description="Row indices to exclude from import")
 
 
 class BoatPreview(BaseSchema):
@@ -328,4 +345,5 @@ class BoatPreview(BaseSchema):
     skipped_rows: list[SkippedRowInfo] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     sample_rows: list[BoatPreviewRow] = Field(default_factory=list)
+    rows: list[BoatPreviewRow] = Field(default_factory=list, description="All rows for editing")
     expires_in_minutes: int = 30

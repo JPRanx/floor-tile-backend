@@ -138,6 +138,15 @@ class SIESAPreviewLot(BaseSchema):
     weight_kg: Optional[float] = None
 
 
+class SIESAPreviewRow(BaseSchema):
+    """Row shown in SIESA preview for inline editing."""
+    sku: str
+    lot_code: str  # lot_number used as row key
+    warehouse_name: Optional[str] = None
+    factory_available_m2: float
+    weight_kg: Optional[float] = None
+
+
 class SIESAPreview(BaseSchema):
     """Preview response for SIESA inventory upload."""
     preview_id: str
@@ -157,4 +166,23 @@ class SIESAPreview(BaseSchema):
     warehouses: list[WarehouseSummary] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     sample_lots: list[SIESAPreviewLot] = Field(default_factory=list)
+    rows: list[SIESAPreviewRow] = Field(default_factory=list, description="All rows for inline editing")
     expires_in_minutes: int = 30
+
+
+class SIESAModification(BaseSchema):
+    """A single lot modification during SIESA preview editing."""
+    lot_code: str = Field(..., description="Lot number to modify")
+    factory_available_m2: Optional[float] = Field(None, ge=0, description="New quantity in m²")
+
+
+class SIESAConfirmRequest(BaseSchema):
+    """Confirm SIESA upload with optional manual mappings and inline edits."""
+    manual_mappings: list["ManualMapping"] = Field(default_factory=list)
+    modifications: list[SIESAModification] = Field(default_factory=list)
+    deletions: list[str] = Field(default_factory=list, description="Lot codes to exclude from import")
+
+
+# Avoid circular import - ManualMapping is a simple model
+from models.manual_mapping import ManualMapping
+SIESAConfirmRequest.model_rebuild()

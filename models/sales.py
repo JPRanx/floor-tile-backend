@@ -151,6 +151,7 @@ class BulkSalesCreate(BaseSchema):
 
 class SalesPreviewRow(BaseSchema):
     """Sample row shown in preview."""
+    row_index: int = 0
     sku: str
     week_start: date
     quantity_m2: float
@@ -166,8 +167,23 @@ class SalesPreview(BaseSchema):
     date_range_start: date
     date_range_end: date
     warnings: list[str] = Field(default_factory=list)
-    sample_rows: list[SalesPreviewRow] = Field(default_factory=list)
+    rows: list[SalesPreviewRow] = Field(default_factory=list, description="All rows for editing")
+    sample_rows: list[SalesPreviewRow] = Field(default_factory=list, description="Deprecated: use rows instead")
     expires_in_minutes: int = 30
+
+
+class SalesModification(BaseSchema):
+    """A single row modification during sales preview editing."""
+    row_index: int = Field(..., description="Row index to modify")
+    quantity_m2: Optional[Decimal] = Field(None, ge=0, description="New sales quantity (m²)")
+    customer: Optional[str] = Field(None, description="New customer name")
+
+
+class SalesConfirmRequest(BaseSchema):
+    """Confirm sales upload with optional edits."""
+    preview_id: str
+    modifications: list[SalesModification] = Field(default_factory=list)
+    deletions: list[int] = Field(default_factory=list, description="Row indices to exclude from import")
 
 
 class SACUploadResponse(BaseSchema):
