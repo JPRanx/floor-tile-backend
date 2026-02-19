@@ -169,9 +169,10 @@ def parse_sac_csv(
     known_sac_skus: dict[int, str],
     known_product_names: dict[str, str],
     encoding: str = "utf-8-sig",
+    filename: Optional[str] = None,
 ) -> SACParseResult:
     """
-    Parse SAC CSV file with daily sales data.
+    Parse SAC sales file (CSV or Excel) with daily sales data.
 
     Args:
         file: File path, BytesIO, or raw bytes
@@ -180,6 +181,7 @@ def parse_sac_csv(
         known_product_names: Dict mapping normalized product name to product_id
                             e.g., {"NOGAL CAFE": "uuid-123", "CEIBA GRIS OSC": "uuid-789"}
         encoding: CSV file encoding (default UTF-8 with BOM)
+        filename: Original filename to detect format (.xls/.xlsx vs .csv)
 
     Returns:
         SACParseResult with parsed sales and statistics
@@ -188,17 +190,25 @@ def parse_sac_csv(
         SACParseError: If file cannot be read
         SACMissingColumnsError: If required columns are missing
     """
-    logger.info("parsing_sac_csv", file_type=type(file).__name__)
+    is_excel = False
+    if filename:
+        lower_name = filename.lower()
+        is_excel = lower_name.endswith('.xls') or lower_name.endswith('.xlsx')
+
+    logger.info("parsing_sac_file", file_type=type(file).__name__, is_excel=is_excel, filename=filename)
 
     result = SACParseResult()
 
-    # Load CSV
+    # Load file (CSV or Excel)
     try:
-        df = _load_csv(file, encoding)
+        if is_excel:
+            df = _load_excel(file)
+        else:
+            df = _load_csv(file, encoding)
     except Exception as e:
-        logger.error("sac_csv_read_failed", error=str(e))
+        logger.error("sac_file_read_failed", error=str(e), is_excel=is_excel)
         raise SACParseError(
-            message=f"Failed to read CSV file: {str(e)}",
+            message=f"Failed to read file: {str(e)}",
             details={"original_error": str(e)}
         )
 
@@ -452,6 +462,43 @@ def _load_csv(file: Union[str, Path, BytesIO, bytes], encoding: str) -> pd.DataF
         return pd.read_csv(file, encoding="latin-1", dtype=str, skiprows=3)
     except Exception:
         raise last_error or Exception("Could not parse CSV with any encoding")
+
+
+def _load_excel(file: Union[str, Path, BytesIO, bytes]) -> pd.DataFrame:
+    """Load Excel (.xls or .xlsx) file into DataFrame, detecting the header row."""
+    if isinstance(file, bytes):
+        file = BytesIO(file)
+
+    # Detect engine: xlrd for .xls, openpyxl for .xlsx
+    # Try openpyxl first, fall back to xlrd
+    for engine in ["openpyxl", "xlrd"]:
+        for skip_rows in [0, 1, 2, 3, 4, 5]:
+            try:
+                if isinstance(file, BytesIO):
+                    file.seek(0)
+                df = pd.read_excel(file, engine=engine, dtype=str, skiprows=skip_rows)
+
+                # Check if we found the real header
+                normalized_cols = [_normalize_column(c) for c in df.columns]
+                has_date = any("fecha" in c for c in normalized_cols)
+                has_sku = any(c == "sku" for c in normalized_cols)
+                has_qty = any("unidades" in c or "cantidad" in c for c in normalized_cols)
+
+                if has_date and has_sku and has_qty and len(df.columns) > 5:
+                    logger.debug("excel_loaded", engine=engine, skip_rows=skip_rows, columns=len(df.columns))
+                    return df
+            except Exception:
+                continue
+
+    # Final fallback: skiprows=3 with xlrd (common SAC Excel format)
+    if isinstance(file, BytesIO):
+        file.seek(0)
+    try:
+        return pd.read_excel(file, engine="xlrd", dtype=str, skiprows=3)
+    except Exception:
+        if isinstance(file, BytesIO):
+            file.seek(0)
+        return pd.read_excel(file, engine="openpyxl", dtype=str, skiprows=3)
 
 
 def _normalize_column(col: str) -> str:

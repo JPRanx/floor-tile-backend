@@ -486,7 +486,7 @@ async def preview_sac_upload(file: UploadFile = File(...)):
         history_service = get_upload_history_service()
         sac_duplicate = history_service.check_duplicate("sac_sales", file_hash)
 
-        parse_result = parse_sac_csv(contents, known_sac_skus, known_product_names)
+        parse_result = parse_sac_csv(contents, known_sac_skus, known_product_names, filename=file.filename)
 
         if not parse_result.sales:
             raise SACParseError(
@@ -685,9 +685,9 @@ async def upload_sac_sales(file: UploadFile = File(...)):
             if p.sku
         }
 
-        # Parse CSV file
+        # Parse file
         contents = await file.read()
-        parse_result = parse_sac_csv(contents, known_sac_skus, known_product_names)
+        parse_result = parse_sac_csv(contents, known_sac_skus, known_product_names, filename=file.filename)
 
         # Log unmatched products
         if parse_result.unmatched_products:
