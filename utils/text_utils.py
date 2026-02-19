@@ -97,7 +97,18 @@ _SAC_SUFFIXES = [
 # Add new entries here as needed — all parsers using normalize_product_name()
 # or _normalize_sku_name() will pick them up automatically.
 PRODUCT_ALIASES: dict[str, str] = {
-    "MIRACH": "MIRACLE",
+    "MIRACLE": "MIRACH",
+    # Barrios inventory uses short furniture names; DB has full names
+    "MUEBLE CORN BLANCO": "MUEBLE DE BANO CORN EXP. BLANCO",
+    "MUEBLE CORN GERMANY": "MUEBLE DE BANO CORN EXP. GERMANY",
+    "MUEBLE CORN WENGUE": "MUEBLE DE BANO CORN EXP. WENGUE",
+    "MUEBLE MUSTANG BLANCO": "MUEBLE DE BANO MUSTANG EXP. BLANCO",
+    "MUEBLE MUSTANG GERMANY": "MUEBLE DE BANO MUSTANG EXP. GERMANY",
+    "MUEBLE MUSTANG WENGUE": "MUEBLE DE BANO MUSTANG EXP. WENGUE",
+    "MUEBLE ROSSO BLANCO": "MUEBLE DE BANO ROSSO EXP. BLANCO",
+    "MUEBLE ROSSO GERMANY": "MUEBLE DE BANO ROSSO EXP. GERMANY",
+    "MUEBLE ROSSO WENGUE": "MUEBLE DE BANO ROSSO EXP. WENGUE",
+    "LAVAMANOS PARA GABINETE": "LAVAMANOS DE CERAMICA PARA GABINETE",
 }
 
 
@@ -159,7 +170,7 @@ def normalize_product_name(name: Optional[str]) -> Optional[str]:
     # Uppercase for consistent comparison
     result = ascii_name.upper()
 
-    # Apply product aliases (e.g., MIRACLE → MIRACH)
+    # Apply product aliases (e.g., MIRACLE → MIRACH, the canonical name)
     result = PRODUCT_ALIASES.get(result, result)
 
     return result

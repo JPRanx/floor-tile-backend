@@ -21,7 +21,7 @@ UPDATE products SET owner_code = '80' WHERE sku = 'MALAMBO BEIGE';
 UPDATE products SET owner_code = '112' WHERE sku = 'MALAMBO GRIS';
 UPDATE products SET owner_code = '142' WHERE sku = 'MANAURE BEIGE';
 UPDATE products SET owner_code = '134' WHERE sku = 'MANAURE GRIS';
-UPDATE products SET owner_code = '131' WHERE sku = 'MIRACLE';
+UPDATE products SET owner_code = '131' WHERE sku = 'MIRACH';
 UPDATE products SET owner_code = '116' WHERE sku = 'NECOCLI BEIGE';
 UPDATE products SET owner_code = '117' WHERE sku = 'NECOCLI GRIS';
 UPDATE products SET owner_code = '110' WHERE sku = 'NOGAL BEIGE';

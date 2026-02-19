@@ -198,6 +198,15 @@ def parse_owner_excel(
                 logger.info("matched_sheet_with_trailing_space", original=actual_sheet, stripped=stripped)
                 break
 
+    # If still not found, check if any sheet has movement-tracking inventory content
+    # (handles generic names like "Hoja 1", "Sheet1")
+    if not matched_sheet:
+        for actual_sheet in excel.sheet_names:
+            if _is_movement_tracking_format(excel, actual_sheet):
+                matched_sheet = actual_sheet
+                logger.info("matched_inventory_by_content_detection", sheet=actual_sheet)
+                break
+
     if matched_sheet:
         # Detect if this is movement-tracking format
         if _is_movement_tracking_format(excel, matched_sheet):
@@ -296,6 +305,14 @@ def extract_products_from_excel(
             stripped = actual_sheet.strip()
             if stripped.upper() in [s.upper() for s in inventory_sheet_names]:
                 sheet_name = actual_sheet
+                break
+
+    # Fallback: detect inventory content in generic sheet names (e.g., "Hoja 1")
+    if not sheet_name:
+        for actual_sheet in excel.sheet_names:
+            if _is_movement_tracking_format(excel, actual_sheet):
+                sheet_name = actual_sheet
+                logger.info("matched_inventory_by_content_detection", sheet=actual_sheet)
                 break
 
     if not sheet_name:
@@ -648,26 +665,39 @@ def _is_movement_tracking_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
     """
     Detect if the sheet uses movement-tracking format (INICIAL/INGRESOS/SALIDAS/SALDO).
 
-    Movement-tracking format has:
-    - Row 2 (0-indexed row 1): "FECHA ACTUALIZACION: DD/MM/YYYY"
-    - Row 3 (0-indexed row 2): Headers like REFERENCIAS, FORMATO, INICIAL, INGRESOS, SALIDAS, SALDO
-    - Row 4: Sub-headers with PALETT/CANTIDAD M2
-    - Data starts at row 5
+    Two known variants:
+    1. Legacy format:
+       - Row 2 (0-indexed): "FECHA ACTUALIZACION: DD/MM/YYYY"
+       - Row 3: REFERENCIAS, FORMATO, INICIAL, INGRESOS, SALIDAS, SALDO
+       - Data starts at row 5
+
+    2. Barrios/daily inventory format:
+       - Row 0: "INVENTARIO DIDARIO DD.MM.YY"
+       - Row 1: PRODUCTO | INICIAL | INGRESOS | SALIDAS | SALDO
+       - Row 2: Sub-headers (Referencia, Formato, Pallets, Cant ...)
+       - Row 3+: Category sections (CERAMICO, MUEBLES)
+       - Data starts at row 4
     """
     try:
         # Read first few rows without header
         df = excel.parse(sheet_name, header=None, nrows=5)
 
-        # Check row 2 (index 2) for "FECHA ACTUALIZACION"
+        # Check row 2 (index 2) for "FECHA ACTUALIZACION" (legacy format)
         if len(df) > 2:
             row2_text = str(df.iloc[2, 0]) if pd.notna(df.iloc[2, 0]) else ""
             if "FECHA ACTUALIZACION" in row2_text.upper():
                 return True
 
-        # Also check for SALDO column header in row 3
-        if len(df) > 3:
-            row3 = df.iloc[3].astype(str).str.upper()
-            if any("SALDO" in str(cell) for cell in row3):
+        # Check row 0 for "INVENTARIO DIDARIO" (Barrios format)
+        if len(df) > 0:
+            row0_text = str(df.iloc[0, 0]) if pd.notna(df.iloc[0, 0]) else ""
+            if "INVENTARIO" in row0_text.upper() and "DIDARIO" in row0_text.upper():
+                return True
+
+        # Also check for SALDO column header in rows 1-3
+        for row_idx in range(1, min(4, len(df))):
+            row_vals = df.iloc[row_idx].astype(str).str.upper()
+            if any("SALDO" in str(cell) for cell in row_vals):
                 return True
 
     except Exception as e:
@@ -678,7 +708,11 @@ def _is_movement_tracking_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
 
 def _extract_date_from_header(df: pd.DataFrame) -> date:
     """
-    Extract date from 'FECHA ACTUALIZACION: DD/MM/YYYY' format in header.
+    Extract date from movement-tracking format headers.
+
+    Supported formats:
+    1. Legacy: Row 2 contains "FECHA ACTUALIZACION: DD/MM/YYYY"
+    2. Barrios: Row 0 contains "INVENTARIO DIDARIO DD.MM.YY"
 
     Args:
         df: DataFrame with raw Excel data (no header parsing)
@@ -689,19 +723,49 @@ def _extract_date_from_header(df: pd.DataFrame) -> date:
     import re
 
     try:
-        # Check row 2 (0-indexed) for date
-        header_text = str(df.iloc[2, 0]) if len(df) > 2 and pd.notna(df.iloc[2, 0]) else ""
+        # Try row 2: "FECHA ACTUALIZACION: 09/02/2026"
+        if len(df) > 2 and pd.notna(df.iloc[2, 0]):
+            header_text = str(df.iloc[2, 0])
+            match = re.search(r'(\d{2}/\d{2}/\d{4})', header_text)
+            if match:
+                date_str = match.group(1)
+                return datetime.strptime(date_str, "%d/%m/%Y").date()
 
-        # Parse "FECHA ACTUALIZACION: 09/02/2026"
-        match = re.search(r'(\d{2}/\d{2}/\d{4})', header_text)
-        if match:
-            date_str = match.group(1)
-            return datetime.strptime(date_str, "%d/%m/%Y").date()
+        # Try row 0: "INVENTARIO DIDARIO 18.02.26" (DD.MM.YY)
+        if len(df) > 0 and pd.notna(df.iloc[0, 0]):
+            title_text = str(df.iloc[0, 0])
+            # Match DD.MM.YY at end of title
+            match = re.search(r'(\d{2})\.(\d{2})\.(\d{2,4})\s*$', title_text)
+            if match:
+                day, month, year = match.group(1), match.group(2), match.group(3)
+                # Handle 2-digit year (26 → 2026)
+                if len(year) == 2:
+                    year = "20" + year
+                return datetime.strptime(f"{day}/{month}/{year}", "%d/%m/%Y").date()
 
     except Exception as e:
         logger.warning("date_extraction_failed", error=str(e))
 
     return date.today()
+
+
+def _is_barrios_daily_format(df: pd.DataFrame) -> bool:
+    """Check if this is the Barrios daily inventory format (INVENTARIO DIDARIO)."""
+    if len(df) > 0 and pd.notna(df.iloc[0, 0]):
+        title = str(df.iloc[0, 0]).upper()
+        if "INVENTARIO" in title and "DIDARIO" in title:
+            return True
+    return False
+
+
+# Category labels found in Barrios format (col A value when it's a section header)
+_BARRIOS_CATEGORY_LABELS = {"CERAMICO", "MUEBLES"}
+
+# Map Barrios format categories to our product categories
+_BARRIOS_CATEGORY_MAP = {
+    "CERAMICO": "MADERAS",
+    "MUEBLES": "MARMOLIZADOS",  # Furniture stored as MARMOLIZADOS
+}
 
 
 def _parse_movement_tracking_sheet(
@@ -714,17 +778,30 @@ def _parse_movement_tracking_sheet(
     """
     Parse movement-tracking format inventory sheet.
 
-    Format:
-    - Row 0-1: Empty/title
-    - Row 2: "FECHA ACTUALIZACION: DD/MM/YYYY"
-    - Row 3: REFERENCIAS | FORMATO | INICIAL | ... | SALDO | OBSERVACIONES
-    - Row 4: Sub-headers (PALETT | CANTIDAD M2 | ...)
-    - Row 5+: Data
+    Supports two variants:
 
-    Column mapping (0-indexed):
-    - Column 0: REFERENCIAS (SKU)
-    - Column 8: SALDO PALET
-    - Column 9: SALDO M2 (current warehouse quantity)
+    1. Legacy format:
+       - Row 0-1: Empty/title
+       - Row 2: "FECHA ACTUALIZACION: DD/MM/YYYY"
+       - Row 3: REFERENCIAS | FORMATO | INICIAL | ... | SALDO | OBSERVACIONES
+       - Row 4: Sub-headers (PALETT | CANTIDAD M2 | ...)
+       - Row 5+: Data (flat list, no category sections)
+
+    2. Barrios daily format:
+       - Row 0: "INVENTARIO DIDARIO DD.MM.YY"
+       - Row 1: Group headers (PRODUCTO | INICIAL | INGRESOS | SALIDAS | SALDO)
+       - Row 2: Sub-headers (Referencia | Formato | Pallets | Cant | ...)
+       - Row 3: Category header "CERAMICO"
+       - Rows 4-N: Ceramic product data
+       - Row N+1: Subtotal (col A is NaN)
+       - Row N+2: Category header "MUEBLES"
+       - Rows N+3-M: Furniture product data
+       - Row M+1: Subtotal
+
+    Column mapping (both formats, 0-indexed):
+    - Column 0: SKU / Referencia
+    - Column 1: Formato (Barrios only — "CERAMICO" or "MUEBLES")
+    - Column 9: SALDO quantity (m² for tiles, units for furniture)
     """
     logger.info("parsing_movement_tracking_sheet", sheet=sheet_name)
 
@@ -744,8 +821,19 @@ def _parse_movement_tracking_sheet(
     snapshot_date = _extract_date_from_header(df)
     logger.info("extracted_snapshot_date", date=snapshot_date.isoformat())
 
-    # Skip header rows (first 5 rows: 0-4)
-    data_df = df.iloc[5:].copy()
+    # Determine format variant and data start row
+    is_barrios = _is_barrios_daily_format(df)
+    # Barrios: data starts at row 4 (after title, group headers, sub-headers, first category)
+    # Legacy: data starts at row 5
+    data_start = 4 if is_barrios else 5
+    data_df = df.iloc[data_start:].copy()
+
+    logger.info(
+        "movement_tracking_variant",
+        variant="barrios" if is_barrios else "legacy",
+        data_start=data_start,
+        total_rows=len(df),
+    )
 
     # Parse each row
     for idx, row in data_df.iterrows():
@@ -754,15 +842,22 @@ def _parse_movement_tracking_sheet(
         # Get SKU from column 0
         raw_sku = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
 
+        # Skip empty rows, totals, and category section headers
         if not raw_sku or raw_sku == "nan" or raw_sku.upper() == "TOTAL":
             continue
+        if raw_sku.upper() in _BARRIOS_CATEGORY_LABELS:
+            continue
 
-        # Get SALDO M2 from column 9
-        saldo_m2 = row.iloc[9] if len(row) > 9 and pd.notna(row.iloc[9]) else 0
+        # Get SALDO quantity from column 9
+        saldo_qty = row.iloc[9] if len(row) > 9 and pd.notna(row.iloc[9]) else 0
 
         try:
-            warehouse_qty = float(saldo_m2)
+            warehouse_qty = float(saldo_qty)
         except (ValueError, TypeError):
+            warehouse_qty = 0
+
+        # Clamp floating-point noise to zero (e.g., -1.13e-13)
+        if abs(warehouse_qty) < 0.01:
             warehouse_qty = 0
 
         # Skip zero quantity rows
@@ -808,6 +903,7 @@ def _parse_movement_tracking_sheet(
     logger.info(
         "movement_tracking_parsed",
         sheet=sheet_name,
+        variant="barrios" if is_barrios else "legacy",
         records=len(result.inventory),
         errors=len(result.errors)
     )
@@ -820,7 +916,8 @@ def _extract_products_from_movement_tracking(
     """
     Extract unique products from movement-tracking format inventory sheet.
 
-    Movement-tracking format has SKUs in column 0 starting at row 5.
+    Handles both legacy (SKUs at row 5+) and Barrios (SKUs at row 4+, with
+    category in column 1 — "CERAMICO" or "MUEBLES").
     """
     try:
         df = excel.parse(sheet_name, header=None)
@@ -828,8 +925,10 @@ def _extract_products_from_movement_tracking(
         logger.error("failed_to_parse_movement_tracking_sheet", error=str(e))
         return []
 
-    # Skip header rows (first 5 rows: 0-4)
-    data_df = df.iloc[5:].copy()
+    # Determine format and data start
+    is_barrios = _is_barrios_daily_format(df)
+    data_start = 4 if is_barrios else 5
+    data_df = df.iloc[data_start:].copy()
 
     products_seen = set()
     products = []
@@ -840,6 +939,8 @@ def _extract_products_from_movement_tracking(
 
         if not raw_sku or raw_sku == "nan" or raw_sku.upper() == "TOTAL":
             continue
+        if raw_sku.upper() in _BARRIOS_CATEGORY_LABELS:
+            continue
 
         normalized_sku = _normalize_sku_name(raw_sku)
 
@@ -847,10 +948,15 @@ def _extract_products_from_movement_tracking(
             continue
         products_seen.add(normalized_sku)
 
-        # Default category for movement-tracking format (no category column)
+        # Determine category from column 1 (Barrios) or default (legacy)
+        category = "MADERAS"
+        if is_barrios and len(row) > 1 and pd.notna(row.iloc[1]):
+            formato = str(row.iloc[1]).upper().strip()
+            category = _BARRIOS_CATEGORY_MAP.get(formato, "MADERAS")
+
         products.append(ProductExtract(
             sku=normalized_sku,
-            category="MADERAS",  # Default
+            category=category,
             rotation=None,
         ))
 
@@ -1040,7 +1146,7 @@ def _normalize_sku_name(sku: str) -> str:
     # Clean up whitespace
     sku = ' '.join(sku.split())
 
-    # Apply product aliases (e.g., MIRACLE → MIRACH)
+    # Apply product aliases (e.g., MIRACLE → MIRACH, the canonical name)
     sku = PRODUCT_ALIASES.get(sku, sku)
 
     return sku
