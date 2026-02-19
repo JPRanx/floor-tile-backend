@@ -162,11 +162,11 @@ class ForwardSimulationService:
                     proj["has_earlier_drafts"] = True
                     if len(earlier_draft_names) == 1:
                         proj["earlier_draft_context"] = (
-                            f"Basado en borrador de {earlier_draft_names[0]} ({earlier_total_pallets} paletas)"
+                            f"based_on_single:{earlier_draft_names[0]}:{earlier_total_pallets}"
                         )
                     else:
                         proj["earlier_draft_context"] = (
-                            f"Basado en {len(earlier_draft_names)} borradores anteriores ({earlier_total_pallets} paletas)"
+                            f"based_on_multiple:{len(earlier_draft_names)}:{earlier_total_pallets}"
                         )
 
                 # Review flags: needs_review if status is action_needed
@@ -177,7 +177,7 @@ class ForwardSimulationService:
                     if draft and draft.get("notes"):
                         proj["review_reason"] = draft["notes"]
                     else:
-                        proj["review_reason"] = "Borrador necesita revision"
+                        proj["review_reason"] = "draft_needs_review"
 
             # Factory order signal
             factory_order_signal = self._compute_factory_order_signal(

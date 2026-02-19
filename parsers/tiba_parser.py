@@ -377,17 +377,23 @@ def _extract_origin_port(df: pd.DataFrame) -> Optional[str]:
             cell_str = str(cell).lower()
             # Look for port patterns
             if "puerto" in cell_str or "origen" in cell_str or "fob" in cell_str:
-                # Extract port name
-                match = re.search(r'(?:fob|puerto[^:]*:|origen[^:]*:)\s*(\w+)', cell_str, re.IGNORECASE)
-                if match:
-                    port = match.group(1).strip().title()
-                    logger.debug("found_origin_port", port=port, row=idx)
-                    return port
-                # Try to get next word after pattern
+                # Try known port names first (most reliable)
                 if "cartagena" in cell_str:
                     return "Cartagena"
                 if "castellon" in cell_str or "castellón" in cell_str:
                     return "Castellon"
+                # Extract port name after FOB marker (e.g., "FOB CARTAGENA")
+                fob_match = re.search(r'fob\s+(\w+)', cell_str, re.IGNORECASE)
+                if fob_match:
+                    port = fob_match.group(1).strip().title()
+                    logger.debug("found_origin_port", port=port, row=idx)
+                    return port
+                # Extract port name after colon (e.g., "PUERTO DE ORIGEN: CARTAGENA")
+                colon_match = re.search(r'(?:puerto|origen)[^:]*:\s*(?:fob\s+)?(\w+)', cell_str, re.IGNORECASE)
+                if colon_match:
+                    port = colon_match.group(1).strip().title()
+                    logger.debug("found_origin_port", port=port, row=idx)
+                    return port
     return None
 
 

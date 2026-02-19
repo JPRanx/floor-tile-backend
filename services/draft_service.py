@@ -326,7 +326,7 @@ class DraftService:
             self._attach_items(draft)
 
             # Soft cascade: flag later drafts
-            self._flag_later_drafts(boat_id, factory_id, "Borrador anterior modificado")
+            self._flag_later_drafts(boat_id, factory_id, "earlier_draft_modified")
 
             logger.info(
                 "draft_saved",
@@ -467,7 +467,7 @@ class DraftService:
             self._flag_later_drafts(
                 draft_info["boat_id"],
                 draft_info["factory_id"],
-                "Borrador anterior eliminado",
+                "earlier_draft_deleted",
             )
 
             return True
