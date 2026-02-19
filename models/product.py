@@ -180,6 +180,12 @@ class ProductResponse(BaseSchema, TimestampMixin):
     fob_cost_usd: Optional[Decimal] = Field(None, description="FOB cost per m² in USD")
     inactive_reason: Optional[InactiveReason] = Field(None, description="Reason for deactivation")
     inactive_date: Optional[date] = Field(None, description="Date when product was marked inactive")
+    # Unit-based product fields (furniture)
+    units_per_pallet: Optional[int] = Field(None, description="Units per pallet (for unit-based products like furniture)")
+    weight_kg: Optional[Decimal] = Field(None, description="Weight per unit in kg")
+    length_cm: Optional[Decimal] = Field(None, description="Product length in cm")
+    width_cm: Optional[Decimal] = Field(None, description="Product width in cm")
+    height_cm: Optional[Decimal] = Field(None, description="Product height in cm")
 
 
 class ProductListResponse(BaseSchema):

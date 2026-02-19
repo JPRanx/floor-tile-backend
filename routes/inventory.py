@@ -25,6 +25,7 @@ from models.inventory import (
     InTransitUploadResponse,
     InventoryPreview,
     InventoryPreviewRow,
+    InventoryConfirmRequest,
     ReconciliationItem,
     ReconciliationSummary,
 )
@@ -259,16 +260,17 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
         product_count = len(set(s.product_id for s in snapshots_to_create))
         snapshot_date = snapshots_to_create[0].snapshot_date if snapshots_to_create else date.today()
 
-        # Build sample rows (first 10)
+        # Build all preview rows (with product_id for inline editing)
         sku_lookup = {p.id: p.sku for p in products}
-        sample_rows = [
+        all_rows = [
             InventoryPreviewRow(
+                product_id=s.product_id,
                 sku=sku_lookup.get(s.product_id, "UNKNOWN"),
                 warehouse_qty=float(s.warehouse_qty),
                 in_transit_qty=float(s.in_transit_qty),
                 snapshot_date=s.snapshot_date,
             )
-            for s in snapshots_to_create[:10]
+            for s in snapshots_to_create
         ]
 
         # Store in cache
@@ -302,7 +304,8 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
             zero_filled_count=len(zero_filled_skus),
             zero_filled_products=zero_filled_skus[:20],  # Limit to 20
             warnings=[f"Este archivo ya fue subido el {inv_duplicate['uploaded_at'][:10]} ({inv_duplicate['filename']})"] if inv_duplicate else [],
-            sample_rows=sample_rows,
+            rows=all_rows,
+            sample_rows=all_rows[:10],  # Backward compat
         )
 
     except (InventoryUploadError, AppError) as e:
@@ -313,19 +316,45 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
 
 
 @router.post("/upload/confirm/{preview_id}", response_model=InventoryUploadResponse)
-async def confirm_inventory_upload(preview_id: str):
-    """Save previously previewed inventory data."""
+async def confirm_inventory_upload(preview_id: str, request: Optional[InventoryConfirmRequest] = None):
+    """Save previously previewed inventory data with optional inline edits."""
     try:
         cache_data = preview_cache_service.retrieve_preview(preview_id)
         if cache_data is None:
             raise HTTPException(status_code=404, detail="Preview expired")
 
         product_service = get_product_service()
-        inventory_service = get_inventory_service()
 
         # Retrieve cached data
         products_to_upsert = [ProductCreate(**p) for p in cache_data["products_to_upsert"]]
-        snapshots_to_create = [InventorySnapshotCreate(**s) for s in cache_data["snapshots_to_create"]]
+        snapshots_raw = cache_data["snapshots_to_create"]
+
+        # Apply modifications from inline editing
+        modifications = request.modifications if request else []
+        deletions = request.deletions if request else []
+
+        if modifications:
+            mod_map = {m.product_id: m for m in modifications}
+            for snap_dict in snapshots_raw:
+                pid = snap_dict.get("product_id", "")
+                if pid in mod_map:
+                    mod = mod_map[pid]
+                    if mod.warehouse_qty is not None:
+                        snap_dict["warehouse_qty"] = float(mod.warehouse_qty)
+                    if mod.in_transit_qty is not None:
+                        snap_dict["in_transit_qty"] = float(mod.in_transit_qty)
+            logger.info("inventory_modifications_applied", count=len(modifications))
+
+        # Apply deletions (exclude rows by product_id)
+        if deletions:
+            deletion_set = set(deletions)
+            snapshots_raw = [
+                s for s in snapshots_raw
+                if s.get("product_id", "") not in deletion_set
+            ]
+            logger.info("inventory_deletions_applied", count=len(deletions))
+
+        snapshots_to_create = [InventorySnapshotCreate(**s) for s in snapshots_raw]
 
         # Bulk upsert auto-created products
         if products_to_upsert:
@@ -366,6 +395,8 @@ async def confirm_inventory_upload(preview_id: str):
             "inventory_confirm_complete",
             preview_id=preview_id,
             records_created=len(snapshots_to_create),
+            modifications_count=len(modifications),
+            deletions_count=len(deletions),
         )
 
         return InventoryUploadResponse(

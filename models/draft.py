@@ -45,6 +45,10 @@ class DraftItemCreate(BaseSchema):
         None,
         description="Optional notes for this line item"
     )
+    snapshot_data: Optional[dict] = Field(
+        None,
+        description="Snapshot of OB state at save time for change detection"
+    )
 
 
 class DraftItemResponse(BaseSchema, TimestampMixin):
@@ -60,6 +64,10 @@ class DraftItemResponse(BaseSchema, TimestampMixin):
     selected_pallets: int = Field(..., description="Number of pallets selected")
     bl_number: Optional[int] = Field(None, description="BL number assignment")
     notes: Optional[str] = Field(None, description="Optional notes for this line item")
+    snapshot_data: Optional[dict] = Field(
+        None,
+        description="Snapshot of OB state at save time for change detection"
+    )
 
 
 class DraftSave(BaseSchema):

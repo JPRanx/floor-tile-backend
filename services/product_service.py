@@ -219,6 +219,49 @@ class ProductService:
             logger.error("get_all_active_tiles_failed", error=str(e))
             raise DatabaseError("select", str(e))
 
+    def get_active_products_for_factory(self, factory_id: str) -> list[ProductResponse]:
+        """
+        Get all active products for a specific factory.
+
+        Unlike get_all_active_tiles() which filters by tile categories,
+        this returns ALL active products for the factory regardless of category.
+        Used for factory-aware order building (supports both tiles and furniture).
+
+        Args:
+            factory_id: Factory UUID
+
+        Returns:
+            List of active ProductResponse objects for the factory
+        """
+        logger.debug("getting_active_products_for_factory", factory_id=factory_id)
+
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .eq("factory_id", factory_id)
+                .eq("active", True)
+                .order("sku")
+                .execute()
+            )
+
+            products = [ProductResponse(**row) for row in result.data]
+
+            logger.debug(
+                "active_products_for_factory_retrieved",
+                factory_id=factory_id,
+                count=len(products),
+            )
+            return products
+
+        except Exception as e:
+            logger.error(
+                "get_active_products_for_factory_failed",
+                factory_id=factory_id,
+                error=str(e),
+            )
+            raise DatabaseError("select", str(e))
+
     def get_by_factory_code(self, factory_code: str) -> Optional[ProductResponse]:
         """
         Get a product by factory code.

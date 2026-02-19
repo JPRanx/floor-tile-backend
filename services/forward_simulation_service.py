@@ -24,6 +24,7 @@ from config.shipping import (
 )
 from models.boat_schedule import ORDER_DEADLINE_DAYS
 from services.factory_timeline_service import FACTORY_REQUEST_BUFFER_DAYS
+from services.unit_config_service import get_unit_config
 
 logger = structlog.get_logger(__name__)
 
@@ -83,6 +84,7 @@ class ForwardSimulationService:
 
             # Fetch all required data
             factory = self._get_factory(factory_id)
+            unit_config = get_unit_config(self.db, factory_id)
             real_boats = self._get_upcoming_boats(factory["origin_port"], today, horizon_end)
             routes = self._get_shipping_routes(factory["origin_port"])
             boats = _merge_with_phantom_boats(real_boats, routes, today, horizon_end)
@@ -128,6 +130,7 @@ class ForwardSimulationService:
                     production_pipeline=production_pipeline,
                     production_consumed=production_consumed,
                     in_transit_drafts=in_transit_drafts,
+                    unit_config=unit_config,
                 )
                 boat_projections.append(projection)
 
@@ -218,12 +221,18 @@ class ForwardSimulationService:
         production_pipeline: dict[str, list[dict]],
         production_consumed: set[str],
         in_transit_drafts: dict[str, list[dict]],
+        unit_config: Optional[dict] = None,
     ) -> dict:
         """
         Simulate a single boat: project stock at arrival, compute needs.
 
         Mutates *current_stock*, *factory_siesa_consumed*, *production_consumed*,
         and *in_transit_drafts* in place so subsequent boats see consumed supply.
+
+        Args:
+            unit_config: Factory unit configuration from get_unit_config().
+                When the factory is unit-based, pallet conversions use
+                per-product units_per_pallet instead of M2_PER_PALLET.
         """
         boat_id = boat["id"]
         arrival_date = _parse_date(boat["arrival_date"])
@@ -244,10 +253,20 @@ class ForwardSimulationService:
         total_pallets = 0
         urgency_counts = {"critical": 0, "urgent": 0, "soon": 0, "ok": 0}
 
+        # Determine if unit-based factory
+        is_unit_based = unit_config is not None and not unit_config.get("is_m2_based", True)
+
         for product in products:
             pid = product["id"]
             daily_vel = velocity_map.get(pid, Decimal("0"))
             stock = current_stock.get(pid, Decimal("0"))
+
+            # Per-product pallet divisor: units_per_pallet for furniture, M2_PER_PALLET for tiles
+            product_units_per_pallet = product.get("units_per_pallet")
+            if is_unit_based and product_units_per_pallet and product_units_per_pallet > 0:
+                pallet_divisor = Decimal(str(product_units_per_pallet))
+            else:
+                pallet_divisor = M2_PER_PALLET
 
             # --- SUPPLY EVENTS ---
             siesa_supply = Decimal("0")
@@ -314,7 +333,7 @@ class ForwardSimulationService:
                     Decimal("0"),
                     (daily_vel * coverage_target) - projected_stock,
                 )
-                suggested_pallets = math.ceil(coverage_gap_val / M2_PER_PALLET) if coverage_gap_val > 0 else 0
+                suggested_pallets = math.ceil(coverage_gap_val / pallet_divisor) if coverage_gap_val > 0 else 0
 
             total_pallets += suggested_pallets
 
@@ -354,8 +373,8 @@ class ForwardSimulationService:
 
             # Cascade: update running stock for next boat
             if suggested_pallets > 0:
-                filled_m2 = Decimal(suggested_pallets) * M2_PER_PALLET
-                current_stock[pid] = projected_stock + filled_m2
+                filled_qty = Decimal(suggested_pallets) * pallet_divisor
+                current_stock[pid] = projected_stock + filled_qty
             else:
                 current_stock[pid] = projected_stock
 
@@ -514,7 +533,7 @@ class ForwardSimulationService:
         try:
             result = (
                 self.db.table("products")
-                .select("id, sku")
+                .select("id, sku, units_per_pallet")
                 .eq("factory_id", factory_id)
                 .eq("active", True)
                 .execute()

@@ -32,6 +32,7 @@ from models.recommendation import (
 from services.boat_schedule_service import get_boat_schedule_service
 from services.production_schedule_service import get_production_schedule_service
 from config.shipping import M2_PER_PALLET
+from services.unit_config_service import get_unit_config
 
 logger = structlog.get_logger(__name__)
 
@@ -65,7 +66,9 @@ class RecommendationService:
         self.sales_weeks = settings.velocity_window_weeks  # 12 weeks default
         self.low_volume_min_records = settings.low_volume_min_records  # 2 records minimum
 
-    def allocate_warehouse_slots(self) -> tuple[list[ProductAllocation], Decimal]:
+    def allocate_warehouse_slots(
+        self, factory_id: Optional[str] = None
+    ) -> tuple[list[ProductAllocation], Decimal]:
         """
         Calculate target warehouse allocation for each product.
 
@@ -78,13 +81,40 @@ class RecommendationService:
 
         Optimized: Uses batch query for sales instead of N queries.
 
+        Args:
+            factory_id: Optional factory UUID. When provided and the factory
+                is unit-based, fetches products for that factory and uses
+                per-product units_per_pallet for pallet conversion.
+                When None, uses existing tile-only behavior.
+
         Returns:
             Tuple of (allocations list, scale_factor)
         """
-        logger.info("calculating_warehouse_allocations")
+        logger.info(
+            "calculating_warehouse_allocations",
+            factory_id=factory_id,
+        )
 
-        # Get all active tile products (excludes FURNITURE, SINK, SURCHARGE)
-        products = self.product_service.get_all_active_tiles()
+        # Determine if this is a unit-based factory
+        unit_config = None
+        if factory_id:
+            from config import get_supabase_client
+            unit_config = get_unit_config(get_supabase_client(), factory_id)
+
+        # Get products based on factory context
+        if factory_id and unit_config and not unit_config["is_m2_based"]:
+            # Unit-based factory (e.g., Muebles): get all products for this factory
+            products = self.product_service.get_active_products_for_factory(factory_id)
+            is_unit_based = True
+            logger.info(
+                "using_unit_based_products",
+                factory_id=factory_id,
+                product_count=len(products),
+            )
+        else:
+            # Standard tile behavior (default)
+            products = self.product_service.get_all_active_tiles()
+            is_unit_based = False
 
         # Get recent sales for ALL products in ONE query (was N queries!)
         sales_by_product = self.sales_service.get_recent_sales_all(
@@ -119,6 +149,7 @@ class RecommendationService:
                 continue
 
             # Calculate weekly velocity and std_dev
+            # For unit-based products, quantity_m2 actually holds unit counts
             weekly_sales = [Decimal(str(s.quantity_m2)) for s in sales_history]
             total_sales = sum(weekly_sales)
             weekly_velocity = total_sales / weeks_of_data
@@ -136,7 +167,14 @@ class RecommendationService:
             base_stock = daily_velocity * self.lead_time
             safety_stock = std_dev * Z_SCORE * lead_time_sqrt
             target_m2 = base_stock + safety_stock
-            target_pallets = target_m2 / M2_PER_PALLET
+
+            # Pallet conversion: use per-product units_per_pallet for unit-based
+            if is_unit_based and product.units_per_pallet and product.units_per_pallet > 0:
+                pallet_divisor = Decimal(str(product.units_per_pallet))
+            else:
+                pallet_divisor = M2_PER_PALLET
+
+            target_pallets = target_m2 / pallet_divisor
 
             allocations.append(ProductAllocation(
                 product_id=product.id,
@@ -178,7 +216,8 @@ class RecommendationService:
             "allocations_calculated",
             products=len(allocations),
             total_pallets=float(total_target_pallets),
-            scale_factor=float(scale_factor)
+            scale_factor=float(scale_factor),
+            is_unit_based=is_unit_based,
         )
 
         return allocations, scale_factor

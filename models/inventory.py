@@ -233,7 +233,8 @@ class BulkInventoryCreate(BaseSchema):
 
 
 class InventoryPreviewRow(BaseSchema):
-    """Sample row shown in inventory preview."""
+    """Row shown in inventory preview (includes product_id for editing)."""
+    product_id: str
     sku: str
     warehouse_qty: float
     in_transit_qty: float = 0
@@ -251,5 +252,20 @@ class InventoryPreview(BaseSchema):
     zero_filled_count: int = 0
     zero_filled_products: list[str] = Field(default_factory=list, description="SKUs that will get zero-quantity records")
     warnings: list[str] = Field(default_factory=list)
-    sample_rows: list[InventoryPreviewRow] = Field(default_factory=list)
+    rows: list[InventoryPreviewRow] = Field(default_factory=list, description="All rows for editing")
+    sample_rows: list[InventoryPreviewRow] = Field(default_factory=list, description="Deprecated: use rows instead")
     expires_in_minutes: int = 30
+
+
+class InventoryModification(BaseSchema):
+    """A single row modification during preview editing."""
+    product_id: str = Field(..., description="Product UUID to modify")
+    warehouse_qty: Optional[float] = Field(None, ge=0, description="New warehouse quantity (m²)")
+    in_transit_qty: Optional[float] = Field(None, ge=0, description="New in-transit quantity (m²)")
+
+
+class InventoryConfirmRequest(BaseSchema):
+    """Confirm inventory upload with optional edits."""
+    preview_id: str
+    modifications: list[InventoryModification] = Field(default_factory=list)
+    deletions: list[str] = Field(default_factory=list, description="Product IDs to exclude from import")
