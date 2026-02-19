@@ -23,7 +23,6 @@ from config.shipping import (
     ORDERING_CYCLE_DAYS,
 )
 from models.boat_schedule import ORDER_DEADLINE_DAYS
-from services.factory_timeline_service import FACTORY_REQUEST_BUFFER_DAYS
 from services.unit_config_service import get_unit_config
 
 logger = structlog.get_logger(__name__)
@@ -180,12 +179,24 @@ class ForwardSimulationService:
                     else:
                         proj["review_reason"] = "Borrador necesita revision"
 
+            # Factory order signal
+            factory_order_signal = self._compute_factory_order_signal(
+                factory=factory,
+                products=products,
+                inventory_map=inventory_map,
+                velocity_map=velocity_map,
+                production_pipeline=production_pipeline,
+                factory_id=factory_id,
+                today=today,
+            )
+
             result = {
                 "factory_id": factory_id,
                 "factory_name": factory.get("name", ""),
                 "horizon_months": months,
                 "generated_at": today.isoformat(),
                 "projections": boat_projections,
+                "factory_order_signal": factory_order_signal,
             }
 
             logger.info(
@@ -399,10 +410,6 @@ class ForwardSimulationService:
         # Dual deadline system for Planning View
         # SIESA order deadline: finalize what to pick from SIESA warehouse (departure - 20d)
         siesa_order_by = departure_date - timedelta(days=ORDER_DEADLINE_DAYS)
-        # Production request deadline: request new factory production (departure - lead - transport - buffer)
-        production_request_by = departure_date - timedelta(
-            days=production_lead + transport_to_port + FACTORY_REQUEST_BUFFER_DAYS
-        )
 
         # Sort product details by urgency (critical first)
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
@@ -449,8 +456,8 @@ class ForwardSimulationService:
             "days_until_shipping_deadline": (shipping_book_by - today).days,
             "siesa_order_date": siesa_order_by.isoformat(),
             "days_until_siesa_deadline": (siesa_order_by - today).days,
-            "production_request_date": production_request_by.isoformat(),
-            "days_until_production_deadline": (production_request_by - today).days,
+            "production_request_date": None,
+            "days_until_production_deadline": None,
             "product_details": product_details,
             "draft_bl_items": draft_bl_items,
             "has_bl_allocation": has_bl_allocation,
@@ -478,6 +485,136 @@ class ForwardSimulationService:
                 Decimal(str(d.get("supply_breakdown", {}).get("production_pipeline_m2", 0)))
                 for d in product_details
             )),
+        }
+
+    # ------------------------------------------------------------------
+    # Factory order signal
+    # ------------------------------------------------------------------
+
+    def _get_committed_to_ship(self, factory_id: str) -> dict[str, Decimal]:
+        """
+        Get total m² committed to ordered/confirmed boats per product.
+
+        These are goods already "spoken for" — picked from SIESA for specific boats.
+        """
+        try:
+            # Get all ordered/confirmed drafts for this factory
+            drafts_result = (
+                self.db.table("boat_factory_drafts")
+                .select("id")
+                .eq("factory_id", factory_id)
+                .in_("status", ["ordered", "confirmed"])
+                .execute()
+            )
+            if not drafts_result.data:
+                return {}
+
+            draft_ids = [d["id"] for d in drafts_result.data]
+
+            # Get all items for those drafts
+            items_result = (
+                self.db.table("draft_items")
+                .select("product_id, selected_pallets")
+                .in_("draft_id", draft_ids)
+                .execute()
+            )
+
+            # Sum m² per product
+            committed: dict[str, Decimal] = defaultdict(Decimal)
+            for item in items_result.data:
+                committed[item["product_id"]] += Decimal(str(item["selected_pallets"])) * M2_PER_PALLET
+
+            return dict(committed)
+        except Exception as e:
+            logger.error("fetch_committed_to_ship_failed", error=str(e))
+            return {}
+
+    def _compute_factory_order_signal(
+        self,
+        factory: dict,
+        products: list[dict],
+        inventory_map: dict[str, dict],
+        velocity_map: dict[str, Decimal],
+        production_pipeline: dict[str, list[dict]],
+        factory_id: str,
+        today: date,
+    ) -> Optional[dict]:
+        """
+        Compute when the next factory production order needs to be placed.
+
+        Formula per product:
+            in_production_remaining = SUM(requested_m2 - completed_m2)
+                                      WHERE status IN ('scheduled', 'in_progress')
+            effective_siesa = siesa_stock + in_production_remaining - committed_to_ship
+            siesa_coverage_days = effective_siesa / daily_velocity
+            siesa_runs_out = today + siesa_coverage_days
+            lead_time = production_lead + transport_to_port
+            next_factory_order = siesa_runs_out - lead_time
+
+        Return the earliest date across all products.
+        """
+        committed_map = self._get_committed_to_ship(factory_id)
+
+        production_lead = int(factory.get("production_lead_days", 0))
+        transport_to_port = int(factory.get("transport_to_port_days", 0))
+        lead_time = production_lead + transport_to_port
+
+        earliest_order_date: Optional[date] = None
+        limiting_sku: Optional[str] = None
+        min_coverage_days: Optional[int] = None
+
+        for product in products:
+            pid = product["id"]
+            daily_vel = velocity_map.get(pid, Decimal("0"))
+            if daily_vel <= 0:
+                continue  # No velocity — can't compute coverage
+
+            # SIESA stock
+            inv = inventory_map.get(pid, {})
+            siesa_stock = Decimal(str(inv.get("factory_available_m2", 0) or 0))
+
+            # In production remaining
+            in_production = Decimal("0")
+            for prow in production_pipeline.get(pid, []):
+                if prow["status"] in ("scheduled", "in_progress"):
+                    req = Decimal(str(prow["requested_m2"] or 0))
+                    comp = Decimal(str(prow["completed_m2"] or 0))
+                    remaining = max(Decimal("0"), req - comp)
+                    in_production += remaining
+
+            # Committed to ship (ordered/confirmed drafts)
+            committed = committed_map.get(pid, Decimal("0"))
+
+            # Effective supply
+            effective = siesa_stock + in_production - committed
+            if effective < 0:
+                effective = Decimal("0")
+
+            # Coverage days
+            coverage_days = int(effective / daily_vel)
+
+            # When does SIESA run out?
+            runs_out = today + timedelta(days=coverage_days)
+
+            # When to order: runs_out - lead_time
+            order_by = runs_out - timedelta(days=lead_time)
+
+            if earliest_order_date is None or order_by < earliest_order_date:
+                earliest_order_date = order_by
+                limiting_sku = product.get("sku", "")
+                min_coverage_days = coverage_days
+
+        if earliest_order_date is None:
+            return None
+
+        days_until = (earliest_order_date - today).days
+
+        return {
+            "next_order_date": earliest_order_date.isoformat(),
+            "days_until_order": days_until,
+            "is_overdue": days_until < 0,
+            "limiting_product_sku": limiting_sku,
+            "effective_coverage_days": min_coverage_days,
         }
 
     # ------------------------------------------------------------------

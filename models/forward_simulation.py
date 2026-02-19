@@ -215,6 +215,23 @@ class BoatProjection(BaseSchema):
     )
 
 
+class FactoryOrderSignal(BaseSchema):
+    """Factory-level signal for when to place the next production order."""
+    next_order_date: Optional[str] = Field(
+        None, description="Date by which next factory order should be placed (ISO)"
+    )
+    days_until_order: Optional[int] = Field(
+        None, description="Days until next factory order (negative = overdue)"
+    )
+    is_overdue: bool = Field(False, description="True if the factory order is overdue")
+    limiting_product_sku: Optional[str] = Field(
+        None, description="SKU of the product that drives the earliest order date"
+    )
+    effective_coverage_days: Optional[int] = Field(
+        None, description="Days of factory supply remaining (before lead time adjustment)"
+    )
+
+
 class PlanningHorizonResponse(BaseSchema):
     """
     Full planning horizon response for a single factory.
@@ -233,4 +250,7 @@ class PlanningHorizonResponse(BaseSchema):
     projections: list[BoatProjection] = Field(
         default_factory=list,
         description="Projected boats in chronological order"
+    )
+    factory_order_signal: Optional[FactoryOrderSignal] = Field(
+        None, description="Factory-level production order signal"
     )
