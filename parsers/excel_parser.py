@@ -17,7 +17,7 @@ import structlog
 import pandas as pd
 
 from exceptions import ExcelParseError
-from utils.text_utils import PRODUCT_ALIASES
+from utils.text_utils import PRODUCT_ALIASES, normalize_product_name
 
 logger = structlog.get_logger(__name__)
 
@@ -198,7 +198,7 @@ def parse_owner_excel(
                 logger.info("matched_sheet_with_trailing_space", original=actual_sheet, stripped=stripped)
                 break
 
-    # If still not found, check if any sheet has movement-tracking inventory content
+    # If still not found, check if any sheet has movement-tracking or lot-level inventory content
     # (handles generic names like "Hoja 1", "Sheet1")
     if not matched_sheet:
         for actual_sheet in excel.sheet_names:
@@ -206,12 +206,19 @@ def parse_owner_excel(
                 matched_sheet = actual_sheet
                 logger.info("matched_inventory_by_content_detection", sheet=actual_sheet)
                 break
+            if _is_lot_format(excel, actual_sheet):
+                matched_sheet = actual_sheet
+                logger.info("matched_inventory_by_lot_detection", sheet=actual_sheet)
+                break
 
     if matched_sheet:
-        # Detect if this is movement-tracking format
+        # Detect format and parse accordingly
         if _is_movement_tracking_format(excel, matched_sheet):
             logger.info("detected_movement_tracking_format", sheet=matched_sheet)
             _parse_movement_tracking_sheet(excel, known_owner_codes, result, sheet_name=matched_sheet, known_sku_names=known_sku_names)
+        elif _is_lot_format(excel, matched_sheet):
+            logger.info("detected_lot_format", sheet=matched_sheet)
+            _parse_lot_sheet(excel, known_owner_codes, result, sheet_name=matched_sheet, known_sku_names=known_sku_names)
         else:
             _parse_inventory_sheet(excel, known_owner_codes, result, sheet_name=matched_sheet, known_sku_names=known_sku_names)
         inventory_found = True
@@ -314,6 +321,10 @@ def extract_products_from_excel(
                 sheet_name = actual_sheet
                 logger.info("matched_inventory_by_content_detection", sheet=actual_sheet)
                 break
+            if _is_lot_format(excel, actual_sheet):
+                sheet_name = actual_sheet
+                logger.info("matched_inventory_by_lot_detection", sheet=actual_sheet)
+                break
 
     if not sheet_name:
         logger.warning("no_inventory_sheet_found_for_products")
@@ -325,10 +336,14 @@ def extract_products_from_excel(
         logger.error("failed_to_parse_inventory_sheet", error=str(e))
         return []
 
-    # Detect movement-tracking format and handle appropriately
+    # Detect format and handle appropriately
     if _is_movement_tracking_format(excel, sheet_name):
         logger.info("extracting_products_from_movement_tracking_format")
         return _extract_products_from_movement_tracking(excel, sheet_name)
+
+    if _is_lot_format(excel, sheet_name):
+        logger.info("extracting_products_from_lot_format")
+        return _extract_products_from_lot(excel, sheet_name)
 
     # Normalize column names
     df.columns = [_normalize_column(col) for col in df.columns]
@@ -706,6 +721,140 @@ def _is_movement_tracking_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
     return False
 
 
+def _is_lot_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
+    """
+    Detect if the sheet uses lot-level inventory format from SIESA/ERP export.
+
+    Known format:
+    - Row 0 (header): Referencia, Item, Desc. item, Peso en KG, Bodega, ..., U.M., Existencia, ...
+    - Key detection columns: "Existencia" and "Desc. item" and "Lote"
+    """
+    try:
+        df = excel.parse(sheet_name, header=None, nrows=2)
+        if len(df) == 0:
+            return False
+
+        row0_vals = [str(c).strip().lower() for c in df.iloc[0] if pd.notna(c)]
+        has_existencia = any("existencia" in v for v in row0_vals)
+        has_desc_item = any("desc. item" in v or "desc item" in v for v in row0_vals)
+        has_lote = any("lote" in v for v in row0_vals)
+
+        return has_existencia and has_desc_item and has_lote
+    except Exception as e:
+        logger.warning("lot_format_detection_failed", error=str(e))
+        return False
+
+
+def _parse_lot_sheet(
+    excel: pd.ExcelFile,
+    known_owner_codes: dict[str, str],
+    result: ExcelParseResult,
+    sheet_name: str,
+    known_sku_names: dict[str, str] = None,
+) -> None:
+    """
+    Parse lot-level inventory format.
+
+    Format: Referencia | Item | Desc. item | Peso en KG | Bodega | ... | U.M. | Existencia | Cant. comprometida | Cant. disponible
+    Multiple rows per product (one per lot). Sum Existencia per product.
+    """
+    df = excel.parse(sheet_name, dtype=str)
+    df.columns = [_normalize_column(col) for col in df.columns]
+
+    # Find key columns
+    desc_col = None
+    existencia_col = None
+    referencia_col = None
+    um_col = None
+
+    for col in df.columns:
+        if "desc" in col and "item" in col:
+            desc_col = col
+        elif col.strip() == "existencia":
+            existencia_col = col
+        elif col.strip() == "referencia":
+            referencia_col = col
+        elif col.strip() in ("u.m.", "um", "u.m"):
+            um_col = col
+
+    if not desc_col or not existencia_col:
+        logger.warning("lot_sheet_missing_columns", desc=desc_col, existencia=existencia_col)
+        result.errors.append(ParseError(
+            sheet=sheet_name, row=0, field="columns",
+            error="Missing required columns: 'Desc. item' and 'Existencia'"
+        ))
+        return
+
+    # Aggregate: sum Existencia per product (by Desc. item)
+    from collections import defaultdict
+    product_totals: dict[str, float] = defaultdict(float)
+    product_refs: dict[str, str] = {}  # desc -> referencia (owner_code)
+
+    for idx, row in df.iterrows():
+        desc = str(row.get(desc_col, "")).strip() if pd.notna(row.get(desc_col)) else ""
+        if not desc:
+            continue
+
+        existencia_raw = row.get(existencia_col)
+        if pd.isna(existencia_raw) or str(existencia_raw).strip() == "":
+            continue
+
+        try:
+            existencia = float(str(existencia_raw).strip().replace(",", ""))
+        except (ValueError, TypeError):
+            continue
+
+        product_totals[desc] += existencia
+
+        # Track referencia for owner_code matching
+        if referencia_col and pd.notna(row.get(referencia_col)):
+            ref = str(row.get(referencia_col)).strip()
+            if ref:
+                product_refs[desc] = ref
+
+    if not product_totals:
+        logger.warning("lot_sheet_no_data", sheet=sheet_name)
+        return
+
+    snapshot_date_val = date.today()
+
+    for desc, total_qty in product_totals.items():
+        product_id = None
+
+        # Try matching by referencia (owner_code)
+        ref = product_refs.get(desc, "")
+        if ref and ref in known_owner_codes:
+            product_id = known_owner_codes[ref]
+
+        # Try matching by normalized product name
+        if not product_id and known_sku_names:
+            normalized = normalize_product_name(desc)
+            if normalized and normalized in known_sku_names:
+                product_id = known_sku_names[normalized]
+
+        if not product_id:
+            result.errors.append(ParseError(
+                sheet=sheet_name, row=0, field="product",
+                error=f"Unknown product: {desc}"
+            ))
+            continue
+
+        result.inventory.append(InventoryRecord(
+            snapshot_date=snapshot_date_val,
+            sku=desc,
+            product_id=product_id,
+            warehouse_qty=total_qty,
+            in_transit_qty=0,
+        ))
+
+    logger.info(
+        "lot_sheet_parsed",
+        sheet=sheet_name,
+        products=len(result.inventory),
+        total_qty=sum(r.warehouse_qty for r in result.inventory),
+    )
+
+
 def _extract_date_from_header(df: pd.DataFrame) -> date:
     """
     Extract date from movement-tracking format headers.
@@ -961,6 +1110,56 @@ def _extract_products_from_movement_tracking(
         ))
 
     logger.info("products_extracted_from_movement_tracking", count=len(products))
+    return products
+
+
+def _extract_products_from_lot(
+    excel: pd.ExcelFile,
+    sheet_name: str,
+) -> list[ProductExtract]:
+    """
+    Extract unique products from lot-level inventory format.
+
+    Format: Referencia | Item | Desc. item | ... | TIPO | CERAMICA/FORMATO | CERAMICA/CALIDAD
+    """
+    try:
+        df = excel.parse(sheet_name, dtype=str)
+    except Exception as e:
+        logger.error("failed_to_parse_lot_sheet_for_extract", error=str(e))
+        return []
+
+    df.columns = [_normalize_column(col) for col in df.columns]
+
+    # Find desc column
+    desc_col = None
+    for col in df.columns:
+        if "desc" in col and "item" in col:
+            desc_col = col
+            break
+
+    if not desc_col:
+        return []
+
+    products_seen: set[str] = set()
+    products: list[ProductExtract] = []
+
+    for _, row in df.iterrows():
+        desc = str(row.get(desc_col, "")).strip() if pd.notna(row.get(desc_col)) else ""
+        if not desc:
+            continue
+
+        normalized = _normalize_sku_name(desc)
+        if normalized in products_seen:
+            continue
+        products_seen.add(normalized)
+
+        products.append(ProductExtract(
+            sku=normalized,
+            category="MADERAS",
+            rotation=None,
+        ))
+
+    logger.info("products_extracted_from_lot_format", count=len(products))
     return products
 
 
