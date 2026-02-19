@@ -407,9 +407,9 @@ class ForwardSimulationService:
         # Shipping booking deadline: latest date to book container space
         shipping_book_by = departure_date - timedelta(days=transport_to_port)
 
-        # Dual deadline system for Planning View
         # SIESA order deadline: finalize what to pick from SIESA warehouse (departure - 20d)
-        siesa_order_by = departure_date - timedelta(days=ORDER_DEADLINE_DAYS)
+        # Unit-based factories (e.g. Muebles) have no SIESA step — skip deadline
+        siesa_order_by = None if is_unit_based else departure_date - timedelta(days=ORDER_DEADLINE_DAYS)
 
         # Sort product details by urgency (critical first)
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
@@ -454,8 +454,8 @@ class ForwardSimulationService:
             "days_until_order_deadline": (factory_order_by - today).days,
             "shipping_book_by_date": shipping_book_by.isoformat(),
             "days_until_shipping_deadline": (shipping_book_by - today).days,
-            "siesa_order_date": siesa_order_by.isoformat(),
-            "days_until_siesa_deadline": (siesa_order_by - today).days,
+            "siesa_order_date": siesa_order_by.isoformat() if siesa_order_by else None,
+            "days_until_siesa_deadline": (siesa_order_by - today).days if siesa_order_by else None,
             "production_request_date": None,
             "days_until_production_deadline": None,
             "product_details": product_details,

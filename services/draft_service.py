@@ -301,14 +301,20 @@ class DraftService:
                 "draft_id", draft_id
             ).execute()
 
+            # Auto-assign BL 1 for unit-based factories (e.g. Muebles — low volume, no container split)
+            auto_bl = self._is_unit_based_factory(factory_id)
+
             if items:
                 rows = []
                 for item in items:
+                    bl = item.get("bl_number")
+                    if bl is None and auto_bl:
+                        bl = 1
                     item_data = {
                         "draft_id": draft_id,
                         "product_id": item["product_id"],
                         "selected_pallets": item["selected_pallets"],
-                        "bl_number": item.get("bl_number"),
+                        "bl_number": bl,
                         "notes": item.get("notes"),
                     }
                     if item.get("snapshot_data") is not None:
@@ -337,6 +343,21 @@ class DraftService:
                 error=str(e),
             )
             raise DatabaseError("upsert", str(e))
+
+    def _is_unit_based_factory(self, factory_id: str) -> bool:
+        """Check if factory is unit-based (e.g. Muebles) vs m2-based (floor tiles)."""
+        try:
+            result = (
+                self.db.table("factories")
+                .select("unit_type")
+                .eq("id", factory_id)
+                .execute()
+            )
+            if result.data:
+                return result.data[0].get("unit_type") == "units"
+        except Exception:
+            pass
+        return False
 
     def update_status(self, draft_id: str, status: str) -> dict:
         """
