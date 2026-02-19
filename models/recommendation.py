@@ -12,6 +12,7 @@ from datetime import date
 from enum import Enum
 
 from models.base import BaseSchema
+from models.product_pairing import PairedProductInfo
 
 
 class RecommendationPriority(str, Enum):
@@ -63,6 +64,16 @@ class ProductAllocation(BaseSchema):
     scaled_target_m2: Optional[Decimal] = None
     scaled_target_pallets: Optional[Decimal] = None
     scale_factor: Optional[Decimal] = None
+
+    # Product pairing info (mueble <-> lavamano)
+    paired_products: list[PairedProductInfo] = Field(
+        default_factory=list,
+        description="Paired products (e.g., lavamano for mueble)",
+    )
+    has_pairing_mismatch: bool = Field(
+        default=False,
+        description="True if paired inventory is mismatched",
+    )
 
 
 class ConfidenceLevel(str, Enum):
@@ -127,6 +138,16 @@ class ProductRecommendation(BaseSchema):
     next_production_date: Optional[date] = Field(None, description="Next scheduled production date")
     production_before_stockout: Optional[bool] = Field(None, description="Whether production is scheduled before stockout")
     production_covers_gap: Optional[bool] = Field(None, description="Whether production will cover the coverage gap")
+
+    # Product pairing info (mueble <-> lavamano)
+    paired_products: list[PairedProductInfo] = Field(
+        default_factory=list,
+        description="Paired products (e.g., lavamano for mueble)",
+    )
+    has_pairing_mismatch: bool = Field(
+        default=False,
+        description="True if paired inventory is mismatched",
+    )
 
     # Priority and action
     priority: RecommendationPriority

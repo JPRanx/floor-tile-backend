@@ -29,6 +29,7 @@ from models.recommendation import (
     OrderRecommendations,
     ConfidenceLevel,
 )
+from models.product_pairing import PairedProductInfo
 from services.boat_schedule_service import get_boat_schedule_service
 from services.production_schedule_service import get_production_schedule_service
 from config.shipping import M2_PER_PALLET
@@ -124,6 +125,9 @@ class RecommendationService:
         # Pre-fetch unfulfilled demand for all products (one query)
         unfulfilled_totals = self._get_unfulfilled_demand_all(lookback_days=90)
 
+        # Pre-fetch committed orders for all products (one query)
+        committed_totals = self._get_committed_orders_all()
+
         allocations = []
         lead_time_sqrt = Decimal(str(sqrt(self.lead_time)))
 
@@ -176,6 +180,17 @@ class RecommendationService:
             safety_stock = std_dev * Z_SCORE * lead_time_sqrt
             target_m2 = base_stock + safety_stock
 
+            # Committed orders floor: if committed > velocity-based, use committed
+            committed_qty = committed_totals.get(product.id, Decimal("0"))
+            if committed_qty > target_m2:
+                logger.debug(
+                    "committed_orders_floor_applied",
+                    product_id=product.id,
+                    velocity_target=float(target_m2),
+                    committed_qty=float(committed_qty),
+                )
+                target_m2 = committed_qty
+
             # Pallet conversion: use per-product units_per_pallet for unit-based
             if is_unit_based and product.units_per_pallet and product.units_per_pallet > 0:
                 pallet_divisor = Decimal(str(product.units_per_pallet))
@@ -219,6 +234,9 @@ class RecommendationService:
                 alloc.scale_factor = round(scale_factor, 4)
         else:
             scale_factor = Decimal("1")
+
+        # Enrich allocations with product pairing info (mueble <-> lavamano)
+        self._enrich_allocations_with_pairings(allocations)
 
         logger.info(
             "allocations_calculated",
@@ -350,6 +368,9 @@ class RecommendationService:
                     next_production_date=prod_date,
                     production_before_stockout=None,
                     production_covers_gap=None,
+                    # Product pairing info
+                    paired_products=alloc.paired_products,
+                    has_pairing_mismatch=alloc.has_pairing_mismatch,
                     priority=RecommendationPriority.YOUR_CALL,
                     action_type=ActionType.REVIEW,
                     action="Needs manual review — no sales history",
@@ -472,6 +493,9 @@ class RecommendationService:
                     next_production_date=prod_date,
                     production_before_stockout=prod_before_stockout,
                     production_covers_gap=prod_covers_gap,
+                    # Product pairing info
+                    paired_products=alloc.paired_products,
+                    has_pairing_mismatch=alloc.has_pairing_mismatch,
                     priority=RecommendationPriority.WELL_COVERED,
                     action_type=ActionType.SKIP_ORDER,
                     action=f"{excess_pallets} pallets above target — skip this cycle",
@@ -578,6 +602,9 @@ class RecommendationService:
                     next_production_date=prod_date,
                     production_before_stockout=prod_before_stockout,
                     production_covers_gap=prod_covers_gap,
+                    # Product pairing info
+                    paired_products=alloc.paired_products,
+                    has_pairing_mismatch=alloc.has_pairing_mismatch,
                     priority=RecommendationPriority.WELL_COVERED,
                     action_type=ActionType.WELL_STOCKED,
                     action=f"{weeks_of_stock} weeks of inventory — no action needed",
@@ -663,6 +690,9 @@ class RecommendationService:
                 next_production_date=prod_date,
                 production_before_stockout=prod_before_stockout,
                 production_covers_gap=prod_covers_gap,
+                # Product pairing info
+                paired_products=alloc.paired_products,
+                has_pairing_mismatch=alloc.has_pairing_mismatch,
                 # Priority and action
                 priority=priority,
                 action_type=action_type,
@@ -786,6 +816,207 @@ class RecommendationService:
 
         return result
 
+    def _get_product_pairings(self) -> dict[str, list[dict]]:
+        """
+        Fetch active product pairings from the product_pairings table.
+
+        Joins with products to get paired product SKU.
+
+        Returns:
+            Dict mapping product_id -> list of pairing info dicts:
+            [{"paired_product_id": str, "paired_sku": str, "ratio": Decimal}]
+        """
+        try:
+            from config import get_supabase_client
+            db_client = get_supabase_client()
+
+            result = (
+                db_client.table("product_pairings")
+                .select("product_id, paired_product_id, ratio, products!product_pairings_paired_product_id_fkey(sku)")
+                .eq("active", True)
+                .execute()
+            )
+
+            pairings: dict[str, list[dict]] = {}
+            for row in result.data or []:
+                pid = row["product_id"]
+                paired_sku = ""
+                products_data = row.get("products")
+                if products_data and isinstance(products_data, dict):
+                    paired_sku = products_data.get("sku", "")
+
+                entry = {
+                    "paired_product_id": row["paired_product_id"],
+                    "paired_sku": paired_sku,
+                    "ratio": Decimal(str(row["ratio"])),
+                }
+
+                if pid not in pairings:
+                    pairings[pid] = []
+                pairings[pid].append(entry)
+
+            if pairings:
+                logger.info(
+                    "product_pairings_loaded",
+                    products_with_pairings=len(pairings),
+                    total_pairings=sum(len(v) for v in pairings.values()),
+                )
+
+            return pairings
+
+        except Exception as e:
+            logger.warning("product_pairings_load_failed", error=str(e))
+            return {}
+
+    def _get_inventory_for_products(self, product_ids: list[str]) -> dict[str, dict]:
+        """
+        Fetch current inventory for specific product IDs.
+
+        Uses the inventory_current view for latest warehouse and transit quantities.
+
+        Args:
+            product_ids: List of product UUIDs to query
+
+        Returns:
+            Dict mapping product_id -> {"warehouse_qty": Decimal, "in_transit_qty": Decimal}
+        """
+        if not product_ids:
+            return {}
+
+        try:
+            from config import get_supabase_client
+            db_client = get_supabase_client()
+
+            result = (
+                db_client.table("inventory_current")
+                .select("product_id, warehouse_qty, in_transit_qty")
+                .in_("product_id", product_ids)
+                .execute()
+            )
+
+            inventory: dict[str, dict] = {}
+            for row in result.data or []:
+                inventory[row["product_id"]] = {
+                    "warehouse_qty": Decimal(str(row.get("warehouse_qty") or 0)),
+                    "in_transit_qty": Decimal(str(row.get("in_transit_qty") or 0)),
+                }
+
+            return inventory
+
+        except Exception as e:
+            logger.warning("inventory_for_products_load_failed", error=str(e))
+            return {}
+
+    def _enrich_allocations_with_pairings(
+        self,
+        allocations: list[ProductAllocation],
+    ) -> None:
+        """
+        Enrich allocations with product pairing info (mueble <-> lavamano).
+
+        Mutates allocations in place: sets paired_products and has_pairing_mismatch.
+        Also enforces lavamano quantity: if total mueble allocation exceeds
+        lavamano allocation, bumps lavamano up to match.
+
+        Args:
+            allocations: List of ProductAllocation to enrich (mutated in place)
+        """
+        pairings = self._get_product_pairings()
+        if not pairings:
+            return
+
+        # Collect all paired product IDs to fetch inventory in one batch
+        all_paired_ids: set[str] = set()
+        for pairing_list in pairings.values():
+            for p in pairing_list:
+                all_paired_ids.add(p["paired_product_id"])
+
+        # Also collect the primary product IDs that have pairings
+        primary_ids_with_pairings = set(pairings.keys())
+
+        # Fetch inventory for both primary and paired products
+        all_ids_to_fetch = list(all_paired_ids | primary_ids_with_pairings)
+        inventory_map = self._get_inventory_for_products(all_ids_to_fetch)
+
+        # Build allocation lookup by product_id
+        alloc_map = {a.product_id: a for a in allocations}
+
+        # Track total mueble target by paired product (for lavamano enforcement)
+        # Key: paired_product_id, Value: total target units from all muebles paired to it
+        paired_demand: dict[str, Decimal] = {}
+
+        for alloc in allocations:
+            if alloc.product_id not in pairings:
+                continue
+
+            primary_inv = inventory_map.get(alloc.product_id, {})
+            primary_warehouse = primary_inv.get("warehouse_qty", Decimal("0"))
+
+            paired_infos: list[PairedProductInfo] = []
+
+            for pairing in pairings[alloc.product_id]:
+                paired_pid = pairing["paired_product_id"]
+                paired_inv = inventory_map.get(paired_pid, {})
+                paired_warehouse = paired_inv.get("warehouse_qty", Decimal("0"))
+                paired_in_transit = paired_inv.get("in_transit_qty", Decimal("0"))
+                ratio = pairing["ratio"]
+
+                # Check inventory mismatch: primary_qty * ratio vs paired_qty
+                expected_paired = primary_warehouse * ratio
+                mismatch = paired_warehouse < expected_paired
+                mismatch_detail = None
+                if mismatch:
+                    mismatch_detail = (
+                        f"{int(primary_warehouse)} {alloc.sku} but only "
+                        f"{int(paired_warehouse)} {pairing['paired_sku']}"
+                    )
+
+                paired_infos.append(PairedProductInfo(
+                    paired_product_id=paired_pid,
+                    paired_sku=pairing["paired_sku"],
+                    ratio=ratio,
+                    paired_warehouse_qty=round(paired_warehouse, 2),
+                    paired_in_transit_qty=round(paired_in_transit, 2),
+                    inventory_mismatch=mismatch,
+                    mismatch_detail=mismatch_detail,
+                ))
+
+                # Accumulate demand for lavamano enforcement
+                # Use the effective target (scaled or unscaled)
+                effective_target = alloc.scaled_target_m2 or alloc.target_m2
+                required_paired = effective_target * ratio
+                paired_demand[paired_pid] = paired_demand.get(
+                    paired_pid, Decimal("0")
+                ) + required_paired
+
+            alloc.paired_products = paired_infos
+            alloc.has_pairing_mismatch = any(p.inventory_mismatch for p in paired_infos)
+
+        # Lavamano quantity enforcement:
+        # If total mueble target exceeds lavamano target, bump lavamano up
+        for paired_pid, total_required in paired_demand.items():
+            paired_alloc = alloc_map.get(paired_pid)
+            if not paired_alloc:
+                continue
+
+            effective_target = paired_alloc.scaled_target_m2 or paired_alloc.target_m2
+            if total_required > effective_target:
+                old_target = effective_target
+                # Bump the target to match demand
+                if paired_alloc.scaled_target_m2 is not None:
+                    paired_alloc.scaled_target_m2 = round(total_required, 2)
+                else:
+                    paired_alloc.target_m2 = round(total_required, 2)
+
+                logger.info(
+                    "lavamano_target_bumped",
+                    product_id=paired_pid,
+                    sku=paired_alloc.sku,
+                    old_target=float(old_target),
+                    new_target=float(total_required),
+                    reason="Total mueble demand exceeds lavamano allocation",
+                )
+
     def _get_unfulfilled_demand_all(self, lookback_days: int = 90) -> dict[str, Decimal]:
         """
         Fetch unfulfilled demand totals for all products in one query.
@@ -825,6 +1056,62 @@ class RecommendationService:
 
         except Exception as e:
             logger.warning("unfulfilled_demand_load_failed", error=str(e))
+            return {}
+
+    def _get_committed_orders_all(self) -> dict[str, Decimal]:
+        """
+        Fetch latest committed order quantities for all products in one query.
+
+        Returns the most recent committed quantity per product (latest snapshot_date).
+        Used as a floor for the order target: target = max(velocity_based, committed).
+
+        Returns:
+            Dict mapping product_id to committed quantity
+        """
+        try:
+            from config import get_supabase_client
+            db_client = get_supabase_client()
+
+            # Get most recent snapshot_date
+            latest_result = (
+                db_client.table("committed_orders")
+                .select("snapshot_date")
+                .order("snapshot_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+            if not latest_result.data:
+                return {}
+
+            latest_date = latest_result.data[0]["snapshot_date"]
+
+            # Get all committed orders for that date
+            result = (
+                db_client.table("committed_orders")
+                .select("product_id, quantity_committed")
+                .eq("snapshot_date", latest_date)
+                .execute()
+            )
+
+            totals: dict[str, Decimal] = {}
+            for r in result.data or []:
+                pid = r["product_id"]
+                qty = Decimal(str(r["quantity_committed"]))
+                if qty > 0:
+                    totals[pid] = totals.get(pid, Decimal("0")) + qty
+
+            if totals:
+                logger.info(
+                    "committed_orders_loaded",
+                    products_with_commitments=len(totals),
+                    snapshot_date=latest_date,
+                )
+
+            return totals
+
+        except Exception as e:
+            logger.warning("committed_orders_load_failed", error=str(e))
             return {}
 
     def _adjust_velocity_with_unfulfilled(
