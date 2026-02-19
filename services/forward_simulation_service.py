@@ -22,6 +22,8 @@ from config.shipping import (
     WAREHOUSE_BUFFER_DAYS,
     ORDERING_CYCLE_DAYS,
 )
+from models.boat_schedule import ORDER_DEADLINE_DAYS
+from services.factory_timeline_service import FACTORY_REQUEST_BUFFER_DAYS
 
 logger = structlog.get_logger(__name__)
 
@@ -372,6 +374,14 @@ class ForwardSimulationService:
         # Shipping booking deadline: latest date to book container space
         shipping_book_by = departure_date - timedelta(days=transport_to_port)
 
+        # Dual deadline system for Planning View
+        # SIESA order deadline: finalize what to pick from SIESA warehouse (departure - 20d)
+        siesa_order_by = departure_date - timedelta(days=ORDER_DEADLINE_DAYS)
+        # Production request deadline: request new factory production (departure - lead - transport - buffer)
+        production_request_by = departure_date - timedelta(
+            days=production_lead + transport_to_port + FACTORY_REQUEST_BUFFER_DAYS
+        )
+
         # Sort product details by urgency (critical first)
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
         product_details.sort(key=lambda d: urgency_order.get(d["urgency"], 99))
@@ -415,6 +425,10 @@ class ForwardSimulationService:
             "days_until_order_deadline": (factory_order_by - today).days,
             "shipping_book_by_date": shipping_book_by.isoformat(),
             "days_until_shipping_deadline": (shipping_book_by - today).days,
+            "siesa_order_date": siesa_order_by.isoformat(),
+            "days_until_siesa_deadline": (siesa_order_by - today).days,
+            "production_request_date": production_request_by.isoformat(),
+            "days_until_production_deadline": (production_request_by - today).days,
             "product_details": product_details,
             "draft_bl_items": draft_bl_items,
             "has_bl_allocation": has_bl_allocation,
@@ -484,6 +498,7 @@ class ForwardSimulationService:
                 .eq("origin_port", origin_port)
                 .gt("departure_date", start.isoformat())
                 .lt("departure_date", end.isoformat())
+                .in_("status", ["available", "booked"])
                 .order("departure_date")
                 .execute()
             )

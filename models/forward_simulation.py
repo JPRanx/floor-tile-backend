@@ -136,6 +136,23 @@ class BoatProjection(BaseSchema):
         None,
         description="Days from today until shipping booking deadline (negative = overdue)"
     )
+    # Dual deadline system for Planning View
+    siesa_order_date: Optional[str] = Field(
+        None,
+        description="SIESA order deadline: last day to finalize picking from SIESA warehouse (departure - 20 days)"
+    )
+    days_until_siesa_deadline: Optional[int] = Field(
+        None,
+        description="Days from today until SIESA order deadline (negative = overdue)"
+    )
+    production_request_date: Optional[str] = Field(
+        None,
+        description="Production request deadline: last day to request new factory production (departure - production_lead - transport - buffer)"
+    )
+    days_until_production_deadline: Optional[int] = Field(
+        None,
+        description="Days from today until production request deadline (negative = overdue)"
+    )
     product_details: list[ProductProjection] = Field(
         default_factory=list,
         description="Per-product projections sorted by urgency (critical first)"
