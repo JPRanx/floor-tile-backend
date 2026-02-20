@@ -219,15 +219,29 @@ def parse_sac_csv(
         logger.warning("sac_csv_empty")
         return result
 
+    # Capture raw column names before normalization (for debugging)
+    raw_columns = [str(c) for c in df.columns]
+
     # Normalize column names
     df.columns = [_normalize_column(col) for col in df.columns]
+    normalized_columns = df.columns.tolist()
+
+    logger.info("sac_columns_detected", raw_columns=raw_columns[:15], normalized_columns=normalized_columns[:15])
 
     # Find and validate required columns
-    column_mapping = _find_columns(df.columns.tolist())
+    column_mapping = _find_columns(normalized_columns)
     missing = [name for name, col in column_mapping.items() if col is None and name in SAC_REQUIRED_COLUMNS]
 
     if missing:
-        raise SACMissingColumnsError(missing)
+        logger.error(
+            "sac_missing_columns",
+            missing=missing,
+            raw_columns=raw_columns,
+            normalized_columns=normalized_columns,
+            column_mapping=column_mapping,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
+        raise SACMissingColumnsError(missing, found_columns=raw_columns)
 
     # Parse each row
     min_date = None
