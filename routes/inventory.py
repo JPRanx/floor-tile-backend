@@ -23,6 +23,8 @@ from models.inventory import (
     InventoryCurrentResponse,
     InventoryUploadResponse,
     InTransitUploadResponse,
+    InTransitParseResponse,
+    CandidateBoat,
     InventoryPreview,
     InventoryPreviewRow,
     InventoryConfirmRequest,
@@ -1314,11 +1316,126 @@ def _reconcile_dispatch_vs_drafts(db, parse_result, products) -> Optional[Reconc
         return None
 
 
+@router.post("/in-transit/parse", response_model=InTransitParseResponse)
+async def parse_in_transit(
+    file: UploadFile = File(...),
+):
+    """
+    Parse dispatch file and return preview with candidate boats.
+    Does NOT write to database.
+    """
+    try:
+        content = await file.read()
+
+        if len(content) == 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "EMPTY_FILE", "message": "Empty file uploaded"}}
+            )
+
+        # Get active products for SKU matching
+        product_service = get_product_service()
+        products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+
+        # Parse the dispatch file
+        from parsers.dispatch_parser import parse_dispatch_excel
+        parse_result = parse_dispatch_excel(content, products, [])
+
+        # Get candidate boats: future boats with optional draft info
+        db = get_supabase_client()
+        today = date.today().isoformat()
+
+        boats_result = (
+            db.table("boat_schedules")
+            .select("id, vessel_name, departure_date, arrival_date, carrier")
+            .gte("departure_date", today)
+            .neq("status", "arrived")
+            .order("departure_date", desc=False)
+            .limit(20)
+            .execute()
+        )
+
+        candidate_boats = []
+        suggested_set = False
+
+        for boat in (boats_result.data or []):
+            boat_id = boat["id"]
+            # Check for drafts on this boat
+            draft_result = (
+                db.table("boat_factory_drafts")
+                .select("id, status")
+                .eq("boat_id", boat_id)
+                .execute()
+            )
+            draft = draft_result.data[0] if draft_result.data else None
+            draft_status = draft["status"] if draft else None
+            draft_id = draft["id"] if draft else None
+
+            # Count total pallets if draft exists
+            draft_pallets = None
+            if draft_id:
+                items_result = (
+                    db.table("draft_items")
+                    .select("selected_pallets")
+                    .eq("draft_id", draft_id)
+                    .execute()
+                )
+                draft_pallets = sum(
+                    (item.get("selected_pallets", 0) or 0)
+                    for item in (items_result.data or [])
+                )
+
+            # Suggest the soonest boat with a "drafting" draft
+            is_suggested = False
+            if not suggested_set and draft_status == "drafting":
+                is_suggested = True
+                suggested_set = True
+
+            candidate_boats.append(
+                CandidateBoat(
+                    boat_id=boat_id,
+                    vessel_name=boat.get("vessel_name") or "Sin nombre",
+                    departure_date=boat["departure_date"],
+                    arrival_date=boat["arrival_date"],
+                    carrier=boat.get("carrier"),
+                    draft_id=draft_id,
+                    draft_status=draft_status,
+                    draft_pallets=draft_pallets,
+                    is_suggested=is_suggested,
+                )
+            )
+
+        # If no boat with "drafting" was found, suggest the first boat
+        if not suggested_set and candidate_boats:
+            candidate_boats[0].is_suggested = True
+
+        return InTransitParseResponse(
+            products=[
+                {"sku": p.sku, "in_transit_m2": p.in_transit_m2}
+                for p in parse_result.products
+            ],
+            total_m2=parse_result.total_m2,
+            unmatched_skus=parse_result.unmatched_skus,
+            candidate_boats=candidate_boats,
+        )
+
+    except ValueError as e:
+        logger.error("in_transit_parse_error", error=str(e))
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "PARSE_ERROR", "message": str(e)}}
+        )
+    except Exception as e:
+        logger.error("in_transit_parse_failed", error=str(e), type=type(e).__name__)
+        return handle_error(e)
+
+
 @router.post("/in-transit/upload", response_model=InTransitUploadResponse)
 async def upload_in_transit(
     file: UploadFile = File(...),
     snapshot_date: Optional[date] = Query(None, description="Target snapshot date. If omitted, uses the latest existing snapshot date."),
     received_orders: Optional[str] = Query(None, description="Comma-separated order numbers to exclude (e.g., 'OC002,OC003')"),
+    boat_id: Optional[str] = Query(None, description="Boat ID to promote draft to ordered"),
 ):
     """
     Upload dispatch schedule to update in-transit quantities.
@@ -1414,6 +1531,41 @@ async def upload_in_transit(
         # --- Reconciliation: compare dispatch vs ordered/confirmed drafts ---
         reconciliation = _reconcile_dispatch_vs_drafts(db, parse_result, products)
 
+        # --- Draft promotion: if boat_id provided, promote its draft to "ordered" ---
+        promoted_draft_id = None
+        promoted_boat_name = None
+        if boat_id:
+            try:
+                from services.draft_service import DraftService
+                draft_result = (
+                    db.table("boat_factory_drafts")
+                    .select("id, status")
+                    .eq("boat_id", boat_id)
+                    .in_("status", ["drafting", "action_needed"])
+                    .execute()
+                )
+                if draft_result.data:
+                    draft = draft_result.data[0]
+                    DraftService().update_status(draft["id"], "ordered")
+                    promoted_draft_id = draft["id"]
+                    # Get boat name for response
+                    boat_result = (
+                        db.table("boat_schedules")
+                        .select("vessel_name")
+                        .eq("id", boat_id)
+                        .execute()
+                    )
+                    if boat_result.data:
+                        promoted_boat_name = boat_result.data[0].get("vessel_name")
+                    logger.info(
+                        "draft_promoted_to_ordered",
+                        draft_id=promoted_draft_id,
+                        boat_id=boat_id,
+                        boat_name=promoted_boat_name,
+                    )
+            except Exception as e:
+                logger.error("draft_promotion_failed", boat_id=boat_id, error=str(e))
+
         return InTransitUploadResponse(
             success=True,
             snapshot_date=snapshot_date,
@@ -1424,6 +1576,8 @@ async def upload_in_transit(
             reconciliation=reconciliation,
             unmatched_skus=parse_result.unmatched_skus,
             details=details,
+            promoted_draft_id=promoted_draft_id,
+            promoted_boat_name=promoted_boat_name,
         )
 
     except ValueError as e:

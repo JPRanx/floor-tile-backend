@@ -220,6 +220,29 @@ class InTransitUploadResponse(BaseSchema):
     unmatched_skus: list[str] = Field(default_factory=list)
     details: list[InTransitProductDetail] = Field(default_factory=list)
     reconciliation: Optional[ReconciliationSummary] = None
+    promoted_draft_id: Optional[str] = None
+    promoted_boat_name: Optional[str] = None
+
+
+class CandidateBoat(BaseSchema):
+    """A boat candidate for in-transit assignment."""
+    boat_id: str
+    vessel_name: str
+    departure_date: date
+    arrival_date: date
+    carrier: Optional[str] = None
+    draft_id: Optional[str] = None
+    draft_status: Optional[str] = None
+    draft_pallets: Optional[int] = None
+    is_suggested: bool = False
+
+
+class InTransitParseResponse(BaseSchema):
+    """Preview response for in-transit dispatch file parsing."""
+    products: list[InTransitProductDetail] = Field(default_factory=list)
+    total_m2: float = 0
+    unmatched_skus: list[str] = Field(default_factory=list)
+    candidate_boats: list[CandidateBoat] = Field(default_factory=list)
 
 
 class BulkInventoryCreate(BaseSchema):
