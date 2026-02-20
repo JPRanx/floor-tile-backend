@@ -113,14 +113,15 @@ async def get_data_freshness():
         week_start = sales_result.data[0].get("week_start")
         sales_last_updated = _parse_timestamp(week_start)
 
-    # Inventory freshness - from warehouse_snapshots (owner inventory uploads)
-    inventory_result = db.table("warehouse_snapshots").select(
-        "snapshot_date", count="exact"
+    # Inventory freshness - from inventory_current (consolidated view)
+    inventory_result = db.table("inventory_current").select(
+        "warehouse_date, snapshot_date", count="exact"
     ).order("snapshot_date", desc=True).limit(1).execute()
 
     inventory_last_updated = None
     inventory_count = inventory_result.count or 0
     if inventory_result.data and len(inventory_result.data) > 0:
+        # Use snapshot_date (most recent update across all sources)
         snapshot_date = inventory_result.data[0].get("snapshot_date")
         inventory_last_updated = _parse_timestamp(snapshot_date)
 
