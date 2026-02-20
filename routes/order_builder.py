@@ -89,10 +89,10 @@ def get_order_builder(
         description="Specific boat ID. If not provided, uses next available boat."
     ),
     num_bls: int = Query(
-        1,
-        ge=1,
+        0,
+        ge=0,
         le=5,
-        description="Number of BLs (1-5). Determines capacity: num_bls × 5 × 14 pallets. Default 1 (70 pallets)."
+        description="Number of BLs (0-5). 0 = auto (use recommended). Determines capacity: num_bls × 5 × 14 pallets."
     ),
     factory_id: Optional[str] = Query(
         None,

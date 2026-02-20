@@ -156,8 +156,10 @@ class OrderBuilderService:
         Returns:
             OrderBuilderResponse with all data needed for the UI
         """
-        # Clamp num_bls to valid range
-        num_bls = max(1, min(5, num_bls))
+        # num_bls=0 means "auto" — will be resolved after calculating recommended
+        auto_bls = num_bls == 0
+        if not auto_bls:
+            num_bls = max(1, min(5, num_bls))
 
         # Normalize excluded_skus
         excluded_set = set(excluded_skus) if excluded_skus else set()
@@ -286,6 +288,12 @@ class OrderBuilderService:
             Decimal(str(inv.warehouse_qty)) for inv in inventory_snapshots
         )
         warehouse_available_pallets = max(0, WAREHOUSE_CAPACITY - int(warehouse_current_m2 / M2_PER_PALLET))
+
+        # Resolve auto BLs: calculate recommended before applying capacity
+        if auto_bls:
+            pre_mode_products = [p for tier in products_by_priority.values() for p in tier]
+            num_bls, _, _ = self._calculate_recommended_bls(pre_mode_products)
+            logger.info("auto_bls_resolved", recommended=num_bls)
 
         # Step 4: Apply BL capacity logic (pre-select products) with constraint analysis
         all_products, constraint_analysis = self._apply_mode(
