@@ -5,6 +5,8 @@ Handles CRUD operations for boat_factory_drafts and their draft_items.
 Drafts represent product selections being prepared for a factory order on a specific boat.
 """
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -45,6 +47,34 @@ class DraftService:
             .execute()
         )
         return result.data
+
+    @staticmethod
+    def _compute_items_hash(items: list[dict]) -> str:
+        """
+        Compute a deterministic hash of draft items for change detection.
+
+        Only selection-relevant fields (product_id, selected_pallets) are included
+        so that re-ordering items or changing notes alone does not trigger cascade.
+        Items are sorted by product_id for determinism.
+
+        Args:
+            items: List of item dicts (from DB rows or incoming payload)
+
+        Returns:
+            MD5 hex digest string
+        """
+        normalized = sorted(
+            [
+                {
+                    "product_id": item.get("product_id", ""),
+                    "selected_pallets": item.get("selected_pallets", 0),
+                }
+                for item in items
+            ],
+            key=lambda x: x["product_id"],
+        )
+        content = json.dumps(normalized, sort_keys=True)
+        return hashlib.md5(content.encode()).hexdigest()
 
     def _attach_items(self, draft: dict) -> dict:
         """
@@ -307,8 +337,9 @@ class DraftService:
 
                 logger.info("draft_created", draft_id=draft_id)
 
-            # Save old items for rollback
+            # Save old items for rollback and change detection
             old_items = self._fetch_items(draft_id)
+            old_hash = self._compute_items_hash(old_items)
 
             # Replace items: delete old, insert new
             self.db.table(self.items_table).delete().eq(
@@ -350,8 +381,16 @@ class DraftService:
             # Return full draft with items
             self._attach_items(draft)
 
-            # Soft cascade: flag later drafts
-            self._flag_later_drafts(boat_id, factory_id, "earlier_draft_modified")
+            # Soft cascade: flag later drafts ONLY if content actually changed
+            new_hash = self._compute_items_hash(items)
+            if old_hash != new_hash:
+                self._flag_later_drafts(boat_id, factory_id, "earlier_draft_modified")
+            else:
+                logger.debug(
+                    "draft_cascade_skipped",
+                    draft_id=draft_id,
+                    reason="content_hash_unchanged",
+                )
 
             logger.info(
                 "draft_saved",
