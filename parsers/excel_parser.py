@@ -431,19 +431,33 @@ def _parse_inventory_sheet(
         ))
         return
 
+    # Capture raw columns for debugging
+    raw_columns = [str(c) for c in df.columns]
+
     # Normalize column names (handle variations)
     df.columns = [_normalize_column(col) for col in df.columns]
+    normalized_columns = df.columns.tolist()
+
+    logger.info("inventory_columns_detected", sheet=sheet_name, raw_columns=raw_columns[:15], normalized_columns=normalized_columns[:15])
 
     # Check required columns
     required = ["sku", "bodega_m2", "fecha_conteo"]
     missing = [col for col in required if col not in df.columns]
 
     if missing:
+        logger.error(
+            "inventory_missing_columns",
+            sheet=sheet_name,
+            missing=missing,
+            raw_columns=raw_columns,
+            normalized_columns=normalized_columns,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
         result.errors.append(ParseError(
             sheet=sheet_name,
             row=0,
             field="columns",
-            error=f"Missing required columns: {', '.join(_denormalize_columns(missing))}"
+            error=f"Missing required columns: {', '.join(_denormalize_columns(missing))}. Found columns: {raw_columns[:15]}"
         ))
         return
 
@@ -562,19 +576,33 @@ def _parse_sales_sheet(
         ))
         return
 
+    # Capture raw columns for debugging
+    raw_columns = [str(c) for c in df.columns]
+
     # Normalize column names
     df.columns = [_normalize_column(col) for col in df.columns]
+    normalized_columns = df.columns.tolist()
+
+    logger.info("sales_columns_detected", sheet=sheet_name, raw_columns=raw_columns[:15], normalized_columns=normalized_columns[:15])
 
     # Check required columns
     required = ["sku", "cantidad_m2", "fecha"]
     missing = [col for col in required if col not in df.columns]
 
     if missing:
+        logger.error(
+            "sales_missing_columns",
+            sheet=sheet_name,
+            missing=missing,
+            raw_columns=raw_columns,
+            normalized_columns=normalized_columns,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
         result.errors.append(ParseError(
             sheet=sheet_name,
             row=0,
             field="columns",
-            error=f"Missing required columns: {', '.join(_denormalize_columns(missing))}"
+            error=f"Missing required columns: {', '.join(_denormalize_columns(missing))}. Found columns: {raw_columns[:15]}"
         ))
         return
 
@@ -759,7 +787,13 @@ def _parse_lot_sheet(
     Multiple rows per product (one per lot). Sum Existencia per product.
     """
     df = excel.parse(sheet_name, dtype=str)
+
+    # Capture raw columns for debugging
+    raw_columns = [str(c) for c in df.columns]
     df.columns = [_normalize_column(col) for col in df.columns]
+    normalized_columns = df.columns.tolist()
+
+    logger.info("lot_columns_detected", sheet=sheet_name, raw_columns=raw_columns[:15], normalized_columns=normalized_columns[:15])
 
     # Find key columns
     desc_col = None
@@ -778,10 +812,16 @@ def _parse_lot_sheet(
             um_col = col
 
     if not desc_col or not existencia_col:
-        logger.warning("lot_sheet_missing_columns", desc=desc_col, existencia=existencia_col)
+        logger.error(
+            "lot_sheet_missing_columns",
+            desc=desc_col, existencia=existencia_col,
+            raw_columns=raw_columns,
+            normalized_columns=normalized_columns,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
         result.errors.append(ParseError(
             sheet=sheet_name, row=0, field="columns",
-            error="Missing required columns: 'Desc. item' and 'Existencia'"
+            error=f"Missing required columns: 'Desc. item' and 'Existencia'. Found columns: {raw_columns[:15]}"
         ))
         return
 
@@ -1196,20 +1236,34 @@ def _parse_report_sales_sheet(
         ))
         return
 
+    # Capture raw columns for debugging
+    raw_columns = [str(c) for c in df.columns]
+
     # Normalize column names
     df.columns = [_normalize_column(col) for col in df.columns]
+    normalized_columns = df.columns.tolist()
+
+    logger.info("report_sales_columns_detected", sheet=sheet_name, raw_columns=raw_columns[:15], normalized_columns=normalized_columns[:15])
 
     # Check required columns (after aliases: REFERENCIA→sku, MT2→cantidad_m2, FECHA→fecha)
     required = ["sku", "cantidad_m2", "fecha"]
     missing = [col for col in required if col not in df.columns]
 
     if missing:
+        logger.error(
+            "report_sales_missing_columns",
+            sheet=sheet_name,
+            missing=missing,
+            raw_columns=raw_columns,
+            normalized_columns=normalized_columns,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
         result.errors.append(ParseError(
             sheet=sheet_name,
             row=0,
             field="columns",
             error=f"Missing required columns: {', '.join(_denormalize_columns(missing))}. "
-                  f"Available: {', '.join(df.columns[:10])}"
+                  f"Found columns: {raw_columns[:15]}"
         ))
         return
 

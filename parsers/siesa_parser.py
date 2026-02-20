@@ -178,16 +178,26 @@ def parse_siesa_file(
             # Legacy .xls format - use xlrd
             df = pd.read_excel(file_path, engine="xlrd")
         # Strip whitespace from column names (SIESA exports have trailing spaces)
+        raw_columns = [str(c) for c in df.columns]
         df.columns = df.columns.str.strip()
     except Exception as e:
         logger.error("siesa_file_read_error", error=str(e))
         raise SIESAParseError(f"Failed to read SIESA file: {e}")
 
+    found_columns = [str(c) for c in df.columns]
+    logger.info("siesa_columns_detected", raw_columns=raw_columns[:15], found_columns=found_columns[:15])
+
     # Validate required columns
     missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing_columns:
-        logger.error("siesa_missing_columns", missing=missing_columns)
-        raise SIESAMissingColumnsError(missing_columns)
+        logger.error(
+            "siesa_missing_columns",
+            missing=missing_columns,
+            raw_columns=raw_columns,
+            found_columns=found_columns,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
+        raise SIESAMissingColumnsError(missing_columns, found_columns=raw_columns)
 
     result.total_rows = len(df)
     unique_items = set()

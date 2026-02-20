@@ -552,11 +552,14 @@ class SIESAParseError(ValidationError):
 class SIESAMissingColumnsError(SIESAParseError):
     """SIESA XLS missing required columns."""
 
-    def __init__(self, missing: list[str]):
+    def __init__(self, missing: list[str], found_columns: list[str] | None = None):
+        details: dict = {"missing_columns": missing}
+        if found_columns is not None:
+            details["found_columns"] = found_columns[:30]
         super().__init__(
             code="SIESA_MISSING_COLUMNS",
-            message=f"Missing required columns: {', '.join(missing)}",
-            details={"missing_columns": missing}
+            message=f"Missing required columns: {', '.join(missing)}. Found columns: {found_columns[:15] if found_columns else 'none'}",
+            details=details
         )
 
 

@@ -219,19 +219,32 @@ def _parse_booking_sheet(
         ))
         return
 
+    # Capture raw columns for debugging
+    raw_columns = [str(c) for c in df.columns]
+
     # Normalize column names
     df.columns = [_normalize_column(col) for col in df.columns]
+    normalized_columns = df.columns.tolist()
+
+    logger.info("tiba_columns_detected", sheet=sheet_name, raw_columns=raw_columns[:15], normalized_columns=normalized_columns[:15])
 
     # Map expected columns
     col_mapping = _get_column_mapping(df.columns)
 
     # Check required columns
     if col_mapping["departure"] is None or col_mapping["arrival"] is None:
+        logger.error(
+            "tiba_missing_columns",
+            col_mapping=col_mapping,
+            raw_columns=raw_columns,
+            normalized_columns=normalized_columns,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
         result.errors.append(ParseError(
             sheet=sheet_name,
             row=0,
             field="columns",
-            error="Missing required columns: Fecha Salida ETD, Fecha Llegada ETA"
+            error=f"Missing required columns: Fecha Salida ETD, Fecha Llegada ETA. Found columns: {raw_columns[:15]}"
         ))
         return
 

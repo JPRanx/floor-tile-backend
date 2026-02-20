@@ -104,6 +104,9 @@ def parse_dispatch_excel(
         logger.error("dispatch_excel_read_failed", error=str(e))
         raise ValueError(f"Failed to read dispatch Excel: {e}")
 
+    raw_columns = [str(c) for c in df.columns]
+    logger.info("dispatch_columns_detected", raw_columns=raw_columns[:15])
+
     result.rows_processed = len(df)
 
     # Fill forward order numbers so each row knows its order
@@ -115,7 +118,7 @@ def parse_dispatch_excel(
             break
 
     if factura_col is None:
-        logger.warning("dispatch_no_factura_column", columns=list(df.columns))
+        logger.warning("dispatch_no_factura_column", columns=raw_columns)
         # Try first column as fallback
         factura_col = df.columns[0]
 
@@ -139,11 +142,14 @@ def parse_dispatch_excel(
             qty_col = col
 
     if sku_col is None or qty_col is None:
-        logger.error("dispatch_missing_columns",
-                     columns=list(df.columns),
-                     sku_col=sku_col, qty_col=qty_col)
+        logger.error(
+            "dispatch_missing_columns",
+            raw_columns=raw_columns,
+            sku_col=sku_col, qty_col=qty_col,
+            first_row=df.iloc[0].to_dict() if len(df) > 0 else None,
+        )
         raise ValueError(
-            f"Missing required columns. Found: {list(df.columns)}. "
+            f"Missing required columns. Found: {raw_columns[:15]}. "
             "Need 'Nombre de Referencias' and 'Cantidad de Mts'."
         )
 
