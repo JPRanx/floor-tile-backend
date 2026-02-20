@@ -127,17 +127,21 @@ class SACParseResult:
 # Expected SAC CSV column names (Spanish) - normalized (lowercase, no accents)
 SAC_REQUIRED_COLUMNS = {
     "date": ["fecha de factura", "fecha", "fecha factura", "date"],
-    "sku": ["sku", "codigo", "codigo sku", "cod sku"],
-    "description": ["descripcion sku", "descripcion", "producto", "nombre"],
+    "description": ["descripcion sku", "descripcion", "producto", "nombre", "referencia"],
     "quantity": ["unidades", "cantidad", "m2", "mt2", "qty"],
 }
 
 # Optional columns
 SAC_OPTIONAL_COLUMNS = {
+    "sku": ["sku", "codigo", "codigo sku", "cod sku"],
     "customer": ["nombre cliente", "cliente", "customer", "razon social"],
     "unit_price": ["precio base", "precio unitario", "precio", "unit price", "precio usd"],
-    "total_price": ["facturado", "total", "valor total", "total usd", "monto"],
+    "total_price": ["facturado", "total", "valor total", "total usd", "monto", "total mt2"],
     "invoice": ["numero de factura", "factura", "no factura", "invoice", "numero factura"],
+    "furniture_qty": ["muebles"],
+    "country": ["pais"],
+    "department": ["deparptamento", "departamento", "ciudad"],
+    "exchange_rate": ["tipo de cambio"],
 }
 
 # Product category keywords for classification (no longer used for filtering)
@@ -451,10 +455,10 @@ def _load_csv(file: Union[str, Path, BytesIO, bytes], encoding: str) -> pd.DataF
                     # Check if we found the real header (look for known column names)
                     normalized_cols = [_normalize_column(c) for c in df.columns]
                     has_date = any("fecha" in c for c in normalized_cols)
-                    has_sku = any(c == "sku" for c in normalized_cols)
-                    has_qty = any("unidades" in c or "cantidad" in c for c in normalized_cols)
+                    has_desc = any(c in ("referencia", "descripcion sku", "descripcion", "producto", "nombre") for c in normalized_cols)
+                    has_qty = any(c in ("unidades", "cantidad", "m2", "mt2", "qty") or "unidades" in c or "cantidad" in c for c in normalized_cols)
 
-                    if has_date and has_sku and has_qty and len(df.columns) > 5:
+                    if has_date and has_desc and has_qty and len(df.columns) > 5:
                         logger.debug(
                             "csv_loaded",
                             encoding=enc,
@@ -496,10 +500,10 @@ def _load_excel(file: Union[str, Path, BytesIO, bytes]) -> pd.DataFrame:
                 # Check if we found the real header
                 normalized_cols = [_normalize_column(c) for c in df.columns]
                 has_date = any("fecha" in c for c in normalized_cols)
-                has_sku = any(c == "sku" for c in normalized_cols)
-                has_qty = any("unidades" in c or "cantidad" in c for c in normalized_cols)
+                has_desc = any(c in ("referencia", "descripcion sku", "descripcion", "producto", "nombre") for c in normalized_cols)
+                has_qty = any(c in ("unidades", "cantidad", "m2", "mt2", "qty") or "unidades" in c or "cantidad" in c for c in normalized_cols)
 
-                if has_date and has_sku and has_qty and len(df.columns) > 5:
+                if has_date and has_desc and has_qty and len(df.columns) > 5:
                     logger.debug("excel_loaded", engine=engine, skip_rows=skip_rows, columns=len(df.columns))
                     return df
             except Exception:
