@@ -448,18 +448,42 @@ Return JSON in this exact structure:
             # Read Excel from bytes
             excel = pd.ExcelFile(BytesIO(excel_bytes))
 
-            # Find the month sheet (e.g., "FEBRERO-26")
+            # Find the production data sheet
+            # Priority: 1) MONTH-YY pattern (e.g. "FEBRERO-26")
+            #           2) Sheet named "PLAN"
+            #           3) First sheet with production headers in row 17
             month_sheet = None
             for sheet in excel.sheet_names:
-                # Look for pattern like "FEBRERO-26", "ENERO-26", etc.
                 if re.match(r'^[A-Z]+-\d+$', sheet):
                     month_sheet = sheet
                     break
 
             if not month_sheet:
+                for sheet in excel.sheet_names:
+                    if sheet.upper() == 'PLAN':
+                        month_sheet = sheet
+                        break
+
+            if not month_sheet:
+                # Try to detect by checking for expected column headers
+                for sheet in excel.sheet_names:
+                    try:
+                        probe = pd.read_excel(
+                            BytesIO(excel_bytes), sheet_name=sheet,
+                            header=None, nrows=18
+                        )
+                        if probe.shape[0] >= 17:
+                            row_vals = [str(v).lower() for v in probe.iloc[16] if pd.notna(v)]
+                            if any('referencia' in v for v in row_vals):
+                                month_sheet = sheet
+                                break
+                    except Exception:
+                        continue
+
+            if not month_sheet:
                 raise ValueError(
-                    f"No month sheet found (expected pattern like FEBRERO-26). "
-                    f"Available sheets: {excel.sheet_names}"
+                    f"No production schedule sheet found. Tried: MONTH-YY pattern, "
+                    f"'PLAN' sheet, header detection. Available sheets: {excel.sheet_names}"
                 )
 
             logger.info("found_month_sheet", sheet=month_sheet)
@@ -494,6 +518,13 @@ Return JSON in this exact structure:
                 header=16
             )
 
+            # Normalize column names: collapse whitespace around newlines
+            # (some files have "m2 Totales\n Netos", others "m2 Totales\nNetos")
+            df.columns = [
+                re.sub(r'\s*\n\s*', '\n', str(c)) if '\n' in str(c) else c
+                for c in df.columns
+            ]
+
             # Parse line items for Claude Vision format
             line_items = []
             # Create ProductionScheduleCreate records for database
@@ -518,6 +549,7 @@ Return JSON in this exact structure:
                     'm2_totales_col': 'm2 Totales\nNetos',
                     'm2_primera_programa_col': 'm2 Primera exportacion',
                     'm2_primera_real_col': 'm2 Primera exportacion.1',
+                    'm2_totales_real_col': 'm2 Totales\nNetos.1',
                 },
                 {
                     'plant': 2,
@@ -534,6 +566,7 @@ Return JSON in this exact structure:
                     'm2_totales_col': 'm2 Totales\nNetos.2',
                     'm2_primera_programa_col': 'm2 Primera exportacion.2',
                     'm2_primera_real_col': 'm2 Primera exportacion.3',
+                    'm2_totales_real_col': 'm2 Totales\nNetos.3',
                 },
             ]
 
@@ -588,6 +621,17 @@ Return JSON in this exact structure:
                     m2_totales_programa = self._parse_decimal(row.get(config['m2_totales_col']))
                     m2_primera_programa = self._parse_decimal(row.get(config['m2_primera_programa_col']))
                     m2_primera_real = self._parse_decimal(row.get(config['m2_primera_real_col']))
+
+                    # Get Real totals for fallback
+                    m2_totales_real_col = config.get('m2_totales_real_col')
+                    m2_totales_real = self._parse_decimal(row.get(m2_totales_real_col)) if m2_totales_real_col else None
+
+                    # Fallback: if m2 Primera exportacion is empty, use m2 Totales Netos
+                    # (some files don't fill Primera until export allocation is decided)
+                    if not m2_primera_programa and m2_totales_programa:
+                        m2_primera_programa = m2_totales_programa
+                    if not m2_primera_real and m2_totales_real:
+                        m2_primera_real = m2_totales_real
 
                     # Create ParsedProductionSchedule line item (for Claude format compatibility)
                     if factory_code and fecha_inicio:
