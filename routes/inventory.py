@@ -177,7 +177,7 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
         for p in extracted_products:
             # Check if product already exists
             normalized_sku = _normalize_sku_name(p.sku)
-            exists = (p.owner_code and p.owner_code in known_owner_codes) or (normalized_sku in known_sku_names)
+            exists = normalized_sku in known_sku_names
 
             if not exists:
                 auto_created_skus.append(p.sku)
@@ -206,11 +206,18 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
         parse_result = parse_owner_excel(file_obj, known_owner_codes_ids, known_sku_names_ids)
 
         if parse_result.errors:
+            # Exclude errors from sales-named sheets; keep everything else as inventory errors
+            _sales_sheet_patterns = {"VENTAS", "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+                                     "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"}
             inventory_errors = [
                 e for e in parse_result.errors
-                if e.sheet.upper().startswith("INVENTARIO")
+                if e.sheet.strip().upper() not in _sales_sheet_patterns
+                and not e.sheet.strip().upper().startswith("VENTAS")
             ]
-            if inventory_errors:
+            # Only block on structural errors (row 0 = column/sheet-level).
+            # Row-level errors (unknown product) are non-blocking warnings.
+            structural_errors = [e for e in inventory_errors if e.row == 0]
+            if structural_errors:
                 raise InventoryUploadError([
                     {
                         "sheet": e.sheet,
@@ -218,7 +225,7 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
                         "field": e.field,
                         "error": e.error
                     }
-                    for e in inventory_errors
+                    for e in structural_errors
                 ])
 
         # Convert parsed records to create models
@@ -255,6 +262,14 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
                             snapshot_date=snapshot_date,
                         )
                     )
+
+        # Collect unmatched product warnings (row-level errors from parsing)
+        unmatched_warnings = []
+        if parse_result.errors:
+            for e in parse_result.errors:
+                if e.field == "SKU" and "Unknown product" in e.error:
+                    product_name = e.error.replace("Unknown product: ", "")
+                    unmatched_warnings.append(f"Producto no encontrado: {product_name}")
 
         # Build stats
         row_count = len(snapshots_to_create)
@@ -304,7 +319,10 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
             auto_created_count=len(auto_created_skus),
             zero_filled_count=len(zero_filled_skus),
             zero_filled_products=zero_filled_skus[:20],  # Limit to 20
-            warnings=[f"Este archivo ya fue subido el {inv_duplicate['uploaded_at'][:10]} ({inv_duplicate['filename']})"] if inv_duplicate else [],
+            warnings=(
+                ([f"Este archivo ya fue subido el {inv_duplicate['uploaded_at'][:10]} ({inv_duplicate['filename']})"] if inv_duplicate else [])
+                + unmatched_warnings
+            ),
             rows=all_rows,
             sample_rows=all_rows[:10],  # Backward compat
         )
@@ -481,10 +499,13 @@ async def upload_inventory(file: UploadFile = File(...)):
 
         # Check for inventory-specific errors only (ignore sales errors)
         if parse_result.errors:
-            # Filter to only inventory sheet errors
+            # Exclude errors from sales-named sheets; keep everything else as inventory errors
+            _sales_patterns = {"VENTAS", "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+                               "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"}
             inventory_errors = [
                 e for e in parse_result.errors
-                if e.sheet.upper().startswith("INVENTARIO")
+                if e.sheet.strip().upper() not in _sales_patterns
+                and not e.sheet.strip().upper().startswith("VENTAS")
             ]
             other_errors = len(parse_result.errors) - len(inventory_errors)
 
@@ -494,11 +515,13 @@ async def upload_inventory(file: UploadFile = File(...)):
                     sales_error_count=other_errors
                 )
 
-            # Only reject if there are actual inventory errors
-            if inventory_errors:
+            # Only block on structural errors (row 0 = column/sheet-level).
+            # Row-level errors (unknown product) are non-blocking.
+            structural_errors = [e for e in inventory_errors if e.row == 0]
+            if structural_errors:
                 logger.warning(
                     "inventory_upload_validation_failed",
-                    error_count=len(inventory_errors)
+                    error_count=len(structural_errors)
                 )
                 raise InventoryUploadError([
                     {
@@ -507,7 +530,7 @@ async def upload_inventory(file: UploadFile = File(...)):
                         "field": e.field,
                         "error": e.error
                     }
-                    for e in inventory_errors
+                    for e in structural_errors
                 ])
 
         # Convert parsed records to create models
