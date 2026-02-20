@@ -280,11 +280,13 @@ def _parse_booking_sheet(
             logger.warning("skipping_bad_date_row", row=row_num, field="arrival", value=str(arrival_val))
             continue
 
-        # Parse transit days
-        transit_days = None
+        # Parse transit days from file (used as validation signal)
+        file_transit_days = None
         if col_mapping["transit"] is not None:
             transit_val = row.get(col_mapping["transit"])
-            transit_days = _parse_transit_days(transit_val)
+            file_transit_days = _parse_transit_days(transit_val)
+
+        transit_days = file_transit_days
 
         # If we have both dates but no transit days, calculate it
         if departure_date and arrival_date and transit_days is None:
@@ -344,6 +346,45 @@ def _parse_booking_sheet(
                         field="Fecha Llegada ETA",
                         error="Arrival date must be after departure date"
                     ))
+
+        # Second pass: use file transit days to detect misparses the swap missed.
+        # Example: dep=Feb 26, arr=Jul 3 (should be Mar 7). arr > dep so swap
+        # didn't trigger, but file says 9 days transit vs 127 calculated.
+        if (departure_date and arrival_date and arrival_date > departure_date
+                and file_transit_days and file_transit_days > 0):
+            calculated = (arrival_date - departure_date).days
+            if calculated > file_transit_days * 3:
+                # Try swapping arrival day/month
+                fixed_arr = _swap_day_month(arrival_date)
+                if fixed_arr and fixed_arr > departure_date:
+                    new_transit = (fixed_arr - departure_date).days
+                    if abs(new_transit - file_transit_days) < abs(calculated - file_transit_days):
+                        logger.debug(
+                            "fixed_arrival_via_transit",
+                            row=row_num,
+                            original=arrival_date,
+                            fixed=fixed_arr,
+                            file_transit=file_transit_days,
+                            old_calc=calculated,
+                            new_calc=new_transit,
+                        )
+                        arrival_date = fixed_arr
+
+                # Try swapping departure day/month
+                calculated = (arrival_date - departure_date).days
+                if calculated > file_transit_days * 3:
+                    fixed_dep = _swap_day_month(departure_date)
+                    if fixed_dep and arrival_date > fixed_dep:
+                        new_transit = (arrival_date - fixed_dep).days
+                        if abs(new_transit - file_transit_days) < abs(calculated - file_transit_days):
+                            logger.debug(
+                                "fixed_departure_via_transit",
+                                row=row_num,
+                                original=departure_date,
+                                fixed=fixed_dep,
+                                file_transit=file_transit_days,
+                            )
+                            departure_date = fixed_dep
 
         # Recalculate transit days after any date fixes
         if departure_date and arrival_date and arrival_date > departure_date:
