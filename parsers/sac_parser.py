@@ -13,6 +13,7 @@ from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Optional, Union
+import unicodedata
 import structlog
 
 import pandas as pd
@@ -502,10 +503,10 @@ def _load_excel(file: Union[str, Path, BytesIO, bytes]) -> pd.DataFrame:
 
 
 def _normalize_column(col: str) -> str:
-    """Normalize column name for matching."""
+    """Normalize column name for matching. Uses unicodedata to strip accents reliably across encodings."""
     col = str(col).lower().strip()
-    col = col.replace("á", "a").replace("é", "e").replace("í", "i")
-    col = col.replace("ó", "o").replace("ú", "u").replace("ñ", "n")
+    col = unicodedata.normalize('NFKD', col)
+    col = ''.join(c for c in col if not unicodedata.combining(c))
     return col
 
 
