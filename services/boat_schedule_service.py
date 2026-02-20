@@ -726,22 +726,6 @@ class BoatScheduleService:
         updated = 0
         errors = []
 
-        # Phase 0: Clear vessel_names on existing boats to avoid unique
-        # constraint violations during positional replacement.
-        # The constraint is (departure_date, COALESCE(vessel_name, '')).
-        # Use each boat's own ID as a temporary vessel_name (guaranteed unique).
-        for boat in existing_boats:
-            try:
-                self.db.table(self.table).update(
-                    {"vessel_name": f"__replacing_{boat['id'][:8]}"}
-                ).eq("id", boat["id"]).execute()
-            except Exception as e:
-                logger.error(
-                    "boat_clear_vessel_failed",
-                    boat_id=boat["id"],
-                    error=str(e),
-                )
-
         # Phase 1: Update existing boats in-place (positional replacement)
         for i in range(min(n_new, n_existing)):
             try:
