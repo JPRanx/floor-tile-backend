@@ -935,6 +935,35 @@ async def confirm_siesa_upload(
                 date=actual_date.isoformat(),
             )
 
+        # Zero-fill products NOT in this upload that had previous factory data.
+        # SIESA file is a complete snapshot — absence means zero stock.
+        updated_pids = set(product_stats.keys()) if lots_created > 0 else set()
+        try:
+            prev_result = db.table("factory_snapshots").select("product_id").neq(
+                "factory_available_m2", 0
+            ).execute()
+            prev_pids = {r["product_id"] for r in (prev_result.data or [])}
+            stale_pids = prev_pids - updated_pids
+            zero_filled = 0
+            for pid in stale_pids:
+                db.table("factory_snapshots").upsert({
+                    "product_id": pid,
+                    "snapshot_date": actual_date.isoformat(),
+                    "factory_available_m2": 0,
+                    "factory_lot_count": 0,
+                    "factory_largest_lot_m2": None,
+                    "factory_largest_lot_code": None,
+                }, on_conflict="product_id,snapshot_date").execute()
+                zero_filled += 1
+            if zero_filled > 0:
+                logger.info(
+                    "siesa_zero_filled_stale_products",
+                    zero_filled=zero_filled,
+                    date=actual_date.isoformat(),
+                )
+        except Exception as e:
+            logger.warning("siesa_zero_fill_failed", error=str(e))
+
         # Record upload history
         get_upload_history_service().record_upload(
             upload_type=cache_data.get("upload_type", "siesa"),
@@ -1121,6 +1150,35 @@ async def upload_siesa_inventory(
                 products_synced=synced_count,
                 date=actual_date.isoformat(),
             )
+
+        # Zero-fill products NOT in this upload that had previous factory data.
+        # SIESA file is a complete snapshot — absence means zero stock.
+        updated_pids = set(product_stats.keys()) if lots_created > 0 else set()
+        try:
+            prev_result = db.table("factory_snapshots").select("product_id").neq(
+                "factory_available_m2", 0
+            ).execute()
+            prev_pids = {r["product_id"] for r in (prev_result.data or [])}
+            stale_pids = prev_pids - updated_pids
+            zero_filled = 0
+            for pid in stale_pids:
+                db.table("factory_snapshots").upsert({
+                    "product_id": pid,
+                    "snapshot_date": actual_date.isoformat(),
+                    "factory_available_m2": 0,
+                    "factory_lot_count": 0,
+                    "factory_largest_lot_m2": None,
+                    "factory_largest_lot_code": None,
+                }, on_conflict="product_id,snapshot_date").execute()
+                zero_filled += 1
+            if zero_filled > 0:
+                logger.info(
+                    "siesa_zero_filled_stale_products",
+                    zero_filled=zero_filled,
+                    date=actual_date.isoformat(),
+                )
+        except Exception as e:
+            logger.warning("siesa_zero_fill_failed", error=str(e))
 
         # Calculate container statistics
         total_weight = float(parse_result.total_weight_kg)
