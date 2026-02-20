@@ -125,16 +125,16 @@ async def get_data_freshness():
         snapshot_date = inventory_result.data[0].get("snapshot_date")
         inventory_last_updated = _parse_timestamp(snapshot_date)
 
-    # Boats freshness - get most recent created_at
+    # Boats freshness - get most recent updated_at (reflects last upload, not creation)
     boats_result = db.table("boat_schedules").select(
-        "created_at", count="exact"
-    ).order("created_at", desc=True).limit(1).execute()
+        "updated_at", count="exact"
+    ).order("updated_at", desc=True).limit(1).execute()
 
     boats_last_updated = None
     boats_count = boats_result.count or 0
     if boats_result.data and len(boats_result.data) > 0:
-        created_at = boats_result.data[0].get("created_at")
-        boats_last_updated = _parse_timestamp(created_at)
+        updated_at = boats_result.data[0].get("updated_at")
+        boats_last_updated = _parse_timestamp(updated_at)
 
     logger.info(
         "data_freshness_checked",
