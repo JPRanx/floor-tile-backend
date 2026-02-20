@@ -493,8 +493,8 @@ class BoatScheduleService:
         """
         logger.info("updating_boat_schedule", schedule_id=schedule_id)
 
-        # Verify exists
-        self.get_by_id(schedule_id)
+        # Verify exists and capture old state for draft invalidation (5b)
+        existing_schedule = self.get_by_id(schedule_id)
 
         try:
             # Build update data (only non-None fields)
@@ -534,6 +534,23 @@ class BoatScheduleService:
             )
 
             logger.info("boat_schedule_updated", schedule_id=schedule_id)
+
+            # Flag related drafts when departure date changes (5b)
+            if data.departure_date is not None:
+                old_departure = existing_schedule.departure_date
+                if old_departure != data.departure_date:
+                    try:
+                        self._flag_drafts_on_reschedule(
+                            schedule_id,
+                            str(old_departure),
+                            str(data.departure_date),
+                        )
+                    except Exception as flag_err:
+                        logger.warning(
+                            "draft_flag_on_reschedule_failed",
+                            schedule_id=schedule_id,
+                            error=str(flag_err),
+                        )
 
             return BoatScheduleResponse.from_db(result.data[0])
 
@@ -969,6 +986,52 @@ class BoatScheduleService:
         # Don't overwrite carrier on update — it may have been set manually
 
         self.db.table(self.table).update(update_data).eq("id", schedule_id).execute()
+
+    def _flag_drafts_on_reschedule(
+        self, boat_id: str, old_departure: str, new_departure: str
+    ) -> None:
+        """
+        Flag all active drafts for a boat when its departure date changes.
+
+        Only flags drafts in 'drafting' or 'action_needed' status — ordered/confirmed
+        drafts are already committed and should not be disturbed.
+
+        Args:
+            boat_id: Boat schedule UUID
+            old_departure: Previous departure date (string for logging)
+            new_departure: New departure date (string for logging)
+        """
+        drafts = (
+            self.db.table("boat_factory_drafts")
+            .select("id, factory_id, status")
+            .eq("boat_id", boat_id)
+            .in_("status", ["drafting", "action_needed"])
+            .execute()
+        )
+
+        flagged = 0
+        for draft in (drafts.data or []):
+            try:
+                self.db.table("boat_factory_drafts").update({
+                    "status": "action_needed",
+                    "notes": f"Barco reprogramado: {old_departure} → {new_departure}",
+                }).eq("id", draft["id"]).execute()
+                flagged += 1
+            except Exception as e:
+                logger.warning(
+                    "draft_flag_individual_failed",
+                    draft_id=draft["id"],
+                    error=str(e),
+                )
+
+        if flagged > 0:
+            logger.info(
+                "drafts_flagged_on_reschedule",
+                boat_id=boat_id,
+                old_departure=old_departure,
+                new_departure=new_departure,
+                drafts_flagged=flagged,
+            )
 
 
 # ===================

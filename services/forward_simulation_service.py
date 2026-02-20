@@ -495,6 +495,14 @@ class ForwardSimulationService:
                 Decimal(str(d.get("supply_breakdown", {}).get("production_pipeline_m2", 0)))
                 for d in product_details
             )),
+            "has_in_transit_supply": any(
+                d.get("supply_breakdown", {}).get("in_transit_m2", 0) > 0
+                for d in product_details
+            ),
+            "in_transit_total_m2": float(sum(
+                Decimal(str(d.get("supply_breakdown", {}).get("in_transit_m2", 0)))
+                for d in product_details
+            )),
         }
 
     # ------------------------------------------------------------------

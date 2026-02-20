@@ -136,6 +136,15 @@ async def get_data_freshness():
         updated_at = boats_result.data[0].get("updated_at")
         boats_last_updated = _parse_timestamp(updated_at)
 
+    # SIESA freshness — from upload_history (most recent siesa upload)
+    siesa_result = db.table("upload_history").select(
+        "uploaded_at"
+    ).eq("upload_type", "siesa").order("uploaded_at", desc=True).limit(1).execute()
+
+    siesa_last_updated = None
+    if siesa_result.data and len(siesa_result.data) > 0:
+        siesa_last_updated = _parse_timestamp(siesa_result.data[0].get("uploaded_at"))
+
     logger.info(
         "data_freshness_checked",
         sales_count=sales_count,
@@ -158,6 +167,10 @@ async def get_data_freshness():
             "last_updated": boats_last_updated.isoformat() if boats_last_updated else None,
             "record_count": boats_count,
             "status": _get_freshness_status(boats_last_updated),
+        },
+        "siesa": {
+            "last_updated": siesa_last_updated.isoformat() if siesa_last_updated else None,
+            "status": _get_freshness_status(siesa_last_updated),
         },
     }
 

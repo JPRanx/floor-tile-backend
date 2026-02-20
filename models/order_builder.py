@@ -636,6 +636,15 @@ class OrderBuilderProduct(BaseSchema):
         description="Complete calculation showing coverage + customer + selection math"
     )
 
+    # Committed orders visibility (5e)
+    committed_orders_m2: float = Field(0, ge=0, description="Total committed m² from customer orders")
+    committed_orders_customer: Optional[str] = Field(None, description="Primary customer with committed orders")
+    committed_orders_count: int = Field(0, ge=0, description="Number of committed order entries")
+
+    # Unfulfilled demand visibility (5f)
+    unfulfilled_demand_m2: float = Field(0, ge=0, description="Total unfulfilled demand m² (past stockouts, last 90 days)")
+    has_unfulfilled_demand: bool = Field(False, description="True if product has recent unfulfilled demand")
+
 
 class OrderBuilderBoat(BaseSchema):
     """Boat information for Order Builder."""

@@ -213,6 +213,14 @@ class BoatProjection(BaseSchema):
         0,
         description="Total production pipeline m2 consumed by this boat"
     )
+    has_in_transit_supply: bool = Field(
+        False,
+        description="True if in-transit inventory contributes to this boat's supply"
+    )
+    in_transit_total_m2: float = Field(
+        0,
+        description="Total in-transit m2 consumed by this boat"
+    )
 
 
 class FactoryOrderSignal(BaseSchema):

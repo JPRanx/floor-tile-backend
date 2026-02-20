@@ -257,6 +257,7 @@ class DraftService:
         factory_id: str,
         notes: Optional[str],
         items: list[dict],
+        expected_updated_at: Optional[str] = None,
     ) -> dict:
         """
         Save (create or update) a draft for a boat + factory.
@@ -300,6 +301,21 @@ class DraftService:
                         "update",
                         f"Cannot modify draft with status '{current_status}'. Draft is locked after export."
                     )
+
+                # Optimistic locking: reject if updated_at doesn't match (5m)
+                if expected_updated_at:
+                    current_updated_at = existing.data[0].get("updated_at")
+                    if current_updated_at and current_updated_at != expected_updated_at:
+                        from exceptions import ConflictError
+                        raise ConflictError(
+                            code="DRAFT_CONFLICT",
+                            message="Este borrador fue modificado por otro usuario. Recarga para ver los cambios.",
+                            details={
+                                "expected": expected_updated_at,
+                                "current": current_updated_at,
+                                "draft_id": existing.data[0]["id"],
+                            },
+                        )
 
                 # Update existing draft
                 draft_id = existing.data[0]["id"]
@@ -399,7 +415,13 @@ class DraftService:
             )
             return draft
 
+        except DatabaseError:
+            raise
         except Exception as e:
+            from exceptions import AppError
+            # Let ConflictError (and other AppErrors) propagate without wrapping
+            if isinstance(e, AppError):
+                raise
             logger.error(
                 "save_draft_failed",
                 boat_id=boat_id,

@@ -1371,6 +1371,42 @@ class OrderBuilderService:
         except Exception as e:
             logger.warning("pending_orders_lookup_failed", error=str(e))
 
+        # Get committed orders per product (5e)
+        committed_map: dict[str, dict] = {}
+        try:
+            product_ids = [rec.product_id for rec in recommendations]
+            if product_ids:
+                committed_result = self.inventory_service.db.table("committed_orders").select(
+                    "product_id, quantity_committed, customer"
+                ).in_("product_id", product_ids).execute()
+                for row in (committed_result.data or []):
+                    pid = row["product_id"]
+                    if pid not in committed_map:
+                        committed_map[pid] = {"total_m2": Decimal("0"), "customer": None, "count": 0}
+                    committed_map[pid]["total_m2"] += Decimal(str(row.get("quantity_committed", 0) or 0))
+                    committed_map[pid]["count"] += 1
+                    if committed_map[pid]["customer"] is None and row.get("customer"):
+                        committed_map[pid]["customer"] = row["customer"]
+                logger.debug("committed_orders_loaded", products_with_committed=len(committed_map))
+        except Exception as e:
+            logger.warning("committed_orders_lookup_failed", error=str(e))
+
+        # Get unfulfilled demand per product, last 90 days (5f)
+        unfulfilled_map: dict[str, Decimal] = {}
+        try:
+            product_ids = [rec.product_id for rec in recommendations]
+            if product_ids:
+                cutoff = (date.today() - timedelta(days=90)).isoformat()
+                unfulfilled_result = self.inventory_service.db.table("unfulfilled_demand").select(
+                    "product_id, quantity_m2"
+                ).in_("product_id", product_ids).gte("snapshot_date", cutoff).execute()
+                for row in (unfulfilled_result.data or []):
+                    pid = row["product_id"]
+                    unfulfilled_map[pid] = unfulfilled_map.get(pid, Decimal("0")) + Decimal(str(row.get("quantity_m2", 0) or 0))
+                logger.debug("unfulfilled_demand_loaded", products_with_unfulfilled=len(unfulfilled_map))
+        except Exception as e:
+            logger.warning("unfulfilled_demand_lookup_failed", error=str(e))
+
         for rec in recommendations:
             # Get trend data for this product
             trend = trend_data.get(rec.sku, {})
@@ -1735,6 +1771,13 @@ class OrderBuilderService:
                 availability_breakdown=availability_breakdown,
                 # Full calculation breakdown (transparency layer)
                 full_calculation_breakdown=full_calculation_breakdown,
+                # Committed orders (5e)
+                committed_orders_m2=float(committed_map.get(rec.product_id, {}).get("total_m2", 0)),
+                committed_orders_customer=committed_map.get(rec.product_id, {}).get("customer"),
+                committed_orders_count=committed_map.get(rec.product_id, {}).get("count", 0),
+                # Unfulfilled demand (5f)
+                unfulfilled_demand_m2=float(unfulfilled_map.get(rec.product_id, Decimal("0"))),
+                has_unfulfilled_demand=unfulfilled_map.get(rec.product_id, Decimal("0")) > 0,
             )
 
             # Calculate priority score and display reasoning (Layer 2 & 4)
