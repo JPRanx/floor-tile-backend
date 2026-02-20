@@ -36,6 +36,7 @@ from services.production_schedule_service import get_production_schedule_service
 from services import preview_cache_service
 from services.upload_history_service import get_upload_history_service
 from services.product_service import get_product_service
+from pydantic import BaseModel
 from exceptions import AppError, DatabaseError
 
 logger = structlog.get_logger(__name__)
@@ -826,5 +827,68 @@ async def get_factory_status(
 
         return status_map
 
+    except Exception as e:
+        return handle_error(e)
+
+
+# ===================
+# ORDER BUILDER FEEDBACK LOOP
+# ===================
+
+
+class OBProductionItem(BaseModel):
+    product_id: str
+    sku: Optional[str] = None
+    referencia: Optional[str] = None
+    requested_m2: float
+
+
+class OBPiggybackItem(BaseModel):
+    product_id: str
+    additional_m2: float
+
+
+class OBProductionRequest(BaseModel):
+    items: list[OBProductionItem]
+    boat_departure: Optional[str] = None
+
+
+class OBPiggybackRequest(BaseModel):
+    items: list[OBPiggybackItem]
+
+
+@router.post("/from-order-builder")
+def create_from_order_builder(request: OBProductionRequest):
+    """
+    Create production_schedule rows from Order Builder factory request export (Section 3).
+
+    Closes the feedback loop: export → production_schedule → recommendation reads it back.
+    """
+    try:
+        service = get_production_schedule_service()
+        items = [item.model_dump() for item in request.items]
+        created = service.create_from_order_builder(items, request.boat_departure)
+        return {
+            "created": len(created),
+            "items": created,
+        }
+    except Exception as e:
+        return handle_error(e)
+
+
+@router.post("/piggyback-update")
+def update_piggyback(request: OBPiggybackRequest):
+    """
+    Update production_schedule.requested_m2 for piggyback exports (Section 2).
+
+    Closes the piggyback feedback loop: additional m2 → headroom shrinks.
+    """
+    try:
+        service = get_production_schedule_service()
+        items = [item.model_dump() for item in request.items]
+        updated = service.update_piggyback(items)
+        return {
+            "updated": updated,
+        }
     except Exception as e:
         return handle_error(e)

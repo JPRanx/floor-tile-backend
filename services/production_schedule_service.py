@@ -1855,6 +1855,134 @@ class ProductionScheduleService:
             }
 
 
+    # ===================
+    # ORDER BUILDER INTEGRATION
+    # ===================
+
+    def create_from_order_builder(
+        self,
+        items: list[dict],
+        boat_departure: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Create production_schedule rows from Order Builder factory request export.
+
+        Closes the feedback loop: export Section 3 → INSERT production_schedule
+        → recommendation_service reads it back → gap closes.
+
+        Args:
+            items: List of dicts with product_id, sku, requested_m2, referencia
+            boat_departure: Boat departure date string (for estimated_delivery_date calc)
+
+        Returns:
+            List of created rows
+        """
+        if not items:
+            return []
+
+        logger.info(
+            "creating_production_from_ob",
+            item_count=len(items),
+            boat_departure=boat_departure,
+        )
+
+        rows = []
+        for item in items:
+            row = {
+                "product_id": item["product_id"],
+                "sku": item.get("sku"),
+                "referencia": item.get("referencia") or item.get("sku") or "ORDER_BUILDER",
+                "plant": "plant_1",
+                "requested_m2": float(item["requested_m2"]),
+                "completed_m2": 0,
+                "status": "scheduled",
+                "source_file": "ORDER_BUILDER",
+                "source_month": boat_departure[:7] if boat_departure else None,
+            }
+
+            # estimated_delivery_date = boat_departure - transport_to_port_days
+            if boat_departure:
+                from datetime import date as date_type, timedelta
+                try:
+                    dep = date_type.fromisoformat(boat_departure)
+                    # Factory needs ~5 days to transport to port
+                    row["estimated_delivery_date"] = (dep - timedelta(days=5)).isoformat()
+                except ValueError:
+                    pass
+
+            rows.append(row)
+
+        try:
+            result = self.db.table(self.table).insert(rows).execute()
+            logger.info(
+                "production_from_ob_created",
+                created=len(result.data),
+            )
+            return result.data
+        except Exception as e:
+            logger.error("production_from_ob_failed", error=str(e))
+            raise DatabaseError("insert", str(e))
+
+    def update_piggyback(
+        self,
+        items: list[dict],
+    ) -> int:
+        """
+        Update production_schedule.requested_m2 for piggyback exports (Section 2).
+
+        Closes the piggyback feedback loop: additional m2 added to existing
+        production run → headroom shrinks → recommendation adjusts.
+
+        Args:
+            items: List of dicts with product_id, additional_m2
+
+        Returns:
+            Number of rows updated
+        """
+        if not items:
+            return 0
+
+        logger.info("updating_piggyback", item_count=len(items))
+
+        updated = 0
+        for item in items:
+            try:
+                # Find the scheduled production row for this product
+                existing = (
+                    self.db.table(self.table)
+                    .select("id, requested_m2")
+                    .eq("product_id", item["product_id"])
+                    .eq("status", "scheduled")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+
+                if existing.data:
+                    row = existing.data[0]
+                    new_requested = float(row["requested_m2"]) + float(item["additional_m2"])
+                    self.db.table(self.table).update({
+                        "requested_m2": new_requested,
+                    }).eq("id", row["id"]).execute()
+                    updated += 1
+                    logger.debug(
+                        "piggyback_updated",
+                        product_id=item["product_id"],
+                        old_m2=row["requested_m2"],
+                        added_m2=item["additional_m2"],
+                        new_m2=new_requested,
+                    )
+            except Exception as e:
+                logger.error(
+                    "piggyback_update_failed",
+                    product_id=item["product_id"],
+                    error=str(e),
+                )
+
+        logger.info("piggyback_complete", updated=updated)
+        return updated
+
+
 # Singleton instance
 _schedule_service: Optional[ProductionScheduleService] = None
 

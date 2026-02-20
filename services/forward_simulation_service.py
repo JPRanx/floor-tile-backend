@@ -331,8 +331,16 @@ class ForwardSimulationService:
             projected_stock = effective_stock - (daily_vel * days_until_arrival)
 
             # --- DEMAND: use draft or compute suggestion ---
+            # Only treat draft items as committed supply when the draft
+            # status is "ordered" or "confirmed".  Tentative drafts
+            # ("drafting", "action_needed") are still loaded so the
+            # Planning View can display badges, but their quantities
+            # must NOT lock the simulation — recalculate fresh instead.
+            draft_status = draft.get("status", "") if draft else ""
+            is_committed_draft = draft_status in ("ordered", "confirmed")
+
             is_committed = False
-            if draft and draft.get("items"):
+            if draft and draft.get("items") and is_committed_draft:
                 draft_item = next((i for i in draft["items"] if i["product_id"] == pid), None)
                 if draft_item:
                     suggested_pallets = draft_item["selected_pallets"]
@@ -342,7 +350,7 @@ class ForwardSimulationService:
                     suggested_pallets = 0
                     is_committed = True
             else:
-                # No draft — compute suggestion normally
+                # No committed draft — compute suggestion normally
                 coverage_gap_val = max(
                     Decimal("0"),
                     (daily_vel * coverage_target) - projected_stock,

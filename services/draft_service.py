@@ -86,7 +86,7 @@ class DraftService:
             # Find all drafts for this factory
             drafts_result = (
                 self.db.table(self.drafts_table)
-                .select("id, boat_id")
+                .select("id, boat_id, status")
                 .eq("factory_id", factory_id)
                 .neq("boat_id", boat_id)
                 .execute()
@@ -110,6 +110,9 @@ class DraftService:
             for draft in drafts_result.data:
                 draft_departure = departure_by_boat.get(draft["boat_id"], "")
                 if draft_departure > this_departure:
+                    # Skip ordered/confirmed drafts — they're already committed
+                    if draft.get("status") in ("ordered", "confirmed"):
+                        continue
                     self.db.table(self.drafts_table).update({
                         "status": "action_needed",
                         "notes": reason,
@@ -261,12 +264,20 @@ class DraftService:
             )
 
             if existing.data:
+                current_status = existing.data[0].get("status", "")
+                if current_status in ("ordered", "confirmed"):
+                    raise DatabaseError(
+                        "update",
+                        f"Cannot modify draft with status '{current_status}'. Draft is locked after export."
+                    )
+
                 # Update existing draft
                 draft_id = existing.data[0]["id"]
 
                 result = (
                     self.db.table(self.drafts_table)
                     .update({
+                        "status": "drafting",
                         "notes": notes,
                         "last_edited_at": now,
                         "updated_at": now,
@@ -296,6 +307,9 @@ class DraftService:
 
                 logger.info("draft_created", draft_id=draft_id)
 
+            # Save old items for rollback
+            old_items = self._fetch_items(draft_id)
+
             # Replace items: delete old, insert new
             self.db.table(self.items_table).delete().eq(
                 "draft_id", draft_id
@@ -320,7 +334,18 @@ class DraftService:
                     if item.get("snapshot_data") is not None:
                         item_data["snapshot_data"] = item["snapshot_data"]
                     rows.append(item_data)
-                self.db.table(self.items_table).insert(rows).execute()
+                try:
+                    self.db.table(self.items_table).insert(rows).execute()
+                except Exception as insert_err:
+                    # Best-effort rollback: re-insert old items
+                    logger.error("draft_items_insert_failed", error=str(insert_err), draft_id=draft_id)
+                    if old_items:
+                        try:
+                            rollback_rows = [{k: v for k, v in item.items() if k != "id"} for item in old_items]
+                            self.db.table(self.items_table).insert(rollback_rows).execute()
+                        except Exception:
+                            logger.error("draft_items_rollback_failed", draft_id=draft_id)
+                    raise DatabaseError("insert", f"Failed to save draft items: {insert_err}")
 
             # Return full draft with items
             self._attach_items(draft)
