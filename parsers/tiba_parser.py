@@ -349,11 +349,6 @@ def _parse_booking_sheet(
         if departure_date and arrival_date and arrival_date > departure_date:
             transit_days = (arrival_date - departure_date).days
 
-        # Skip past dates (optional - could be configurable)
-        if departure_date and departure_date < date.today():
-            logger.debug("skipping_past_departure", row=row_num, date=departure_date)
-            continue
-
         # Collect errors or add valid record
         if row_errors:
             result.errors.extend(row_errors)
@@ -399,14 +394,16 @@ def _extract_origin_port(df: pd.DataFrame) -> Optional[str]:
                 fob_match = re.search(r'fob\s+(\w+)', cell_str, re.IGNORECASE)
                 if fob_match:
                     port = fob_match.group(1).strip().title()
-                    logger.debug("found_origin_port", port=port, row=idx)
-                    return port
+                    if port.lower() != "fob":  # "FOB" is a shipping term, not a port
+                        logger.debug("found_origin_port", port=port, row=idx)
+                        return port
                 # Extract port name after colon (e.g., "PUERTO DE ORIGEN: CARTAGENA")
                 colon_match = re.search(r'(?:puerto|origen)[^:]*:\s*(?:fob\s+)?(\w+)', cell_str, re.IGNORECASE)
                 if colon_match:
                     port = colon_match.group(1).strip().title()
-                    logger.debug("found_origin_port", port=port, row=idx)
-                    return port
+                    if port.lower() != "fob":  # "FOB" is a shipping term, not a port
+                        logger.debug("found_origin_port", port=port, row=idx)
+                        return port
     return None
 
 

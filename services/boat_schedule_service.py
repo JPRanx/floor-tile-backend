@@ -643,6 +643,10 @@ class BoatScheduleService:
         """
         Import boat schedules from TIBA Excel file.
 
+        Uses wipe-and-replace strategy: positionally replaces existing boats
+        with file contents to avoid date-matching issues. Preserves IDs for
+        FK-referenced boats by updating in-place.
+
         Args:
             file: Excel file as BytesIO
             filename: Original filename for tracking
@@ -676,45 +680,177 @@ class BoatScheduleService:
                 rows=[s.row for s in skipped_rows],
             )
 
-        # Track results
+        return self._wipe_and_replace(
+            parse_result.schedules, filename, skipped_rows
+        )
+
+    def import_from_records(
+        self,
+        records: list[BoatScheduleRecord],
+        filename: str,
+    ) -> BoatUploadResult:
+        """
+        Import boat schedules from pre-parsed records (used by confirm with modifications).
+
+        Uses the same wipe-and-replace strategy as import_from_excel.
+        """
+        return self._wipe_and_replace(records, filename, [])
+
+    def _wipe_and_replace(
+        self,
+        new_records: list[BoatScheduleRecord],
+        filename: str,
+        skipped_rows: list[SkippedRowInfo],
+    ) -> BoatUploadResult:
+        """
+        Positional wipe-and-replace: update existing boats in-place,
+        insert extras, delete surplus. Preserves IDs for FK safety.
+        """
+        # Sort new boats by departure date
+        new_boats = sorted(new_records, key=lambda r: r.departure_date)
+
+        # Get all existing boats sorted by departure date
+        existing_boats = self._get_all_sorted()
+
+        n_new = len(new_boats)
+        n_existing = len(existing_boats)
+
+        logger.info(
+            "wipe_and_replace_start",
+            new_count=n_new,
+            existing_count=n_existing,
+            filename=filename,
+        )
+
         imported = 0
         updated = 0
-        skipped = 0
         errors = []
 
-        for record in parse_result.schedules:
+        # Phase 1: Update existing boats in-place (positional replacement)
+        for i in range(min(n_new, n_existing)):
             try:
-                result = self._upsert_schedule(record, filename)
-                if result == "inserted":
-                    imported += 1
-                elif result == "updated":
-                    updated += 1
-                else:
-                    skipped += 1
+                self._replace_boat(
+                    existing_boats[i]["id"], new_boats[i], filename
+                )
+                updated += 1
             except Exception as e:
-                errors.append(f"Failed to save schedule {record.departure_date}: {str(e)}")
+                errors.append(
+                    f"Failed to update boat {new_boats[i].departure_date}: {str(e)}"
+                )
                 logger.error(
-                    "schedule_import_failed",
-                    departure=record.departure_date,
-                    error=str(e)
+                    "boat_replace_failed",
+                    boat_id=existing_boats[i]["id"],
+                    error=str(e),
+                )
+
+        # Phase 2: Insert excess new boats
+        for i in range(n_existing, n_new):
+            try:
+                self._insert_from_record(new_boats[i], filename)
+                imported += 1
+            except Exception as e:
+                errors.append(
+                    f"Failed to insert boat {new_boats[i].departure_date}: {str(e)}"
+                )
+                logger.error(
+                    "boat_insert_failed",
+                    departure=new_boats[i].departure_date,
+                    error=str(e),
+                )
+
+        # Phase 3: Delete surplus existing boats
+        deleted = 0
+        for i in range(n_new, n_existing):
+            try:
+                self._delete_boat_cascade(existing_boats[i]["id"])
+                deleted += 1
+            except Exception as e:
+                errors.append(
+                    f"Failed to delete surplus boat {existing_boats[i]['id']}: {str(e)}"
+                )
+                logger.error(
+                    "boat_delete_failed",
+                    boat_id=existing_boats[i]["id"],
+                    error=str(e),
                 )
 
         logger.info(
-            "boat_schedules_imported",
+            "wipe_and_replace_complete",
             imported=imported,
             updated=updated,
-            skipped=skipped,
-            skipped_rows=len(skipped_rows),
-            errors=len(errors)
+            deleted=deleted,
+            errors=len(errors),
         )
 
         return BoatUploadResult(
             imported=imported,
             updated=updated,
-            skipped=skipped,
+            skipped=0,
             skipped_rows=skipped_rows,
-            errors=errors
+            errors=errors,
         )
+
+    def _get_all_sorted(self) -> list[dict]:
+        """Get all boat schedules sorted by departure date."""
+        try:
+            result = (
+                self.db.table(self.table)
+                .select("*")
+                .order("departure_date", desc=False)
+                .execute()
+            )
+            return result.data
+        except Exception as e:
+            logger.error("get_all_sorted_failed", error=str(e))
+            return []
+
+    def _replace_boat(
+        self,
+        boat_id: str,
+        record: BoatScheduleRecord,
+        source_file: str,
+    ) -> None:
+        """Replace all fields of an existing boat (preserving ID for FK safety)."""
+        today = date.today()
+
+        # Auto-assign status based on dates
+        if record.arrival_date < today:
+            status = "arrived"
+        elif record.departure_date < today:
+            status = "departed"
+        else:
+            status = "available"
+
+        update_data = {
+            "vessel_name": record.vessel_name,
+            "shipping_line": record.shipping_line,
+            "departure_date": record.departure_date.isoformat(),
+            "arrival_date": record.arrival_date.isoformat(),
+            "transit_days": record.transit_days,
+            "origin_port": record.origin_port,
+            "destination_port": record.destination_port,
+            "route_type": record.route_type,
+            "booking_deadline": record.booking_deadline.isoformat(),
+            "source_file": source_file,
+            "carrier": "TIBA",
+            "status": status,
+        }
+
+        self.db.table(self.table).update(update_data).eq("id", boat_id).execute()
+
+    def _delete_boat_cascade(self, boat_id: str) -> None:
+        """Delete a boat and its child references."""
+        # Delete child records that have NOT NULL FK
+        self.db.table("boat_factory_drafts").delete().eq("boat_id", boat_id).execute()
+        # Null out nullable FK references
+        self.db.table("shipments").update(
+            {"boat_schedule_id": None}
+        ).eq("boat_schedule_id", boat_id).execute()
+        self.db.table("warehouse_orders").update(
+            {"boat_id": None}
+        ).eq("boat_id", boat_id).execute()
+        # Now delete the boat
+        self.db.table(self.table).delete().eq("id", boat_id).execute()
 
     def _upsert_schedule(
         self,
@@ -788,6 +924,16 @@ class BoatScheduleService:
         source_file: str
     ) -> None:
         """Insert a new schedule from parsed record."""
+        today = date.today()
+
+        # Auto-assign status based on dates
+        if record.arrival_date < today:
+            status = "arrived"
+        elif record.departure_date < today:
+            status = "departed"
+        else:
+            status = "available"
+
         insert_data = {
             "vessel_name": record.vessel_name,
             "shipping_line": record.shipping_line,
@@ -798,7 +944,7 @@ class BoatScheduleService:
             "destination_port": record.destination_port,
             "route_type": record.route_type,
             "booking_deadline": record.booking_deadline.isoformat(),
-            "status": "available",
+            "status": status,
             "source_file": source_file,
             "carrier": "TIBA",
         }
