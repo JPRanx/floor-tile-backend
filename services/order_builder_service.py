@@ -3054,8 +3054,29 @@ class OrderBuilderService:
         if target_boat_global:
             boats_after_target = self.boat_service.get_boats_after(target_boat_global.arrival_date, limit=2)
 
+        # Factory lead time: how long from placing a factory order to goods
+        # arriving at warehouse. Used to extend Section 3 projection horizon
+        # so we catch products that survive until this boat but will stockout
+        # before the NEXT factory order could arrive.
+        try:
+            from services.factory_service import get_factory_service
+            factory_svc = get_factory_service()
+            ci_factory = factory_svc.get_by_id("d45d2c83-fe4b-4f4f-8e73-a3002a84e041")
+            if ci_factory:
+                factory_full_lead_days = (
+                    ci_factory["production_lead_days"]
+                    + ci_factory["transport_to_port_days"]
+                    + 9  # average sea transit days
+                )
+            else:
+                factory_full_lead_days = 49  # 35 + 5 + 9
+        except Exception:
+            factory_full_lead_days = 49
+
         for p in all_products:
-            # Skip items that are in scheduled production (they go in Section 2)
+            # Skip items in scheduled production with room to add more —
+            # they belong in Section 2 (piggyback), not Section 3.
+            # If can_add_more=False, the run is full so we evaluate for S3.
             if p.production_status == "scheduled" and p.production_can_add_more:
                 continue
 
@@ -3133,19 +3154,26 @@ class OrderBuilderService:
             arrival_date = target_boat.arrival_date
             days_until_arrival = (arrival_date - today).days
 
-            # Calculate consumption until arrival
-            consumption_until_arrival = velocity_m2_day * Decimal(str(days_until_arrival))
+            # EXTENDED HORIZON: For factory requests, project further out.
+            # A factory order placed today won't arrive for ~49 days
+            # (35 production + 5 transport + 9 sea transit).
+            # If stock survives until this boat but runs out before the NEXT
+            # factory order could replenish, we need to flag it NOW.
+            extended_days = days_until_arrival + factory_full_lead_days
+            consumption_extended = velocity_m2_day * Decimal(str(extended_days))
 
-            # Pipeline: in-transit + completed production (NOT factory_available — that's for warehouse orders)
-            pipeline_m2 = in_transit_m2 + (p.production_completed_m2 or Decimal("0"))
+            # Pipeline: in-transit + completed production + scheduled production
+            # Include scheduled production since it will arrive within our
+            # extended horizon in most cases
+            pipeline_m2 = in_transit_m2 + (p.production_completed_m2 or Decimal("0")) + in_production_m2
 
             # Cross-section guard: Section 1 allocated m² already covers part of demand
             s1_m2 = section1_allocated.get(p.product_id, Decimal("0"))
 
-            # Project stock at arrival (Section 1 allocation counted as committed supply)
-            projected_stock = warehouse_m2 + pipeline_m2 + s1_m2 - consumption_until_arrival
+            # Project stock through the extended horizon
+            projected_stock = warehouse_m2 + pipeline_m2 + s1_m2 - consumption_extended
 
-            # If projected stock >= 0, pipeline covers demand
+            # If projected stock >= 0, pipeline covers demand through next order cycle
             if projected_stock >= 0:
                 continue  # No request needed
 
@@ -3182,7 +3210,8 @@ class OrderBuilderService:
             buffer_note = (
                 f"{buffer_days}-day buffer applied. "
                 f"Ready {ready_str} + {buffer_days} = {safe_str}. "
-                f"Deadline {deadline_str}"
+                f"Deadline {deadline_str}. "
+                f"Extended horizon: {extended_days} days ({days_until_arrival} to arrival + {factory_full_lead_days} factory lead)"
             )
 
             factory_request_items.append(FactoryRequestItem(
