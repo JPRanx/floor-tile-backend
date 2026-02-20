@@ -188,6 +188,8 @@ class ForwardSimulationService:
                 production_pipeline=production_pipeline,
                 factory_id=factory_id,
                 today=today,
+                boats=boats,
+                in_transit_drafts=in_transit_drafts,
             )
 
             result = {
@@ -546,6 +548,8 @@ class ForwardSimulationService:
         production_pipeline: dict[str, list[dict]],
         factory_id: str,
         today: date,
+        boats: list[dict] | None = None,
+        in_transit_drafts: dict[str, list[dict]] | None = None,
     ) -> Optional[dict]:
         """
         Compute when the next factory production order needs to be placed.
@@ -553,11 +557,15 @@ class ForwardSimulationService:
         Formula per product:
             in_production_remaining = SUM(requested_m2 - completed_m2)
                                       WHERE status IN ('scheduled', 'in_progress')
-            effective_siesa = siesa_stock + in_production_remaining - committed_to_ship
+            in_transit = bulk in_transit_qty + draft-level in-transit arriving before runs_out
+            effective_siesa = siesa_stock + in_production_remaining + in_transit - committed_to_ship
             siesa_coverage_days = effective_siesa / daily_velocity
             siesa_runs_out = today + siesa_coverage_days
             lead_time = production_lead + transport_to_port
             next_factory_order = siesa_runs_out - lead_time
+
+        Products with gap <= 1200 m² are excluded from needing production
+        (minimum worthwhile production run ~9 pallets).
 
         Return the earliest date across all products.
         """
@@ -567,9 +575,15 @@ class ForwardSimulationService:
         transport_to_port = int(factory.get("transport_to_port_days", 0))
         lead_time = production_lead + transport_to_port
 
+        # Minimum production threshold: ~9 pallets worth of m²
+        MIN_PRODUCTION_GAP_M2 = Decimal("1200")
+
         earliest_order_date: Optional[date] = None
         limiting_sku: Optional[str] = None
         min_coverage_days: Optional[int] = None
+
+        # Track products that actually need a production run
+        products_needing_production: list[dict] = []
 
         for product in products:
             pid = product["id"]
@@ -593,19 +607,50 @@ class ForwardSimulationService:
             # Committed to ship (ordered/confirmed drafts)
             committed = committed_map.get(pid, Decimal("0"))
 
-            # Effective supply
-            effective = siesa_stock + in_production - committed
+            # In-transit: bulk from inventory_current view
+            in_transit_bulk = Decimal(str(inv.get("in_transit_qty", 0) or 0))
+
+            # Effective supply (before draft-level transit — need runs_out first)
+            effective = siesa_stock + in_production + in_transit_bulk - committed
             if effective < 0:
                 effective = Decimal("0")
 
-            # Coverage days
+            # Preliminary coverage days and runs_out (used as cutoff for draft transit)
             coverage_days = int(effective / daily_vel)
-
-            # When does SIESA run out?
             runs_out = today + timedelta(days=coverage_days)
+
+            # In-transit: per-product arrival-date-aware from ordered/confirmed drafts
+            # Only count entries arriving before SIESA runs out
+            in_transit_draft_total = Decimal("0")
+            if in_transit_drafts:
+                for entry in in_transit_drafts.get(pid, []):
+                    entry_arrival = _parse_date(entry["arrival_date"])
+                    if entry_arrival <= runs_out:
+                        in_transit_draft_total += entry["pallets_m2"]
+
+            # Recompute effective supply with draft transit included
+            if in_transit_draft_total > 0:
+                effective = siesa_stock + in_production + in_transit_bulk + in_transit_draft_total - committed
+                if effective < 0:
+                    effective = Decimal("0")
+                coverage_days = int(effective / daily_vel)
+                runs_out = today + timedelta(days=coverage_days)
 
             # When to order: runs_out - lead_time
             order_by = runs_out - timedelta(days=lead_time)
+
+            # Compute gap for production threshold: how much would we need to produce?
+            # gap = demand over coverage horizon minus available supply
+            coverage_target_days = coverage_days + lead_time + ORDERING_CYCLE_DAYS
+            total_need = daily_vel * coverage_target_days
+            gap = max(Decimal("0"), total_need - effective)
+
+            if gap > MIN_PRODUCTION_GAP_M2:
+                products_needing_production.append({
+                    "product_id": pid,
+                    "sku": product.get("sku", ""),
+                    "gap_m2": gap,
+                })
 
             if earliest_order_date is None or order_by < earliest_order_date:
                 earliest_order_date = order_by
@@ -617,12 +662,35 @@ class ForwardSimulationService:
 
         days_until = (earliest_order_date - today).days
 
+        # Target boat: first boat departing after production lead time would complete
+        target_boat_name: Optional[str] = None
+        target_boat_departure: Optional[str] = None
+        if boats:
+            production_ready_by = today + timedelta(days=production_lead + transport_to_port)
+            for boat in boats:
+                boat_dep = _parse_date(boat["departure_date"])
+                if boat_dep > production_ready_by:
+                    target_boat_name = boat.get("vessel_name", "")
+                    target_boat_departure = boat["departure_date"]
+                    break
+
+        # Quantity summary from products needing production
+        product_count = len(products_needing_production)
+        estimated_pallets: Optional[int] = None
+        if product_count > 0:
+            total_gap_m2 = sum(p["gap_m2"] for p in products_needing_production)
+            estimated_pallets = int(total_gap_m2 / M2_PER_PALLET)
+
         return {
             "next_order_date": earliest_order_date.isoformat(),
             "days_until_order": days_until,
             "is_overdue": days_until < 0,
             "limiting_product_sku": limiting_sku,
             "effective_coverage_days": min_coverage_days,
+            "target_boat_name": target_boat_name,
+            "target_boat_departure": target_boat_departure,
+            "estimated_pallets": estimated_pallets,
+            "product_count": product_count if product_count > 0 else None,
         }
 
     # ------------------------------------------------------------------

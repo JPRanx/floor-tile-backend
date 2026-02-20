@@ -2960,6 +2960,15 @@ class OrderBuilderService:
         # Enforce 1 container minimum PER PRODUCT with low-volume detection
         factory_request_items: list[FactoryRequestItem] = []
 
+        # Cross-section guard: Build map of m² already allocated in Section 1
+        # so we don't double-count warehouse stock that's being shipped
+        section1_allocated: dict[str, Decimal] = {}
+        for ws_product in selected_warehouse:
+            if ws_product.selected_pallets > 0:
+                section1_allocated[ws_product.product_id] = (
+                    Decimal(str(ws_product.selected_pallets)) * M2_PER_PALLET
+                )
+
         today = date.today()
 
         # Get average production time from completed items (dynamic, not hardcoded)
@@ -2999,7 +3008,9 @@ class OrderBuilderService:
             if not target_boat_global:
                 # Fallback: Use simple gap calculation
                 suggested_m2 = Decimal(str(p.suggested_pallets)) * M2_PER_PALLET
-                total_available = warehouse_m2 + in_transit_m2 + factory_available_m2 + in_production_m2
+                # Cross-section guard: Section 1 allocated m² already covers part of demand
+                s1_m2 = section1_allocated.get(p.product_id, Decimal("0"))
+                total_available = warehouse_m2 + in_transit_m2 + factory_available_m2 + in_production_m2 + s1_m2
                 gap_m2 = suggested_m2 - total_available
 
                 if gap_m2 <= 0:
@@ -3060,8 +3071,11 @@ class OrderBuilderService:
             # Pipeline: in-transit + completed production (NOT factory_available — that's for warehouse orders)
             pipeline_m2 = in_transit_m2 + (p.production_completed_m2 or Decimal("0"))
 
-            # Project stock at arrival
-            projected_stock = warehouse_m2 + pipeline_m2 - consumption_until_arrival
+            # Cross-section guard: Section 1 allocated m² already covers part of demand
+            s1_m2 = section1_allocated.get(p.product_id, Decimal("0"))
+
+            # Project stock at arrival (Section 1 allocation counted as committed supply)
+            projected_stock = warehouse_m2 + pipeline_m2 + s1_m2 - consumption_until_arrival
 
             # If projected stock >= 0, pipeline covers demand
             if projected_stock >= 0:

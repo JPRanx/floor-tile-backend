@@ -429,6 +429,15 @@ class DraftService:
 
             draft = result.data[0]
 
+            # If transitioning to ordered/confirmed, flag later drafts
+            if status in ("ordered", "confirmed"):
+                boat_id = draft.get("boat_id")
+                factory_id = draft.get("factory_id")
+                if boat_id and factory_id:
+                    self._flag_later_drafts(
+                        boat_id, factory_id, "earlier_draft_ordered"
+                    )
+
             logger.info(
                 "draft_status_updated",
                 draft_id=draft_id,

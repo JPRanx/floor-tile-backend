@@ -230,6 +230,18 @@ class FactoryOrderSignal(BaseSchema):
     effective_coverage_days: Optional[int] = Field(
         None, description="Days of factory supply remaining (before lead time adjustment)"
     )
+    target_boat_name: Optional[str] = Field(
+        None, description="Name of the boat this production targets"
+    )
+    target_boat_departure: Optional[str] = Field(
+        None, description="Departure date of the target boat (ISO)"
+    )
+    estimated_pallets: Optional[int] = Field(
+        None, description="Estimated total pallets needing production"
+    )
+    product_count: Optional[int] = Field(
+        None, description="Number of products needing production"
+    )
 
 
 class PlanningHorizonResponse(BaseSchema):
