@@ -2937,6 +2937,31 @@ class OrderBuilderService:
         # Sort by score (critical first)
         add_to_production_items.sort(key=lambda x: x.score, reverse=True)
 
+        # Enrich Section 2 items with piggyback history
+        section2_product_ids = [item.product_id for item in add_to_production_items]
+        piggyback_map: dict[str, list[dict]] = {}
+        if section2_product_ids:
+            try:
+                from config import get_supabase_client
+                db = get_supabase_client()
+                history_result = db.table("piggyback_history") \
+                    .select("product_id, additional_m2, created_at") \
+                    .in_("product_id", section2_product_ids) \
+                    .order("created_at", desc=True) \
+                    .execute()
+                for h in history_result.data:
+                    piggyback_map.setdefault(h["product_id"], []).append(h)
+            except Exception as e:
+                logger.warning("piggyback_history_fetch_failed", error=str(e))
+
+        for item in add_to_production_items:
+            product_piggybacks = piggyback_map.get(item.product_id, [])
+            total_piggybacked = sum(Decimal(str(h["additional_m2"])) for h in product_piggybacks)
+            remaining_headroom = item.suggested_additional_m2 - total_piggybacked
+            item.piggyback_history = product_piggybacks
+            item.total_piggybacked_m2 = total_piggybacked
+            item.remaining_headroom_m2 = max(Decimal("0"), remaining_headroom)
+
         total_additional_m2 = sum(item.suggested_additional_m2 for item in add_to_production_items)
         total_additional_pallets = sum(item.suggested_additional_pallets for item in add_to_production_items)
         has_critical = any(item.is_critical for item in add_to_production_items)

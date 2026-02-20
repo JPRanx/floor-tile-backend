@@ -13,6 +13,7 @@ import hashlib
 import structlog
 
 from typing import Union
+from collections import defaultdict
 from models.production_schedule import (
     ProductionScheduleUploadResponse,
     ProductionScheduleResponse,
@@ -30,6 +31,7 @@ from models.production_schedule import (
     ProductionPreview,
     ProductionPreviewRow,
     ProductionConfirmRequest,
+    ProductionScheduleCreate,
 )
 from services.production_schedule_parser_service import get_production_schedule_parser_service
 from services.production_schedule_service import get_production_schedule_service
@@ -496,6 +498,157 @@ async def preview_production_upload(
         return handle_error(e)
 
 
+# ===================
+# PIGGYBACK PRESERVATION HELPERS
+# ===================
+
+
+def _snapshot_piggybacks_before_wipe(db) -> dict:
+    """
+    Before wiping production_schedule, capture data that would be lost:
+    1. piggyback_history rows (CASCADE-deleted when production_schedule is wiped)
+    2. ORDER_BUILDER source rows (not in factory Excel)
+    3. Total piggyback delta per product_id (to add back to incoming records)
+
+    Returns a dict with snapshot data for use after the wipe.
+    """
+    snapshot = {
+        "piggyback_rows": [],
+        "piggyback_totals": defaultdict(float),
+        "ob_rows_to_preserve": [],
+    }
+
+    # 1. Snapshot piggyback_history rows
+    try:
+        ph_result = db.table("piggyback_history") \
+            .select("production_schedule_id, product_id, additional_m2, source, created_at, notes") \
+            .execute()
+        if ph_result.data:
+            snapshot["piggyback_rows"] = ph_result.data
+            for h in ph_result.data:
+                snapshot["piggyback_totals"][h["product_id"]] += float(h["additional_m2"])
+            logger.info(
+                "piggyback_snapshot_taken",
+                history_rows=len(ph_result.data),
+                products_with_piggyback=len(snapshot["piggyback_totals"]),
+            )
+    except Exception as e:
+        logger.warning("piggyback_snapshot_failed", error=str(e))
+
+    # 2. Snapshot ORDER_BUILDER rows
+    try:
+        ob_result = db.table("production_schedule") \
+            .select("*") \
+            .eq("source_file", "ORDER_BUILDER") \
+            .execute()
+        if ob_result.data:
+            snapshot["ob_rows_to_preserve"] = ob_result.data
+            logger.info("ob_rows_snapshot_taken", count=len(ob_result.data))
+    except Exception as e:
+        logger.warning("ob_rows_snapshot_failed", error=str(e))
+
+    return snapshot
+
+
+def _apply_piggyback_deltas(
+    production_records: list[ProductionScheduleCreate],
+    piggyback_totals: dict[str, float],
+) -> int:
+    """
+    Add piggybacked m2 deltas to matching incoming records.
+
+    For each incoming record whose product_id has piggyback history,
+    increase its requested_m2 by the total piggybacked amount.
+
+    Returns number of records adjusted.
+    """
+    adjusted = 0
+    for record in production_records:
+        if record.product_id and record.product_id in piggyback_totals:
+            delta = Decimal(str(piggyback_totals[record.product_id]))
+            record.requested_m2 = (record.requested_m2 or Decimal("0")) + delta
+            adjusted += 1
+            logger.info(
+                "piggyback_preserved",
+                product_id=record.product_id,
+                delta_m2=float(delta),
+                new_requested_m2=float(record.requested_m2),
+            )
+    return adjusted
+
+
+def _restore_after_insert(db, snapshot: dict, incoming_product_ids: set[str]) -> None:
+    """
+    After new production_schedule rows are inserted, restore:
+    1. ORDER_BUILDER rows whose products are NOT in the incoming data
+    2. piggyback_history rows re-linked to new production_schedule FKs
+    """
+    # 1. Re-insert ORDER_BUILDER rows not covered by incoming upload
+    ob_rows = snapshot.get("ob_rows_to_preserve", [])
+    if ob_rows:
+        ob_inserted = 0
+        for ob_row in ob_rows:
+            if ob_row.get("product_id") not in incoming_product_ids:
+                insert_data = {
+                    k: v for k, v in ob_row.items()
+                    if k not in ("id", "created_at", "updated_at")
+                }
+                try:
+                    db.table("production_schedule").insert(insert_data).execute()
+                    ob_inserted += 1
+                except Exception as e:
+                    logger.warning(
+                        "ob_row_restore_failed",
+                        product_id=ob_row.get("product_id"),
+                        error=str(e),
+                    )
+        if ob_inserted:
+            logger.info("ob_rows_restored", count=ob_inserted)
+
+    # 2. Re-insert piggyback_history with new FK references
+    piggyback_rows = snapshot.get("piggyback_rows", [])
+    if piggyback_rows:
+        # Build map: product_id -> new production_schedule row id
+        try:
+            new_schedule = db.table("production_schedule") \
+                .select("id, product_id") \
+                .not_.is_("product_id", "null") \
+                .execute()
+        except Exception as e:
+            logger.warning("piggyback_restore_schedule_lookup_failed", error=str(e))
+            return
+
+        new_id_by_product: dict[str, str] = {}
+        for row in (new_schedule.data or []):
+            if row["product_id"]:
+                # Take the first (or latest) match per product
+                if row["product_id"] not in new_id_by_product:
+                    new_id_by_product[row["product_id"]] = row["id"]
+
+        ph_restored = 0
+        for h in piggyback_rows:
+            new_schedule_id = new_id_by_product.get(h["product_id"])
+            if new_schedule_id:
+                try:
+                    db.table("piggyback_history").insert({
+                        "production_schedule_id": new_schedule_id,
+                        "product_id": h["product_id"],
+                        "additional_m2": h["additional_m2"],
+                        "source": h.get("source", "ORDER_BUILDER"),
+                        "notes": h.get("notes"),
+                        "created_at": h.get("created_at"),
+                    }).execute()
+                    ph_restored += 1
+                except Exception as e:
+                    logger.warning(
+                        "piggyback_history_restore_failed",
+                        product_id=h["product_id"],
+                        error=str(e),
+                    )
+        if ph_restored:
+            logger.info("piggyback_history_restored", count=ph_restored)
+
+
 @router.post("/upload-replace/confirm/{preview_id}", response_model=ProductionImportResult)
 async def confirm_production_upload(
     preview_id: str,
@@ -568,10 +721,24 @@ async def confirm_production_upload(
                 detail="No production items could be extracted from the Excel"
             )
 
+        # --- Piggyback preservation: BEFORE wipe ---
+        from config import get_supabase_client
+        db = get_supabase_client()
+        piggyback_snapshot = _snapshot_piggybacks_before_wipe(db)
+
+        # Apply piggybacked deltas to incoming records
+        piggyback_totals = piggyback_snapshot.get("piggyback_totals", {})
+        if piggyback_totals:
+            adjusted = _apply_piggyback_deltas(production_records, piggyback_totals)
+            logger.info("piggyback_deltas_applied", adjusted_records=adjusted)
+
+        # Collect incoming product_ids for ORDER_BUILDER row filtering
+        incoming_product_ids = {
+            r.product_id for r in production_records if r.product_id
+        }
+
         # Wipe existing data
         try:
-            from config import get_supabase_client
-            db = get_supabase_client()
             db.table("production_schedule").delete().neq(
                 "id", "00000000-0000-0000-0000-000000000000"
             ).execute()
@@ -581,6 +748,9 @@ async def confirm_production_upload(
 
         # Import using correct schema
         result = service.import_from_excel(production_records, match_products=True)
+
+        # --- Piggyback preservation: AFTER insert ---
+        _restore_after_insert(db, piggyback_snapshot, incoming_product_ids)
 
         # Record upload history
         get_upload_history_service().record_upload(
@@ -890,5 +1060,49 @@ def update_piggyback(request: OBPiggybackRequest):
         return {
             "updated": updated,
         }
+    except Exception as e:
+        return handle_error(e)
+
+
+# ===================
+# PIGGYBACK CONFIRMATION
+# ===================
+
+
+class PiggybackConfirmRequest(BaseModel):
+    product_id: str
+    additional_m2: float
+    notes: Optional[str] = None
+
+
+class PiggybackConfirmResponse(BaseModel):
+    success: bool
+    new_requested_m2: float
+    history_id: str
+    message: str
+
+
+@router.post("/piggyback-confirm", response_model=PiggybackConfirmResponse)
+def confirm_piggyback(request: PiggybackConfirmRequest):
+    """
+    Confirm a piggyback: update production requested_m2 and record in piggyback_history.
+
+    Used by Section 2 UI for explicit per-product piggyback confirmation.
+    """
+    try:
+        service = get_production_schedule_service()
+        result = service.confirm_piggyback(
+            product_id=request.product_id,
+            additional_m2=request.additional_m2,
+            notes=request.notes,
+        )
+        return PiggybackConfirmResponse(
+            success=True,
+            new_requested_m2=result["production_schedule"]["requested_m2"],
+            history_id=result["history_entry"]["id"],
+            message=f"Piggyback confirmado: {request.additional_m2} m\u00b2",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         return handle_error(e)

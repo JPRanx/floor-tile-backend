@@ -828,6 +828,11 @@ class AddToProductionItem(BaseSchema):
     # Selection (pre-selected by default for recommended items)
     is_selected: bool = Field(default=True, description="Whether item is selected for export")
 
+    # Piggyback history
+    piggyback_history: list[dict] = Field(default_factory=list, description="Past piggyback records")
+    total_piggybacked_m2: Decimal = Field(default=Decimal("0"), description="Total m2 already piggybacked")
+    remaining_headroom_m2: Decimal = Field(default=Decimal("0"), description="How much more can be added")
+
 
 class FactoryRequestItem(BaseSchema):
     """Item that needs a new factory production request."""

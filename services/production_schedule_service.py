@@ -6,7 +6,7 @@ See STANDARDS_ERRORS.md for error handling patterns.
 """
 
 from typing import Optional
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from collections import defaultdict
 import structlog
@@ -1922,6 +1922,50 @@ class ProductionScheduleService:
         except Exception as e:
             logger.error("production_from_ob_failed", error=str(e))
             raise DatabaseError("insert", str(e))
+
+    def confirm_piggyback(self, product_id: str, additional_m2: float, notes: str = None) -> dict:
+        """Confirm a piggyback: update requested_m2 and record in history."""
+        # 1. Find scheduled production for this product
+        result = self.db.table(self.table).select("*") \
+            .eq("product_id", product_id) \
+            .eq("status", "scheduled") \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+
+        if not result.data:
+            raise ValueError(f"No scheduled production found for product {product_id}")
+
+        row = result.data[0]
+        new_requested = float(row["requested_m2"]) + additional_m2
+
+        # 2. Update requested_m2
+        self.db.table(self.table).update({
+            "requested_m2": new_requested,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", row["id"]).execute()
+
+        # 3. Record in piggyback_history
+        history_entry = self.db.table("piggyback_history").insert({
+            "production_schedule_id": row["id"],
+            "product_id": product_id,
+            "additional_m2": additional_m2,
+            "source": "ORDER_BUILDER",
+            "notes": notes,
+        }).execute()
+
+        return {
+            "production_schedule": {**row, "requested_m2": new_requested},
+            "history_entry": history_entry.data[0] if history_entry.data else None,
+        }
+
+    def get_piggyback_history(self, product_id: str) -> list[dict]:
+        """Get all piggyback history entries for a product."""
+        result = self.db.table("piggyback_history") \
+            .select("*") \
+            .eq("product_id", product_id) \
+            .order("created_at", desc=True) \
+            .execute()
+        return result.data
 
     def update_piggyback(
         self,
