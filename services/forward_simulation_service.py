@@ -179,6 +179,64 @@ class ForwardSimulationService:
                     else:
                         proj["review_reason"] = "draft_needs_review"
 
+            # Stability impact: classify products as stabilized, recovering, or blocked
+            STABILITY_THRESHOLD = URGENCY_SOON_DAYS  # 30 days
+            for i, proj in enumerate(boat_projections):
+                details = proj["product_details"]
+                total = len(details)
+                if total == 0:
+                    proj["stability_impact"] = {
+                        "stabilizes_count": 0, "stabilizes_products": [],
+                        "recovering_count": 0, "recovering_products": [],
+                        "blocked_count": 0, "blocked_products": [],
+                        "progress_before_pct": 100, "progress_after_pct": 100,
+                    }
+                    continue
+
+                stabilizes: list[str] = []
+                recovering: list[str] = []
+                blocked: list[str] = []
+                stable_before = 0
+                stable_after = 0
+
+                # Pre-compute: which product IDs have supply on any later boat
+                later_supply_pids: set[str] = set()
+                for j in range(i + 1, len(boat_projections)):
+                    for pd in boat_projections[j]["product_details"]:
+                        if pd["suggested_pallets"] > 0:
+                            later_supply_pids.add(pd["product_id"])
+
+                for pd in details:
+                    before = pd["days_of_stock_at_arrival"]
+                    after = pd.get("days_of_stock_after_fill", before)
+
+                    if before >= STABILITY_THRESHOLD:
+                        stable_before += 1
+                        stable_after += 1
+                    else:
+                        # Unstable before this boat
+                        if after >= STABILITY_THRESHOLD:
+                            # This boat stabilizes this product
+                            stabilizes.append(pd["sku"])
+                            stable_after += 1
+                        else:
+                            # Still unstable after this boat
+                            if pd["product_id"] in later_supply_pids:
+                                recovering.append(pd["sku"])
+                            else:
+                                blocked.append(pd["sku"])
+
+                proj["stability_impact"] = {
+                    "stabilizes_count": len(stabilizes),
+                    "stabilizes_products": stabilizes,
+                    "recovering_count": len(recovering),
+                    "recovering_products": recovering,
+                    "blocked_count": len(blocked),
+                    "blocked_products": blocked,
+                    "progress_before_pct": round(stable_before / total * 100) if total > 0 else 100,
+                    "progress_after_pct": round(stable_after / total * 100) if total > 0 else 100,
+                }
+
             # Factory order signal
             factory_order_signal = self._compute_factory_order_signal(
                 factory=factory,
@@ -370,6 +428,13 @@ class ForwardSimulationService:
             urgency = _classify_urgency(days_of_stock)
             urgency_counts[urgency] += 1
 
+            # Days of stock AFTER this boat fills the order
+            if suggested_pallets > 0 and daily_vel > 0:
+                filled_m2 = Decimal(suggested_pallets) * pallet_divisor
+                days_after_fill = float((projected_stock + filled_m2) / daily_vel)
+            else:
+                days_after_fill = days_of_stock
+
             # Coverage gap (for display — always computed even if draft committed)
             coverage_gap = max(
                 Decimal("0"),
@@ -383,6 +448,7 @@ class ForwardSimulationService:
                 "current_stock_m2": float(effective_stock.quantize(Decimal("0.01"))),
                 "projected_stock_m2": float(projected_stock.quantize(Decimal("0.01"))),
                 "days_of_stock_at_arrival": round(days_of_stock, 1),
+                "days_of_stock_after_fill": round(days_after_fill, 1),
                 "urgency": urgency,
                 "coverage_gap_m2": float(coverage_gap.quantize(Decimal("0.01"))),
                 "suggested_pallets": suggested_pallets,

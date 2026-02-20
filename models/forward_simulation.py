@@ -76,6 +76,18 @@ class DraftBLItem(BaseSchema):
     bl_number: int = Field(..., ge=1, description="BL number")
 
 
+class StabilityImpact(BaseSchema):
+    """Per-boat stability impact: how many products this boat stabilizes."""
+    stabilizes_count: int = Field(0, ge=0, description="Products going from <30d to ≥30d coverage")
+    stabilizes_products: list[str] = Field(default_factory=list, description="SKUs of stabilized products")
+    recovering_count: int = Field(0, ge=0, description="Products still <30d but with supply on later boats")
+    recovering_products: list[str] = Field(default_factory=list, description="SKUs of recovering products")
+    blocked_count: int = Field(0, ge=0, description="Products <30d with no supply anywhere")
+    blocked_products: list[str] = Field(default_factory=list, description="SKUs of blocked products")
+    progress_before_pct: int = Field(0, ge=0, le=100, description="% of products stable before this boat")
+    progress_after_pct: int = Field(0, ge=0, le=100, description="% of products stable after this boat")
+
+
 class BoatProjection(BaseSchema):
     """
     Projection for a single future boat in the planning horizon.
@@ -220,6 +232,10 @@ class BoatProjection(BaseSchema):
     in_transit_total_m2: float = Field(
         0,
         description="Total in-transit m2 consumed by this boat"
+    )
+    stability_impact: Optional[StabilityImpact] = Field(
+        None,
+        description="Per-boat stability impact: stabilizes, recovering, blocked counts and progress"
     )
 
 
