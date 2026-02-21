@@ -90,6 +90,21 @@ def _get_freshness_status(last_updated: Optional[datetime]) -> str:
         return "very_stale"
 
 
+def _latest_from_table(db, table: str, date_col: str, count: bool = False):
+    """Query most recent timestamp and optional count from a table."""
+    cols = date_col
+    kw = {"count": "exact"} if count else {}
+    result = db.table(table).select(cols, **kw).order(
+        date_col, desc=True
+    ).limit(1).execute()
+
+    last_updated = None
+    record_count = result.count if count else None
+    if result.data and len(result.data) > 0:
+        last_updated = _parse_timestamp(result.data[0].get(date_col))
+    return last_updated, record_count
+
+
 @router.get("")
 async def get_data_freshness():
     """
@@ -97,94 +112,46 @@ async def get_data_freshness():
 
     Returns timestamps and status for:
     - Sales (from sales table, most recent week_start)
-    - Inventory (from inventory_lots table, most recent snapshot_date)
-    - Boats (from boat_schedules table, most recent created_at)
+    - Warehouse inventory (from warehouse_snapshots)
+    - SIESA / factory inventory (from factory_snapshots)
+    - In-transit inventory (from transit_snapshots)
+    - Boats (from boat_schedules, most recent updated_at)
+    - Production schedule (from production_schedule)
     """
     db = get_supabase_client()
 
-    # Sales freshness - get most recent week_start
-    sales_result = db.table("sales").select(
-        "week_start", count="exact"
-    ).order("week_start", desc=True).limit(1).execute()
-
-    sales_last_updated = None
-    sales_count = sales_result.count or 0
-    if sales_result.data and len(sales_result.data) > 0:
-        week_start = sales_result.data[0].get("week_start")
-        sales_last_updated = _parse_timestamp(week_start)
-
-    # Inventory freshness - from inventory_current (consolidated view)
-    inventory_result = db.table("inventory_current").select(
-        "warehouse_date, snapshot_date", count="exact"
-    ).order("snapshot_date", desc=True).limit(1).execute()
-
-    inventory_last_updated = None
-    inventory_count = inventory_result.count or 0
-    if inventory_result.data and len(inventory_result.data) > 0:
-        # Use snapshot_date (most recent update across all sources)
-        snapshot_date = inventory_result.data[0].get("snapshot_date")
-        inventory_last_updated = _parse_timestamp(snapshot_date)
-
-    # Boats freshness - get most recent updated_at (reflects last upload, not creation)
-    boats_result = db.table("boat_schedules").select(
-        "updated_at", count="exact"
-    ).order("updated_at", desc=True).limit(1).execute()
-
-    boats_last_updated = None
-    boats_count = boats_result.count or 0
-    if boats_result.data and len(boats_result.data) > 0:
-        updated_at = boats_result.data[0].get("updated_at")
-        boats_last_updated = _parse_timestamp(updated_at)
-
-    # SIESA freshness — from upload_history (most recent siesa upload)
-    siesa_result = db.table("upload_history").select(
-        "uploaded_at"
-    ).eq("upload_type", "siesa").order("uploaded_at", desc=True).limit(1).execute()
-
-    siesa_last_updated = None
-    if siesa_result.data and len(siesa_result.data) > 0:
-        siesa_last_updated = _parse_timestamp(siesa_result.data[0].get("uploaded_at"))
-
-    # Production schedule freshness — most recent update
-    production_result = db.table("production_schedule").select(
-        "updated_at"
-    ).order("updated_at", desc=True).limit(1).execute()
-
-    production_last_updated = None
-    if production_result.data and len(production_result.data) > 0:
-        production_last_updated = _parse_timestamp(production_result.data[0].get("updated_at"))
+    sales_ts, sales_count = _latest_from_table(db, "sales", "week_start", count=True)
+    warehouse_ts, warehouse_count = _latest_from_table(db, "warehouse_snapshots", "snapshot_date", count=True)
+    siesa_ts, siesa_count = _latest_from_table(db, "factory_snapshots", "snapshot_date", count=True)
+    transit_ts, transit_count = _latest_from_table(db, "transit_snapshots", "snapshot_date", count=True)
+    boats_ts, boats_count = _latest_from_table(db, "boat_schedules", "updated_at", count=True)
+    production_ts, _ = _latest_from_table(db, "production_schedule", "updated_at")
 
     logger.info(
         "data_freshness_checked",
         sales_count=sales_count,
-        inventory_count=inventory_count,
+        warehouse_count=warehouse_count,
+        siesa_count=siesa_count,
+        transit_count=transit_count,
         boats_count=boats_count,
     )
 
+    def _source(ts, count=None):
+        out = {
+            "last_updated": ts.isoformat() if ts else None,
+            "status": _get_freshness_status(ts),
+        }
+        if count is not None:
+            out["record_count"] = count
+        return out
+
     return {
-        "sales": {
-            "last_updated": sales_last_updated.isoformat() if sales_last_updated else None,
-            "record_count": sales_count,
-            "status": _get_freshness_status(sales_last_updated),
-        },
-        "inventory": {
-            "last_updated": inventory_last_updated.isoformat() if inventory_last_updated else None,
-            "record_count": inventory_count,
-            "status": _get_freshness_status(inventory_last_updated),
-        },
-        "boats": {
-            "last_updated": boats_last_updated.isoformat() if boats_last_updated else None,
-            "record_count": boats_count,
-            "status": _get_freshness_status(boats_last_updated),
-        },
-        "siesa": {
-            "last_updated": siesa_last_updated.isoformat() if siesa_last_updated else None,
-            "status": _get_freshness_status(siesa_last_updated),
-        },
-        "production": {
-            "last_updated": production_last_updated.isoformat() if production_last_updated else None,
-            "status": _get_freshness_status(production_last_updated),
-        },
+        "sales": _source(sales_ts, sales_count),
+        "inventory": _source(warehouse_ts, warehouse_count),
+        "siesa": _source(siesa_ts, siesa_count),
+        "in_transit": _source(transit_ts, transit_count),
+        "boats": _source(boats_ts, boats_count),
+        "production": _source(production_ts),
     }
 
 
