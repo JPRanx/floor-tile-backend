@@ -145,6 +145,15 @@ async def get_data_freshness():
     if siesa_result.data and len(siesa_result.data) > 0:
         siesa_last_updated = _parse_timestamp(siesa_result.data[0].get("uploaded_at"))
 
+    # Production schedule freshness — most recent update
+    production_result = db.table("production_schedule").select(
+        "updated_at"
+    ).order("updated_at", desc=True).limit(1).execute()
+
+    production_last_updated = None
+    if production_result.data and len(production_result.data) > 0:
+        production_last_updated = _parse_timestamp(production_result.data[0].get("updated_at"))
+
     logger.info(
         "data_freshness_checked",
         sales_count=sales_count,
@@ -171,6 +180,10 @@ async def get_data_freshness():
         "siesa": {
             "last_updated": siesa_last_updated.isoformat() if siesa_last_updated else None,
             "status": _get_freshness_status(siesa_last_updated),
+        },
+        "production": {
+            "last_updated": production_last_updated.isoformat() if production_last_updated else None,
+            "status": _get_freshness_status(production_last_updated),
         },
     }
 
