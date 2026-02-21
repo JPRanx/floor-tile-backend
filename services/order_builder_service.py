@@ -3241,7 +3241,7 @@ class OrderBuilderService:
                 buffer_note=buffer_note,
                 # Velocity and consumption
                 velocity_m2_day=velocity_m2_day,
-                consumption_until_arrival_m2=consumption_until_arrival,
+                consumption_until_arrival_m2=consumption_extended,
                 pipeline_m2=pipeline_m2,
                 projected_stock_at_arrival_m2=projected_stock,
                 calculated_need_m2=calculated_need,
