@@ -1449,6 +1449,12 @@ class OrderBuilderService:
             projection = projection_map.get(rec.product_id) if projection_map else None
 
             if projection is not None:
+                # Override days_of_stock with projection-aware value
+                # so urgency, gap_days, and intelligence brief are coherent
+                proj_days = projection.get("days_of_stock_at_arrival")
+                if proj_days is not None:
+                    days_of_stock = int(round(proj_days))
+                    urgency = self._calculate_urgency(days_of_stock)
                 # PROJECTION PATH: use projected stock at boat's arrival
                 # projected_stock already accounts for:
                 # - Warehouse depletion (velocity × days_to_arrival)
