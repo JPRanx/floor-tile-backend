@@ -99,8 +99,8 @@ def get_order_builder(
         description="Factory UUID. If provided, filters products/boats to this factory. Default: all products."
     ),
     use_projection: bool = Query(
-        False,
-        description="Use forward simulation for multi-boat awareness",
+        True,
+        description="Use forward simulation for multi-boat awareness. Disable with ?use_projection=false if issues arise.",
     ),
 ) -> OrderBuilderResponse:
     """
