@@ -479,18 +479,18 @@ class OrderBuilderService:
             boat = self._to_order_builder_boat(boat_data, today) if boat_data else None
 
         # Get the next boat after this one
-        available_boats = self.boat_service.get_available(limit=2)
         next_boat = None
-
-        if len(available_boats) > 1:
-            # If we got a specific boat, find the one after it
-            if boat:
-                for b in available_boats:
-                    if b.departure_date > boat.departure_date:
-                        next_boat = self._to_order_builder_boat(b, today)
-                        break
-            else:
-                # Use second available
+        if boat:
+            # Query boats departing after the selected boat
+            boats_after = self.boat_service.get_available(
+                from_date=boat.departure_date + timedelta(days=1),
+                limit=1
+            )
+            if boats_after:
+                next_boat = self._to_order_builder_boat(boats_after[0], today)
+        else:
+            available_boats = self.boat_service.get_available(limit=2)
+            if len(available_boats) > 1:
                 next_boat = self._to_order_builder_boat(available_boats[1], today)
 
         return boat, next_boat
