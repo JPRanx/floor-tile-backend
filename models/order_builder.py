@@ -1119,12 +1119,6 @@ class OrderBuilderResponse(BaseSchema):
     # === Shipping Cost Config (for frontend cost estimation) ===
     shipping_cost_config: Optional[ShippingCostConfig] = None
 
-    # === Simulation Horizon ===
-    simulation_horizon_date: Optional[date] = Field(
-        None,
-        description="The date the forward simulation projects stock through (boat arrival + factory lead time)"
-    )
-
     # === Factory-Aware Fields (OB V2) ===
     factory_id: Optional[str] = Field(None, description="Factory UUID if factory-scoped")
     factory_name: Optional[str] = Field(None, description="Factory name if factory-scoped")

@@ -373,26 +373,7 @@ class OrderBuilderService:
             per_container_total_usd=freight + destination + trucking + other,
         )
 
-        # Step 14: Compute simulation horizon date
-        # How far forward the system projects stock: boat arrival + factory full lead time
-        try:
-            from services.factory_service import get_factory_service
-            factory_svc = get_factory_service()
-            ci_factory = factory_svc.get_by_id("d45d2c83-fe4b-4f4f-8e73-a3002a84e041")
-            if ci_factory:
-                _lead_days = (
-                    ci_factory["production_lead_days"]
-                    + ci_factory["transport_to_port_days"]
-                    + 9  # average sea transit
-                )
-            else:
-                _lead_days = 49
-        except Exception:
-            _lead_days = 49
-        _days_until_arrival = (boat.arrival_date - today).days if boat.arrival_date else 30
-        simulation_horizon_date = today + timedelta(days=max(0, _days_until_arrival) + _lead_days)
-
-        # Step 15: Compute factory timeline milestones (OB V2)
+        # Step 14: Compute factory timeline milestones (OB V2)
         factory_timeline = None
         factory_name_str = None
         if factory_data and boat.boat_id:
@@ -439,8 +420,6 @@ class OrderBuilderService:
             liquidation_clearance=liquidation_clearance,
             # Shipping cost config for frontend cost estimation
             shipping_cost_config=shipping_cost_config,
-            # Simulation horizon
-            simulation_horizon_date=simulation_horizon_date,
             # Factory-aware fields (OB V2)
             factory_id=factory_id,
             factory_name=factory_name_str,
