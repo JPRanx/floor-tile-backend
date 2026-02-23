@@ -2358,14 +2358,16 @@ class OrderBuilderService:
             available_containers = 0
 
         # Build reason string showing BOTH need and available (Spanish)
+        bl_need = "BL" if recommended_bls == 1 else "BLs"
+        bl_avail = "BL" if available_bls == 1 else "BLs"
         if total_true_need_m2 <= 0:
             reason = "Sin brecha de cobertura (inventario adecuado)"
         elif total_factory_available_m2 <= 0:
-            reason = f"Necesita: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Disponible: 0 (SIESA vacío)"
+            reason = f"Necesita: {recommended_bls} {bl_need} ({total_true_need_m2:,.0f} m²) • Disponible: 0 (SIESA vacío)"
         elif available_bls >= recommended_bls:
-            reason = f"Necesita: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Disponible: {available_bls} BLs ({total_factory_available_m2:,.0f} m²) ✓"
+            reason = f"Necesita: {recommended_bls} {bl_need} ({total_true_need_m2:,.0f} m²) • Disponible: {available_bls} {bl_avail} ({total_factory_available_m2:,.0f} m²) ✓"
         else:
-            reason = f"Necesita: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Disponible: {available_bls} BLs ({total_factory_available_m2:,.0f} m²)"
+            reason = f"Necesita: {recommended_bls} {bl_need} ({total_true_need_m2:,.0f} m²) • Disponible: {available_bls} {bl_avail} ({total_factory_available_m2:,.0f} m²)"
 
         return recommended_bls, available_bls, reason
 
