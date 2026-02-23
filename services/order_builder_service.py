@@ -2691,12 +2691,35 @@ class OrderBuilderService:
         boat_date_str = boat.departure_date.strftime("%b %d")  # e.g., "Feb 15"
 
         # === STRATEGY SENTENCE ===
-        # Why are we ordering?
+        # Why are we ordering? Include actionable context about shippability.
         if stockout_risk_count > 0:
-            strategy_sentence = (
-                f"Prioritizing {stockout_risk_count} products at stockout risk "
-                f"before the {boat_date_str} boat."
-            )
+            # Count how many at-risk products can actually ship (have SIESA stock)
+            at_risk = [
+                p for p in all_products
+                if p.reasoning and p.reasoning.stock.gap_days is not None
+                and p.reasoning.stock.gap_days < 0
+            ]
+            shippable = [p for p in at_risk if float(p.factory_available_m2 or 0) > 0]
+            unshippable = [p for p in at_risk if float(p.factory_available_m2 or 0) <= 0]
+
+            if shippable and unshippable:
+                skus_no_stock = ", ".join(p.sku for p in unshippable[:3])
+                strategy_sentence = (
+                    f"{stockout_risk_count} products at stockout risk. "
+                    f"{len(shippable)} can ship now, {len(unshippable)} have no SIESA stock "
+                    f"({skus_no_stock})."
+                )
+            elif unshippable and not shippable:
+                skus_no_stock = ", ".join(p.sku for p in unshippable[:3])
+                strategy_sentence = (
+                    f"{stockout_risk_count} products at stockout risk but no SIESA stock to ship "
+                    f"({skus_no_stock}). Check production schedule."
+                )
+            else:
+                strategy_sentence = (
+                    f"{stockout_risk_count} products at stockout risk — "
+                    f"all have SIESA stock ready to ship."
+                )
         elif critical_count > 0:
             strategy_sentence = (
                 f"Addressing {critical_count} critical products "
