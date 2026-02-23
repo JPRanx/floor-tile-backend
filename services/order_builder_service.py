@@ -882,6 +882,7 @@ class OrderBuilderService:
         self,
         factory_available_m2: Decimal,
         production_status: str,
+        production_requested_m2: Decimal,
         production_completed_m2: Decimal,
         production_estimated_ready: Optional[date],
         order_deadline: date,
@@ -893,6 +894,7 @@ class OrderBuilderService:
         Args:
             factory_available_m2: Current SIESA finished goods stock
             production_status: 'scheduled', 'in_progress', 'completed', 'not_scheduled'
+            production_requested_m2: Total m² requested for this production run
             production_completed_m2: M² already completed in production
             production_estimated_ready: When production is expected to complete
             order_deadline: When order must be placed for this boat
@@ -909,19 +911,18 @@ class OrderBuilderService:
         siesa_now = factory_available_m2
 
         # Production completing before deadline
-        # IMPORTANT: Only count IN_PROGRESS production, NOT completed!
-        # Completed production is already in SIESA - adding it would double count
+        # Count scheduled + in_progress production that delivers before the boat loads
+        # Do NOT count "completed" — already in SIESA (factory_available_m2)
         production_completing = Decimal("0")
 
         if production_status == "in_progress":
-            # Only in_progress production that will complete before deadline
             if production_estimated_ready and production_estimated_ready <= order_deadline:
-                # Production will be ready - add to available
-                production_completing = production_completed_m2
-        # NOTE: We do NOT add "completed" production here because:
-        # - Completed production moves to SIESA finished goods
-        # - SIESA (factory_available_m2) already includes it
-        # - Adding it again would double count (e.g., SAMAN BEIGE BTE: 3,763 in both)
+                # In-progress: remaining portion not yet in SIESA
+                production_completing = max(Decimal("0"), production_requested_m2 - production_completed_m2)
+        elif production_status == "scheduled":
+            if production_estimated_ready and production_estimated_ready <= order_deadline:
+                # Scheduled: full amount will be produced (nothing in SIESA yet)
+                production_completing = production_requested_m2
 
         # Total available
         total_available = siesa_now + production_completing
@@ -1714,6 +1715,7 @@ class OrderBuilderService:
                 availability_breakdown = self._calculate_availability_breakdown(
                     factory_available_m2=factory_available_m2,
                     production_status=production_status,
+                    production_requested_m2=production_requested_m2,
                     production_completed_m2=production_completed_m2,
                     production_estimated_ready=production_estimated_ready,
                     order_deadline=order_deadline,
@@ -2120,19 +2122,29 @@ class OrderBuilderService:
         total_selected = 0
         all_products = []
 
-        # Helper: Calculate max shippable pallets based on factory availability
+        # Helper: Get effective available m² (SIESA + production completing before deadline)
+        def get_effective_available(product) -> float:
+            if product.availability_breakdown:
+                return float(product.availability_breakdown.total_available_m2)
+            return float(product.factory_available_m2 or 0)
+
+        # Helper: Calculate max shippable pallets based on total availability
         def get_shippable_pallets(product) -> tuple[int, str]:
             """
             Returns (max_pallets, constraint_note).
-            Respects SIESA factory_available_m2 — can't ship more than what's at factory.
+            Uses total available (SIESA + production completing before deadline).
             Partial pallets are allowed for shipment orders (unlike factory requests).
             """
-            factory_m2 = float(product.factory_available_m2 or 0)
-            if factory_m2 <= 0:
-                return 0, "No SIESA stock available"
+            available_m2 = get_effective_available(product)
+            if available_m2 <= 0:
+                return 0, "No stock available (SIESA + production)"
 
-            max_pallets = max(1, int(factory_m2 / float(M2_PER_PALLET)))
-            note = f"Partial pallet ({int(factory_m2)} m²)" if factory_m2 < float(M2_PER_PALLET) else ""
+            max_pallets = max(1, int(available_m2 / float(M2_PER_PALLET)))
+            note = ""
+            if available_m2 < float(M2_PER_PALLET):
+                note = f"Partial pallet ({int(available_m2)} m²)"
+            elif product.availability_breakdown and float(product.availability_breakdown.production_completing_m2) > 0:
+                note = f"Includes {int(product.availability_breakdown.production_completing_m2)} m² from production"
             return max_pallets, note
 
         # First pass: HIGH_PRIORITY (always include if room AND factory has stock)
@@ -2155,7 +2167,7 @@ class OrderBuilderService:
                 p.selected_pallets = pallets_needed
                 total_selected += pallets_needed
                 if pallets_needed < p.suggested_pallets:
-                    p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
+                    p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
             elif pallets_needed > 0:
                 # Partial fill if there's room
                 remaining = max_pallets - total_selected
@@ -2165,7 +2177,7 @@ class OrderBuilderService:
                     p.selected_pallets = actual_pallets
                     total_selected += actual_pallets
                     if actual_pallets < p.suggested_pallets:
-                        p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
+                        p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
             all_products.append(p)
 
         # Second pass: CONSIDER (include if room available AND factory has stock)
@@ -2188,7 +2200,7 @@ class OrderBuilderService:
                 p.selected_pallets = pallets_needed
                 total_selected += pallets_needed
                 if pallets_needed < p.suggested_pallets:
-                    p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
+                    p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
             elif pallets_needed > 0:
                 # Partial fill
                 remaining = max_pallets - total_selected
@@ -2198,7 +2210,7 @@ class OrderBuilderService:
                     p.selected_pallets = actual_pallets
                     total_selected += actual_pallets
                     if actual_pallets < p.suggested_pallets:
-                        p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
+                        p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
             all_products.append(p)
 
         # Third pass: WELL_COVERED (include if room left AND factory has stock)
@@ -2224,7 +2236,7 @@ class OrderBuilderService:
                     total_selected += pallets_to_add
                     if pallets_to_add < p.suggested_pallets:
                         if max_shippable < p.suggested_pallets:
-                            p.selection_constraint_note = f"Capped at SIESA available ({int(p.factory_available_m2):,} m²)"
+                            p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
             # If suggested_pallets=0, product is overstocked - don't auto-select
             all_products.append(p)
 
