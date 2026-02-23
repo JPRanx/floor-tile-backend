@@ -3607,15 +3607,33 @@ class OrderBuilderService:
                         suggested_action="Schedule a boat after production completes",
                     ))
 
+            elif float(product.in_transit_m2 or 0) > 0:
+                # In-transit supply exists - recovering
+                in_transit_amount = Decimal(str(product.in_transit_m2 or 0))
+                recovering_products.append(ProductRecovery(
+                    sku=product.sku,
+                    product_name=product.description,
+                    current_coverage_days=coverage_days,
+                    stockout_date=stockout_date,
+                    supply_source=SupplySource.IN_TRANSIT,
+                    supply_amount_m2=in_transit_amount,
+                    supply_ready_date=None,
+                    ship_boat_name=None,
+                    ship_boat_departure=None,
+                    arrival_date=None,
+                    status=RecoveryStatus.IN_TRANSIT,
+                    status_note=f"{in_transit_amount:,.0f} m² in transit to warehouse",
+                ))
+
             else:
-                # No supply scheduled - blocked
+                # Truly blocked - no SIESA, no production, no in-transit
                 blockers.append(StabilityBlocker(
                     sku=product.sku,
                     product_name=product.description,
                     current_coverage_days=coverage_days,
                     stockout_date=stockout_date,
                     velocity_m2_per_day=product.daily_velocity_m2,
-                    reason="No stock at SIESA and no production scheduled",
+                    reason="No stock at SIESA, no production scheduled, and nothing in transit",
                     suggested_action="Request production from factory immediately",
                 ))
 

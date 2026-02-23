@@ -1260,6 +1260,7 @@ class SupplySource(str, Enum):
     """Source of supply for recovery."""
     SIESA = "siesa"             # Factory finished goods
     PRODUCTION = "production"   # Scheduled production
+    IN_TRANSIT = "in_transit"   # Already on a boat heading to warehouse
     NONE = "none"               # No supply available
 
 
@@ -1267,6 +1268,7 @@ class RecoveryStatus(str, Enum):
     """Recovery status for a product."""
     SHIPPING = "shipping"           # Will ship on upcoming boat
     IN_PRODUCTION = "in_production" # Waiting for production to complete
+    IN_TRANSIT = "in_transit"       # Already on a boat en route to warehouse
     BLOCKED = "blocked"             # No supply scheduled
 
 
