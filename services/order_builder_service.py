@@ -2125,16 +2125,15 @@ class OrderBuilderService:
             """
             Returns (max_pallets, constraint_note).
             Respects SIESA factory_available_m2 — can't ship more than what's at factory.
+            Partial pallets are allowed for shipment orders (unlike factory requests).
             """
             factory_m2 = float(product.factory_available_m2 or 0)
             if factory_m2 <= 0:
                 return 0, "No SIESA stock available"
 
-            max_pallets = int(factory_m2 / float(M2_PER_PALLET))
-            if max_pallets <= 0:
-                return 0, f"SIESA stock too low ({int(factory_m2)} m²)"
-
-            return max_pallets, ""
+            max_pallets = max(1, int(factory_m2 / float(M2_PER_PALLET)))
+            note = f"Partial pallet ({int(factory_m2)} m²)" if factory_m2 < float(M2_PER_PALLET) else ""
+            return max_pallets, note
 
         # First pass: HIGH_PRIORITY (always include if room AND factory has stock)
         for p in products_by_priority.get("HIGH_PRIORITY", []):
