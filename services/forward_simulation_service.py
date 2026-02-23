@@ -276,6 +276,72 @@ class ForwardSimulationService:
             )
             raise DatabaseError("select", str(e))
 
+    def get_projection_for_boat(
+        self, factory_id: str, boat_id: str
+    ) -> Optional[dict[str, dict]]:
+        """
+        Run forward simulation and extract per-product projections for a specific boat.
+
+        Returns a dict keyed by product_id with projected stock, supply breakdown,
+        and earlier-draft consumption data. Returns None if the boat is not found
+        in the simulation horizon or if the simulation fails.
+        """
+        try:
+            horizon = self.get_planning_horizon(factory_id)
+            projections = horizon.get("projections", [])
+            if not projections:
+                return None
+
+            # Find the target boat
+            target_proj: Optional[dict] = None
+            for proj in projections:
+                if proj["boat_id"] == boat_id:
+                    target_proj = proj
+                    break
+
+            if target_proj is None:
+                return None
+
+            # Build first boat's warehouse values (pristine stock before any cascade)
+            first_warehouse_by_pid: dict[str, Decimal] = {}
+            for pd in projections[0]["product_details"]:
+                first_warehouse_by_pid[pd["product_id"]] = Decimal(
+                    str(pd["supply_breakdown"]["warehouse_m2"])
+                )
+
+            # Build result dict keyed by product_id
+            result: dict[str, dict] = {}
+            for pd in target_proj["product_details"]:
+                pid = pd["product_id"]
+                original_warehouse = first_warehouse_by_pid.get(pid, Decimal("0"))
+                current_warehouse = Decimal(str(pd["supply_breakdown"]["warehouse_m2"]))
+                earlier_consumed = max(Decimal("0"), original_warehouse - current_warehouse)
+
+                result[pid] = {
+                    "projected_stock_m2": Decimal(str(pd["projected_stock_m2"])),
+                    "daily_velocity_m2": Decimal(str(pd["daily_velocity_m2"])),
+                    "supply_breakdown": {
+                        "warehouse_m2": current_warehouse,
+                        "factory_siesa_m2": Decimal(str(pd["supply_breakdown"]["factory_siesa_m2"])),
+                        "production_pipeline_m2": Decimal(str(pd["supply_breakdown"]["production_pipeline_m2"])),
+                        "in_transit_m2": Decimal(str(pd["supply_breakdown"]["in_transit_m2"])),
+                    },
+                    "earlier_drafts_consumed_m2": earlier_consumed,
+                    "coverage_gap_m2": Decimal(str(pd["coverage_gap_m2"])),
+                    "days_of_stock_at_arrival": pd["days_of_stock_at_arrival"],
+                }
+
+            return result
+
+        except Exception as e:
+            logger.warning(
+                "get_projection_for_boat_failed",
+                factory_id=factory_id,
+                boat_id=boat_id,
+                error=str(e),
+            )
+            return None
+
     # ------------------------------------------------------------------
     # Boat simulation
     # ------------------------------------------------------------------

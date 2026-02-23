@@ -142,6 +142,7 @@ class OrderBuilderService:
         num_bls: int = 1,
         excluded_skus: Optional[list[str]] = None,
         factory_id: Optional[str] = None,
+        use_projection: bool = False,
     ) -> OrderBuilderResponse:
         """
         Get complete Order Builder data.
@@ -268,6 +269,23 @@ class OrderBuilderService:
         # Step 2c: Calculate dynamic coverage buffer based on next boat arrival
         coverage_buffer_days = self._get_coverage_buffer(boat, next_boat)
 
+        # Step 2d: Forward simulation for multi-boat awareness
+        projection_map = None
+        if use_projection and factory_id and boat and boat.boat_id:
+            try:
+                from services.forward_simulation_service import get_forward_simulation_service
+                fwd_sim = get_forward_simulation_service()
+                projection_map = fwd_sim.get_projection_for_boat(factory_id, boat.boat_id)
+                if projection_map:
+                    logger.info(
+                        "forward_simulation_loaded",
+                        factory_id=factory_id,
+                        boat_id=boat.boat_id,
+                        products_projected=len(projection_map),
+                    )
+            except Exception as e:
+                logger.warning("forward_sim_fallback", error=str(e))
+
         # Step 3: Convert to OrderBuilderProducts grouped by priority
         t3 = time.time()
         products_by_priority = self._group_products_by_priority(
@@ -278,6 +296,7 @@ class OrderBuilderService:
             order_deadline=boat.order_deadline,  # Pass for availability breakdown calculation
             coverage_buffer_days=coverage_buffer_days,  # Dynamic buffer based on next boat
             inventory_snapshots=inventory_snapshots,
+            projection_map=projection_map,  # Forward simulation projections
         )
         timings["4_grouping"] = round(time.time() - t3, 2)
 
@@ -1303,6 +1322,7 @@ class OrderBuilderService:
         order_deadline: Optional[date] = None,
         coverage_buffer_days: Optional[int] = None,
         inventory_snapshots: Optional[list] = None,
+        projection_map: Optional[dict] = None,
     ) -> dict[str, list[OrderBuilderProduct]]:
         """Convert recommendations to OrderBuilderProducts grouped by priority."""
         groups = {
@@ -1425,40 +1445,66 @@ class OrderBuilderService:
             # Calculate urgency based on days of stock
             urgency = self._calculate_urgency(days_of_stock)
 
-            # Calculate base quantity (lead time + dynamic buffer) × velocity
-            total_coverage_days = days_to_cover + buffer_days
-            base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
+            # Check for forward simulation projection
+            projection = projection_map.get(rec.product_id) if projection_map else None
 
-            # Calculate trend adjustment
-            trend_adjustment_m2, trend_adjustment_pct = self._calculate_trend_adjustment(
-                direction, strength, base_quantity_m2
-            )
+            if projection is not None:
+                # PROJECTION PATH: use projected stock at boat's arrival
+                # projected_stock already accounts for:
+                # - Warehouse depletion (velocity × days_to_arrival)
+                # - Earlier boat drafts consuming stock
+                # - SIESA, production, in_transit supply
+                # - Pending orders (via ordered/confirmed drafts)
+                projected_stock = projection["projected_stock_m2"]
+                total_coverage_days = buffer_days  # Only cover gap to NEXT boat
+                base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
 
-            # Calculate adjusted requirement
-            adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
+                trend_adjustment_m2, trend_adjustment_pct = self._calculate_trend_adjustment(
+                    direction, strength, base_quantity_m2
+                )
+                adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
 
-            # Subtract current stock and incoming
-            minus_current = rec.warehouse_m2 or Decimal("0")
-            minus_incoming = rec.in_transit_m2 or Decimal("0")
+                minus_current = projected_stock
+                minus_incoming = Decimal("0")  # Already in projection
 
-            # Get pending orders for this SKU (already ordered, awaiting shipment)
-            pending_info = pending_orders_map.get(rec.sku, {})
-            pending_order_m2 = Decimal(str(pending_info.get("total_m2", 0)))
-            pending_order_pallets = int(pending_info.get("total_pallets", 0))
-            pending_order_boat = pending_info.get("boat_name")
+                # Skip pending orders — already baked into projected_stock
+                pending_order_m2 = Decimal("0")
+                pending_order_pallets = 0
+                pending_order_boat = None
 
-            # Coverage gap = adjusted_need - warehouse - in_transit - pending_orders
-            final_suggestion_m2 = max(
-                Decimal("0"),
-                adjusted_quantity_m2 - minus_current - minus_incoming - pending_order_m2
-            )
+                final_suggestion_m2 = max(
+                    Decimal("0"),
+                    adjusted_quantity_m2 - projected_stock
+                )
+            else:
+                # CURRENT PATH: calculate from today's inventory
+                total_coverage_days = days_to_cover + buffer_days
+                base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
+
+                trend_adjustment_m2, trend_adjustment_pct = self._calculate_trend_adjustment(
+                    direction, strength, base_quantity_m2
+                )
+                adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
+
+                minus_current = rec.warehouse_m2 or Decimal("0")
+                minus_incoming = rec.in_transit_m2 or Decimal("0")
+
+                pending_info = pending_orders_map.get(rec.sku, {})
+                pending_order_m2 = Decimal(str(pending_info.get("total_m2", 0)))
+                pending_order_pallets = int(pending_info.get("total_pallets", 0))
+                pending_order_boat = pending_info.get("boat_name")
+
+                final_suggestion_m2 = max(
+                    Decimal("0"),
+                    adjusted_quantity_m2 - minus_current - minus_incoming - pending_order_m2
+                )
 
             # Convert to pallets
             final_suggestion_pallets = max(0, math.ceil(float(final_suggestion_m2 / M2_PER_PALLET)))
 
             # Build calculation breakdown
             breakdown = CalculationBreakdown(
-                lead_time_days=days_to_cover,
+                lead_time_days=0 if projection is not None else days_to_cover,
                 ordering_cycle_days=buffer_days,  # Dynamic buffer based on next boat
                 daily_velocity_m2=daily_velocity_m2,
                 base_quantity_m2=round(base_quantity_m2, 2),
@@ -1468,6 +1514,10 @@ class OrderBuilderService:
                 minus_incoming_m2=minus_incoming,
                 final_suggestion_m2=round(final_suggestion_m2, 2),
                 final_suggestion_pallets=final_suggestion_pallets,
+                # Forward simulation fields
+                uses_projection=projection is not None,
+                projected_stock_m2=projection["projected_stock_m2"] if projection is not None else None,
+                earlier_drafts_consumed_m2=projection["earlier_drafts_consumed_m2"] if projection is not None else None,
             )
 
             # Use the calculated suggestion if we have trend data, otherwise fall back to original
@@ -1771,6 +1821,10 @@ class OrderBuilderService:
                 availability_breakdown=availability_breakdown,
                 # Full calculation breakdown (transparency layer)
                 full_calculation_breakdown=full_calculation_breakdown,
+                # Forward simulation (multi-boat awareness)
+                projected_stock_m2=projection["projected_stock_m2"] if projection is not None else None,
+                earlier_drafts_consumed_m2=projection["earlier_drafts_consumed_m2"] if projection is not None else None,
+                uses_forward_simulation=projection is not None,
                 # Committed orders (5e)
                 committed_orders_m2=float(committed_map.get(rec.product_id, {}).get("total_m2", 0)),
                 committed_orders_customer=committed_map.get(rec.product_id, {}).get("customer"),

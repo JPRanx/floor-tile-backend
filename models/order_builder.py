@@ -228,6 +228,11 @@ class CalculationBreakdown(BaseSchema):
     final_suggestion_m2: Decimal = Field(..., description="Final recommended quantity")
     final_suggestion_pallets: int = Field(..., description="Final recommendation in pallets")
 
+    # Forward simulation transparency
+    uses_projection: bool = Field(default=False, description="True if projected_stock was used instead of raw warehouse/transit")
+    projected_stock_m2: Optional[Decimal] = Field(None, description="Projected stock at arrival from forward simulation")
+    earlier_drafts_consumed_m2: Optional[Decimal] = Field(None, description="Stock consumed by earlier boats' draft allocations")
+
 
 # ===================
 # FULL CALCULATION BREAKDOWN (Transparency Layer)
@@ -271,6 +276,20 @@ class CoverageCalculation(BaseSchema):
     warehouse_m2: Decimal = Field(..., description="Current warehouse stock")
     in_transit_m2: Decimal = Field(default=Decimal("0"), description="Stock in transit")
     pending_order_m2: Decimal = Field(default=Decimal("0"), description="Pending warehouse orders (awaiting shipment)")
+
+    # Forward simulation transparency
+    uses_projection: bool = Field(
+        default=False,
+        description="True if projected_stock was used instead of raw warehouse/transit",
+    )
+    projected_stock_m2: Optional[Decimal] = Field(
+        None,
+        description="Projected stock at arrival from forward simulation",
+    )
+    earlier_drafts_consumed_m2: Optional[Decimal] = Field(
+        None,
+        description="Stock consumed by earlier boats' draft allocations",
+    )
 
     # Gap result
     coverage_gap_m2: Decimal = Field(..., description="adjusted_need - warehouse - in_transit - pending_orders")
@@ -454,6 +473,20 @@ class OrderBuilderProduct(BaseSchema):
     pending_order_m2: Decimal = Field(default=Decimal("0"), description="m² already ordered, awaiting shipment")
     pending_order_pallets: int = Field(default=0, description="Pallets already ordered")
     pending_order_boat: Optional[str] = Field(default=None, description="Which boat the pending order is on")
+
+    # Forward simulation fields (populated when use_projection=True)
+    projected_stock_m2: Optional[Decimal] = Field(
+        None,
+        description="Projected stock at this boat's arrival, accounting for earlier boats' drafts",
+    )
+    earlier_drafts_consumed_m2: Optional[Decimal] = Field(
+        None,
+        description="m2 consumed by earlier boats' draft allocations",
+    )
+    uses_forward_simulation: bool = Field(
+        default=False,
+        description="True when numbers come from forward simulation (multi-boat aware)",
+    )
 
     days_to_cover: int = Field(..., description="Days until next boat arrival")
     total_demand_m2: Decimal = Field(..., description="Demand during coverage period")
