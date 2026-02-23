@@ -720,6 +720,7 @@ class ForwardSimulationService:
 
         earliest_order_date: Optional[date] = None
         limiting_sku: Optional[str] = None
+        limiting_pid: Optional[str] = None
         min_coverage_days: Optional[int] = None
 
         # Track products that actually need a production run
@@ -795,6 +796,7 @@ class ForwardSimulationService:
             if earliest_order_date is None or order_by < earliest_order_date:
                 earliest_order_date = order_by
                 limiting_sku = product.get("sku", "")
+                limiting_pid = pid
                 min_coverage_days = coverage_days
 
         if earliest_order_date is None:
@@ -821,16 +823,60 @@ class ForwardSimulationService:
             total_gap_m2 = sum(p["gap_m2"] for p in products_needing_production)
             estimated_pallets = int(total_gap_m2 / M2_PER_PALLET)
 
+        # Production-aware signal classification
+        is_overdue = days_until < 0
+        signal_type = "on_track"
+        limiting_production_delivery_str: Optional[str] = None
+        can_make_boat = True
+
+        if is_overdue and limiting_pid:
+            # Check if limiting product has active production rows
+            limiting_prod_rows = [
+                prow for prow in production_pipeline.get(limiting_pid, [])
+                if prow["status"] in ("scheduled", "in_progress")
+                and prow.get("estimated_delivery_date")
+            ]
+
+            if limiting_prod_rows:
+                earliest_delivery = min(
+                    _parse_date(prow["estimated_delivery_date"])
+                    for prow in limiting_prod_rows
+                )
+                limiting_production_delivery_str = earliest_delivery.isoformat()
+                ready_at_port = earliest_delivery + timedelta(days=transport_to_port)
+
+                if target_boat_departure:
+                    target_dep = _parse_date(target_boat_departure)
+                    if ready_at_port <= target_dep:
+                        signal_type = "in_production"
+                        can_make_boat = True
+                    else:
+                        signal_type = "production_delayed"
+                        can_make_boat = False
+                else:
+                    signal_type = "in_production"
+            else:
+                # No production for limiting product
+                if target_boat_name:
+                    signal_type = "order_today"
+                    can_make_boat = True
+                else:
+                    signal_type = "no_production"
+                    can_make_boat = False
+
         return {
             "next_order_date": earliest_order_date.isoformat(),
             "days_until_order": days_until,
-            "is_overdue": days_until < 0,
+            "is_overdue": is_overdue,
             "limiting_product_sku": limiting_sku,
             "effective_coverage_days": min_coverage_days,
             "target_boat_name": target_boat_name,
             "target_boat_departure": target_boat_departure,
             "estimated_pallets": estimated_pallets,
             "product_count": product_count if product_count > 0 else None,
+            "signal_type": signal_type,
+            "limiting_production_delivery": limiting_production_delivery_str,
+            "can_make_target_boat": can_make_boat,
         }
 
     # ------------------------------------------------------------------

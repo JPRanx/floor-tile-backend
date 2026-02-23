@@ -266,6 +266,16 @@ class FactoryOrderSignal(BaseSchema):
     product_count: Optional[int] = Field(
         None, description="Number of products needing production"
     )
+    signal_type: str = Field(
+        "on_track",
+        description="Signal classification: on_track, in_production, production_delayed, order_today, no_production"
+    )
+    limiting_production_delivery: Optional[str] = Field(
+        None, description="Estimated delivery date of active production for the limiting product (ISO)"
+    )
+    can_make_target_boat: bool = Field(
+        True, description="Whether current production or ordering today can catch the target boat"
+    )
 
 
 class PlanningHorizonResponse(BaseSchema):
