@@ -2357,15 +2357,15 @@ class OrderBuilderService:
             available_bls = 0
             available_containers = 0
 
-        # Build reason string showing BOTH need and available
+        # Build reason string showing BOTH need and available (Spanish)
         if total_true_need_m2 <= 0:
-            reason = "No coverage gap (stock is adequate)"
+            reason = "Sin brecha de cobertura (inventario adecuado)"
         elif total_factory_available_m2 <= 0:
-            reason = f"Need: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Available: 0 (SIESA empty)"
+            reason = f"Necesita: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Disponible: 0 (SIESA vacío)"
         elif available_bls >= recommended_bls:
-            reason = f"Need: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Available: {available_bls} BLs ({total_factory_available_m2:,.0f} m²) ✓"
+            reason = f"Necesita: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Disponible: {available_bls} BLs ({total_factory_available_m2:,.0f} m²) ✓"
         else:
-            reason = f"Need: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Available: {available_bls} BLs ({total_factory_available_m2:,.0f} m²)"
+            reason = f"Necesita: {recommended_bls} BLs ({total_true_need_m2:,.0f} m²) • Disponible: {available_bls} BLs ({total_factory_available_m2:,.0f} m²)"
 
         return recommended_bls, available_bls, reason
 
@@ -3756,7 +3756,7 @@ class OrderBuilderService:
             next_boat=None,
             num_bls=num_bls,
             recommended_bls=1,
-            recommended_bls_reason="No boats scheduled",
+            recommended_bls_reason="Sin barcos programados",
             high_priority=[],
             consider=[],
             well_covered=[],
