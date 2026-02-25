@@ -414,7 +414,157 @@ class InventoryLedgerService:
             products_discrepant=discrepant,
         )
 
+        # Send Telegram notification (never blocks report creation)
+        try:
+            self._notify_reconciliation(report_row, items, recon_type, filename)
+        except Exception as notify_err:
+            logger.warning("recon_notification_failed", error=str(notify_err))
+
         return result.data[0] if result.data else {}
+
+    # ===================
+    # NOTIFICATIONS
+    # ===================
+
+    def _notify_reconciliation(
+        self,
+        report_row: dict,
+        items: list,
+        recon_type: str,
+        filename: Optional[str] = None,
+    ):
+        """
+        Send Telegram notification after reconciliation.
+
+        Alerts when:
+        - Any single product discrepancy > 500 m²
+        - More than 10% of products have discrepancies
+        - Any product has negative projected inventory
+
+        Sends reassuring confirmation when all clean.
+        """
+        try:
+            from integrations.telegram import send_message
+        except ImportError:
+            return
+
+        products_reconciled = report_row.get("products_reconciled", 0)
+        products_discrepant = report_row.get("products_discrepant", 0)
+        total_disc = Decimal(str(report_row.get("total_discrepancy_m2", 0)))
+
+        if products_reconciled == 0:
+            return
+
+        # --- Threshold checks ---
+
+        # 1. Large single-product discrepancies (> 500 m²)
+        large = sorted(
+            [
+                i for i in items
+                if abs(Decimal(str(i.get("discrepancy_m2", 0)))) > 500
+            ],
+            key=lambda x: abs(Decimal(str(x.get("discrepancy_m2", 0)))),
+            reverse=True,
+        )[:5]
+
+        # 2. High discrepancy rate (> 10%)
+        pct = (products_discrepant / products_reconciled * 100) if products_reconciled > 0 else 0
+
+        # 3. Negative projected inventory after reconciliation
+        product_ids = [i["product_id"] for i in items]
+        neg = []
+        if product_ids:
+            try:
+                proj_result = (
+                    self.db.table("inventory_projected")
+                    .select("product_id, warehouse_m2, factory_m2, transit_m2")
+                    .in_("product_id", product_ids)
+                    .execute()
+                )
+                for row in (proj_result.data or []):
+                    buckets = []
+                    for col, label in [
+                        ("warehouse_m2", "almacén"),
+                        ("factory_m2", "fábrica"),
+                        ("transit_m2", "tránsito"),
+                    ]:
+                        val = Decimal(str(row.get(col, 0)))
+                        if val < 0:
+                            buckets.append(f"{label}={val}")
+                    if buckets:
+                        neg.append({
+                            "product_id": row["product_id"],
+                            "detail": ", ".join(buckets),
+                        })
+            except Exception:
+                pass  # Don't block notification on projected lookup failure
+
+        is_concerning = len(large) > 0 or pct > 10 or len(neg) > 0
+
+        # --- Look up SKUs for display ---
+        sku_map: dict[str, str] = {}
+        lookup_ids = list(set(
+            [i["product_id"] for i in large] + [n["product_id"] for n in neg]
+        ))
+        if lookup_ids:
+            try:
+                sku_result = (
+                    self.db.table("products")
+                    .select("id, sku")
+                    .in_("id", lookup_ids)
+                    .execute()
+                )
+                sku_map = {r["id"]: r["sku"] for r in (sku_result.data or [])}
+            except Exception:
+                pass
+
+        # --- Build message ---
+        type_names = {
+            "warehouse": "Almacén",
+            "factory": "Fábrica (SIESA)",
+            "transit": "En Tránsito",
+            "production": "Producción",
+        }
+        type_name = type_names.get(recon_type, recon_type)
+
+        if not is_concerning:
+            msg = f"✅ *Reconciliación limpia: {type_name}*\n\n"
+            msg += f"Productos reconciliados: {products_reconciled}\n"
+            msg += "Todos coinciden ✓"
+            if filename:
+                msg += f"\n\nArchivo: `{filename}`"
+        else:
+            emoji = "🚨" if len(neg) > 0 else "⚠️"
+            msg = f"{emoji} *Discrepancias: {type_name}*\n\n"
+            msg += f"Productos reconciliados: {products_reconciled}\n"
+            msg += f"Con discrepancia: {products_discrepant} ({pct:.0f}%)\n"
+            msg += f"Discrepancia total: {total_disc:,.2f} m²"
+
+            if large:
+                msg += "\n\n*Mayores discrepancias:*"
+                for item in large:
+                    pid = item["product_id"]
+                    sku = sku_map.get(pid, pid[:8])
+                    disc = Decimal(str(item["discrepancy_m2"]))
+                    proj = Decimal(str(item.get("projected_m2", 0)))
+                    actual = Decimal(str(item.get("actual_m2", 0)))
+                    sign = "+" if disc > 0 else ""
+                    msg += f"\n• `{sku}`: {sign}{disc:,.2f} m² (proy: {proj:,.0f} → real: {actual:,.0f})"
+
+            if neg:
+                msg += "\n\n🚨 *Inventario negativo detectado:*"
+                for n in neg:
+                    sku = sku_map.get(n["product_id"], n["product_id"][:8])
+                    msg += f"\n• `{sku}`: {n['detail']}"
+
+            if filename:
+                msg += f"\n\nArchivo: `{filename}`"
+
+        try:
+            send_message(msg)
+            logger.info("telegram_recon_notification_sent", recon_type=recon_type)
+        except Exception as send_err:
+            logger.warning("telegram_recon_send_failed", error=str(send_err))
 
     # ===================
     # QUERY METHODS
