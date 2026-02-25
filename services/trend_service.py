@@ -265,11 +265,11 @@ class TrendService:
             "product_id, week_start, quantity_m2, total_price_usd"
         ).gte("week_start", previous_start.isoformat()).execute()
 
-        # Fetch products for SKU mapping (tiles only - excludes FURNITURE, SINK, SURCHARGE)
+        # Fetch ALL products for SKU mapping (need names even for inactive/non-tile)
         tile_categories = [cat.value for cat in TILE_CATEGORIES]
         products_result = self.db.table("products").select(
             "id, sku, category"
-        ).eq("active", True).in_("category", tile_categories).execute()
+        ).execute()
         products_by_id = {p["id"]: p for p in products_result.data}
 
         # Get days_of_stock from MetricsService (single source of truth)
@@ -323,6 +323,10 @@ class TrendService:
             product = products_by_id.get(pid, {})
             sku = product.get("sku", "Unknown")
             category = product.get("category")
+
+            # Skip non-tile products (FURNITURE, SINK, SURCHARGE)
+            if category and category not in tile_categories:
+                continue
 
             # Calculate volumes
             current_volumes = [v for _, v in current_sales.get(pid, [])]
