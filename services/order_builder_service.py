@@ -208,7 +208,7 @@ class OrderBuilderService:
 
         # Step 2: Get recommendations (has coverage gap, confidence, priority)
         t1 = time.time()
-        recommendations = self.recommendation_service.get_recommendations()
+        recommendations = self.recommendation_service.get_recommendations(factory_id=factory_id)
         timings["2_recommendations"] = round(time.time() - t1, 2)
 
         # Step 2a: Filter out excluded SKUs (for recalculate)
@@ -258,6 +258,15 @@ class OrderBuilderService:
                     filtered_count=len(recommendations.recommendations),
                 )
 
+        # Step 2a⅞: Get unit config for factory (unit-based vs m²-based)
+        unit_config = None
+        is_unit_based = False
+        if factory_id:
+            from services.unit_config_service import get_unit_config
+            from config import get_supabase_client
+            unit_config = get_unit_config(get_supabase_client(), factory_id)
+            is_unit_based = bool(unit_config and not unit_config["is_m2_based"])
+
         # Step 2a½: Get inventory snapshot once (reused by grouping, mode, summary)
         inventory_snapshots = self.inventory_service.get_latest()
 
@@ -286,6 +295,16 @@ class OrderBuilderService:
             except Exception as e:
                 logger.warning("forward_sim_fallback", error=str(e))
 
+        # Build pallet factor map for unit-based factories
+        pallet_factor_map: dict[str, Decimal] = {}
+        if is_unit_based and factory_id:
+            from services.product_service import get_product_service
+            _prod_svc = get_product_service()
+            _factory_products = _prod_svc.get_active_products_for_factory(factory_id)
+            pallet_factor_map = {
+                p.id: Decimal(str(p.units_per_pallet or 20)) for p in _factory_products
+            }
+
         # Step 3: Convert to OrderBuilderProducts grouped by priority
         t3 = time.time()
         products_by_priority = self._group_products_by_priority(
@@ -297,6 +316,8 @@ class OrderBuilderService:
             coverage_buffer_days=coverage_buffer_days,  # Dynamic buffer based on next boat
             inventory_snapshots=inventory_snapshots,
             projection_map=projection_map,  # Forward simulation projections
+            is_unit_based=is_unit_based,
+            pallet_factor_map=pallet_factor_map,
         )
         timings["4_grouping"] = round(time.time() - t3, 2)
 
@@ -443,6 +464,9 @@ class OrderBuilderService:
             factory_id=factory_id,
             factory_name=factory_name_str,
             factory_timeline=factory_timeline,
+            # Unit-based factory fields
+            unit_label=unit_config["unit_label"] if unit_config else "m²",
+            is_unit_based=is_unit_based,
         )
 
         logger.info(
@@ -1324,6 +1348,8 @@ class OrderBuilderService:
         coverage_buffer_days: Optional[int] = None,
         inventory_snapshots: Optional[list] = None,
         projection_map: Optional[dict] = None,
+        is_unit_based: bool = False,
+        pallet_factor_map: Optional[dict[str, Decimal]] = None,
     ) -> dict[str, list[OrderBuilderProduct]]:
         """Convert recommendations to OrderBuilderProducts grouped by priority."""
         groups = {
@@ -1506,8 +1532,9 @@ class OrderBuilderService:
                     adjusted_quantity_m2 - minus_current - minus_incoming - pending_order_m2
                 )
 
-            # Convert to pallets
-            final_suggestion_pallets = max(0, math.ceil(float(final_suggestion_m2 / M2_PER_PALLET)))
+            # Convert to pallets (use per-product factor for unit-based factories)
+            _pf = (pallet_factor_map or {}).get(rec.product_id, M2_PER_PALLET) if is_unit_based else M2_PER_PALLET
+            final_suggestion_pallets = max(0, math.ceil(float(final_suggestion_m2 / _pf)))
 
             # Build calculation breakdown
             breakdown = CalculationBreakdown(
@@ -1840,6 +1867,8 @@ class OrderBuilderService:
                 # Unfulfilled demand (5f)
                 unfulfilled_demand_m2=float(unfulfilled_map.get(rec.product_id, Decimal("0"))),
                 has_unfulfilled_demand=unfulfilled_map.get(rec.product_id, Decimal("0")) > 0,
+                # Pallet conversion factor (for unit-aware display)
+                pallet_conversion_factor=_pf,
             )
 
             # Calculate priority score and display reasoning (Layer 2 & 4)
@@ -2324,15 +2353,23 @@ class OrderBuilderService:
         # Calculate selection totals
         selected = [p for p in products if p.is_selected]
         total_pallets = sum(p.selected_pallets for p in selected)
-        total_m2 = Decimal(total_pallets) * M2_PER_PALLET
+
+        # For unit-based products, use per-product pallet_conversion_factor
+        # For tiles, fall back to M2_PER_PALLET
+        total_m2 = Decimal("0")
+        for p in selected:
+            pcf = p.pallet_conversion_factor if p.pallet_conversion_factor else M2_PER_PALLET
+            total_m2 += Decimal(p.selected_pallets) * pcf
 
         # Calculate weight-based container requirements
         # Each product may have different weight per m² (future support)
+        # For unit-based products, weight_per_m2_kg is reinterpreted as weight per unit
         total_weight_kg = Decimal("0")
         for p in selected:
-            product_m2 = Decimal(p.selected_pallets) * M2_PER_PALLET
-            weight_per_m2 = p.weight_per_m2_kg or DEFAULT_WEIGHT_PER_M2_KG
-            product_weight = product_m2 * weight_per_m2
+            pcf = p.pallet_conversion_factor if p.pallet_conversion_factor else M2_PER_PALLET
+            product_qty = Decimal(p.selected_pallets) * pcf
+            weight_per_unit = p.weight_per_m2_kg or DEFAULT_WEIGHT_PER_M2_KG
+            product_weight = product_qty * weight_per_unit
             total_weight_kg += product_weight
             # Update product's total_weight_kg for UI display
             p.total_weight_kg = product_weight

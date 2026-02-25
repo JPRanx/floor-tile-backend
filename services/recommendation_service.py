@@ -248,21 +248,49 @@ class RecommendationService:
 
         return allocations, scale_factor
 
-    def get_recommendations(self) -> OrderRecommendations:
+    def get_recommendations(
+        self, factory_id: Optional[str] = None
+    ) -> OrderRecommendations:
         """
         Generate order recommendations for all products.
 
         Compares current stock against target allocation and
         recommends orders for products below target.
 
+        Args:
+            factory_id: Optional factory UUID. When provided, passes to
+                allocate_warehouse_slots for factory-scoped allocation
+                and uses per-product pallet conversion for unit-based factories.
+
         Returns:
             OrderRecommendations with all recommendations and warnings
         """
-        logger.info("generating_order_recommendations")
+        logger.info("generating_order_recommendations", factory_id=factory_id)
+
+        # Determine if this is a unit-based factory
+        is_unit_based = False
+        if factory_id:
+            from config import get_supabase_client
+            unit_cfg = get_unit_config(get_supabase_client(), factory_id)
+            is_unit_based = bool(unit_cfg and not unit_cfg["is_m2_based"])
 
         # Step 1: Get allocations
-        allocations, scale_factor = self.allocate_warehouse_slots()
+        allocations, scale_factor = self.allocate_warehouse_slots(factory_id=factory_id)
         allocation_map = {a.product_id: a for a in allocations}
+
+        # Build per-product pallet factor for unit-based factories
+        # For tiles: always M2_PER_PALLET. For unit-based: product.units_per_pallet
+        pallet_factor_map: dict[str, Decimal] = {}
+        if is_unit_based and factory_id:
+            products = self.product_service.get_active_products_for_factory(factory_id)
+            for prod in products:
+                pallet_factor_map[prod.id] = Decimal(str(prod.units_per_pallet or 20))
+
+        def _pallet_factor(product_id: str) -> Decimal:
+            """Get pallet conversion factor for a product."""
+            if is_unit_based:
+                return pallet_factor_map.get(product_id, Decimal("20"))
+            return M2_PER_PALLET
 
         # Step 2: Get current stockout status for all products
         stockout_summary = self.stockout_service.calculate_all()
@@ -337,11 +365,11 @@ class RecommendationService:
                     rotation=alloc.rotation,
                     target_pallets=Decimal("0"),
                     target_m2=Decimal("0"),
-                    warehouse_pallets=round(warehouse_m2 / M2_PER_PALLET, 2),
+                    warehouse_pallets=round(warehouse_m2 / _pallet_factor(alloc.product_id), 2),
                     warehouse_m2=round(warehouse_m2, 2),
-                    in_transit_pallets=round(in_transit_m2 / M2_PER_PALLET, 2),
+                    in_transit_pallets=round(in_transit_m2 / _pallet_factor(alloc.product_id), 2),
                     in_transit_m2=round(in_transit_m2, 2),
-                    current_pallets=round((warehouse_m2 + in_transit_m2) / M2_PER_PALLET, 2),
+                    current_pallets=round((warehouse_m2 + in_transit_m2) / _pallet_factor(alloc.product_id), 2),
                     current_m2=round(warehouse_m2 + in_transit_m2, 2),
                     gap_pallets=Decimal("0"),
                     gap_m2=Decimal("0"),
@@ -397,14 +425,15 @@ class RecommendationService:
                 warehouse_m2 = Decimal("0")
                 in_transit_m2 = Decimal("0")
 
-            warehouse_pallets = warehouse_m2 / M2_PER_PALLET
-            in_transit_pallets = in_transit_m2 / M2_PER_PALLET
+            pf = _pallet_factor(alloc.product_id)
+            warehouse_pallets = warehouse_m2 / pf
+            in_transit_pallets = in_transit_m2 / pf
             current_pallets = warehouse_pallets + in_transit_pallets
             current_m2 = warehouse_m2 + in_transit_m2
 
             # Calculate gap
             gap_pallets = target_pallets - current_pallets
-            gap_m2 = gap_pallets * M2_PER_PALLET
+            gap_m2 = gap_pallets * pf
 
             # Check if over-stocked
             # NOTE: Over-stocked products are STILL added to recommendations (with SKIP_ORDER action)
@@ -437,6 +466,7 @@ class RecommendationService:
                     daily_velocity=alloc.daily_velocity,
                     available_m2=current_m2,
                     days_to_cover=days_to_cover,
+                    pallet_factor=_pallet_factor(alloc.product_id),
                 )
 
                 # Get stockout info
@@ -553,6 +583,7 @@ class RecommendationService:
                     daily_velocity=alloc.daily_velocity,
                     available_m2=current_m2,
                     days_to_cover=days_to_cover,
+                    pallet_factor=_pallet_factor(alloc.product_id),
                 )
                 weeks_of_stock = int(days_until_empty / 7) if days_until_empty else 0
 
@@ -628,6 +659,7 @@ class RecommendationService:
                 daily_velocity=alloc.daily_velocity,
                 available_m2=current_m2,
                 days_to_cover=days_to_cover,
+                pallet_factor=_pallet_factor(alloc.product_id),
             )
 
             # Calculate confidence score (using customer data)
@@ -1289,19 +1321,23 @@ class RecommendationService:
         daily_velocity: Decimal,
         available_m2: Decimal,
         days_to_cover: int,
+        pallet_factor: Optional[Decimal] = None,
     ) -> tuple[Decimal, int]:
         """
         Calculate coverage gap: how much stock needed to survive until next boat.
 
         Args:
-            daily_velocity: Average daily sales (m²)
-            available_m2: Current stock + in-transit (m²)
+            daily_velocity: Average daily sales (m² or units)
+            available_m2: Current stock + in-transit (m² or units)
             days_to_cover: Days until next boat arrives
+            pallet_factor: Qty per pallet for conversion. Defaults to M2_PER_PALLET.
 
         Returns:
             Tuple of (coverage_gap_m2, coverage_gap_pallets)
             Positive = need to order, Negative/Zero = have buffer
         """
+        pf = pallet_factor if pallet_factor is not None else M2_PER_PALLET
+
         # Total demand during coverage period
         total_demand_m2 = daily_velocity * days_to_cover
 
@@ -1311,7 +1347,7 @@ class RecommendationService:
         # Convert to pallets (only if positive, otherwise 0)
         if coverage_gap_m2 > 0:
             import math
-            coverage_gap_pallets = math.ceil(float(coverage_gap_m2) / float(M2_PER_PALLET))
+            coverage_gap_pallets = math.ceil(float(coverage_gap_m2) / float(pf))
         else:
             coverage_gap_pallets = 0
 

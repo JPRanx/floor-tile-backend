@@ -678,6 +678,12 @@ class OrderBuilderProduct(BaseSchema):
     unfulfilled_demand_m2: float = Field(0, ge=0, description="Total unfulfilled demand m² (past stockouts, last 90 days)")
     has_unfulfilled_demand: bool = Field(False, description="True if product has recent unfulfilled demand")
 
+    # Pallet conversion factor (unit-aware)
+    pallet_conversion_factor: Optional[Decimal] = Field(
+        default=None,
+        description="Qty per pallet: m²/pallet for tiles, units/pallet for furniture"
+    )
+
 
 class OrderBuilderBoat(BaseSchema):
     """Boat information for Order Builder."""
@@ -1156,6 +1162,10 @@ class OrderBuilderResponse(BaseSchema):
     factory_id: Optional[str] = Field(None, description="Factory UUID if factory-scoped")
     factory_name: Optional[str] = Field(None, description="Factory name if factory-scoped")
     factory_timeline: Optional[dict] = Field(None, description="Factory-specific timeline milestones")
+
+    # === Unit-Based Factory Fields ===
+    unit_label: str = Field(default="m²", description="Unit label for display")
+    is_unit_based: bool = Field(default=False, description="True when factory uses units instead of m²")
 
 
 # ===================
