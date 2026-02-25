@@ -1069,6 +1069,16 @@ class ShippingCostConfig(BaseSchema):
     per_container_total_usd: Decimal = Field(default=Decimal("1397.54"), description="Sum of all per-container costs")
 
 
+class FactoryCapabilities(BaseSchema):
+    """Declares which data layers a factory supports.
+
+    All default True for backward compat — null on the response means all-true.
+    """
+    has_factory_inventory: bool = Field(default=True, description="SIESA/factory finished goods available")
+    has_logistics: bool = Field(default=True, description="Boats, BLs, shipping estimate available")
+    has_production: bool = Field(default=True, description="Production schedules, piggyback available")
+
+
 class OrderBuilderResponse(BaseSchema):
     """Complete Order Builder API response."""
 
@@ -1162,6 +1172,7 @@ class OrderBuilderResponse(BaseSchema):
     factory_id: Optional[str] = Field(None, description="Factory UUID if factory-scoped")
     factory_name: Optional[str] = Field(None, description="Factory name if factory-scoped")
     factory_timeline: Optional[dict] = Field(None, description="Factory-specific timeline milestones")
+    capabilities: Optional[FactoryCapabilities] = Field(None, description="Factory capability flags; null = all-true backward compat")
 
     # === Unit-Based Factory Fields ===
     unit_label: str = Field(default="m²", description="Unit label for display")

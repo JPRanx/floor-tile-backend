@@ -83,6 +83,18 @@ class FactoryCreate(BaseSchema):
         ge=0,
         description="Display sort order"
     )
+    has_factory_inventory: bool = Field(
+        True,
+        description="Whether factory has SIESA/factory finished goods"
+    )
+    has_logistics: bool = Field(
+        True,
+        description="Whether factory has boats, BLs, shipping estimate"
+    )
+    has_production: bool = Field(
+        True,
+        description="Whether factory has production schedules, piggyback"
+    )
 
     @field_validator("monthly_quota_m2")
     @classmethod
@@ -149,6 +161,18 @@ class FactoryUpdate(BaseSchema):
         ge=0,
         description="Display sort order"
     )
+    has_factory_inventory: Optional[bool] = Field(
+        None,
+        description="Whether factory has SIESA/factory finished goods"
+    )
+    has_logistics: Optional[bool] = Field(
+        None,
+        description="Whether factory has boats, BLs, shipping estimate"
+    )
+    has_production: Optional[bool] = Field(
+        None,
+        description="Whether factory has production schedules, piggyback"
+    )
 
     @field_validator("monthly_quota_m2")
     @classmethod
@@ -177,3 +201,6 @@ class FactoryResponse(BaseSchema, TimestampMixin):
     monthly_quota_m2: Decimal = Field(..., description="Monthly production quota in m²")
     active: bool = Field(..., description="Whether factory is currently active")
     sort_order: int = Field(..., description="Display sort order")
+    has_factory_inventory: bool = Field(default=True, description="Whether factory has SIESA/factory finished goods")
+    has_logistics: bool = Field(default=True, description="Whether factory has boats, BLs, shipping estimate")
+    has_production: bool = Field(default=True, description="Whether factory has production schedules, piggyback")

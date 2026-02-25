@@ -88,6 +88,8 @@ from models.order_builder import (
     FullCalculationBreakdown,
     # Shipping cost config
     ShippingCostConfig,
+    # Factory capabilities
+    FactoryCapabilities,
 )
 from models.recommendation import RecommendationPriority
 
@@ -266,6 +268,15 @@ class OrderBuilderService:
             from config import get_supabase_client
             unit_config = get_unit_config(get_supabase_client(), factory_id)
             is_unit_based = bool(unit_config and not unit_config["is_m2_based"])
+
+        # Step 2a⅞½: Build factory capabilities
+        factory_capabilities = None
+        if factory_data:
+            factory_capabilities = FactoryCapabilities(
+                has_factory_inventory=factory_data.get("has_factory_inventory", True),
+                has_logistics=factory_data.get("has_logistics", True),
+                has_production=factory_data.get("has_production", True),
+            )
 
         # Step 2a½: Get inventory snapshot once (reused by grouping, mode, summary)
         inventory_snapshots = self.inventory_service.get_latest()
@@ -464,6 +475,7 @@ class OrderBuilderService:
             factory_id=factory_id,
             factory_name=factory_name_str,
             factory_timeline=factory_timeline,
+            capabilities=factory_capabilities,
             # Unit-based factory fields
             unit_label=unit_config["unit_label"] if unit_config else "m²",
             is_unit_based=is_unit_based,
