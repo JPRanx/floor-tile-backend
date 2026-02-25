@@ -65,6 +65,7 @@ from utils.text_utils import normalize_product_name
 from config import get_supabase_client
 from services import preview_cache_service
 from services.upload_history_service import get_upload_history_service
+from services.inventory_ledger_service import get_ledger_service
 
 logger = structlog.get_logger(__name__)
 
@@ -408,6 +409,28 @@ async def confirm_inventory_upload(preview_id: str, request: Optional[InventoryC
             filename=cache_data.get("filename", "unknown"),
             row_count=len(snapshots_to_create),
         )
+
+        # --- Ledger: reconcile warehouse ---
+        try:
+            ledger = get_ledger_service()
+            recon_items = []
+            for s in snapshots_to_create:
+                result = ledger.reconcile_warehouse(
+                    product_id=s.product_id,
+                    actual_m2=Decimal(str(s.warehouse_qty)),
+                    source_filename=cache_data.get("filename"),
+                )
+                if result:
+                    recon_items.append({
+                        "product_id": s.product_id,
+                        "actual_m2": float(s.warehouse_qty),
+                        "projected_m2": float(result.get("projected_value_m2", 0) or 0),
+                        "discrepancy_m2": float(result.get("discrepancy_m2", 0) or 0),
+                    })
+            if recon_items:
+                ledger.generate_reconciliation_report("warehouse", recon_items, cache_data.get("filename"))
+        except Exception as ledger_err:
+            logger.warning("ledger_warehouse_hook_failed", error=str(ledger_err))
 
         # Delete preview from cache
         preview_cache_service.delete_preview(preview_id)
@@ -971,6 +994,29 @@ async def confirm_siesa_upload(
             filename=cache_data.get("filename", "unknown"),
             row_count=lots_created,
         )
+
+        # --- Ledger: reconcile factory ---
+        try:
+            ledger = get_ledger_service()
+            recon_items = []
+            if lots_created > 0:
+                for pid, stats in product_stats.items():
+                    result = ledger.reconcile_factory(
+                        product_id=pid,
+                        actual_m2=Decimal(str(stats["total_m2"])),
+                        source_filename=cache_data.get("filename"),
+                    )
+                    if result:
+                        recon_items.append({
+                            "product_id": pid,
+                            "actual_m2": stats["total_m2"],
+                            "projected_m2": float(result.get("projected_value_m2", 0) or 0),
+                            "discrepancy_m2": float(result.get("discrepancy_m2", 0) or 0),
+                        })
+            if recon_items:
+                ledger.generate_reconciliation_report("factory", recon_items, cache_data.get("filename"))
+        except Exception as ledger_err:
+            logger.warning("ledger_factory_hook_failed", error=str(ledger_err))
 
         # Delete preview from cache
         preview_cache_service.delete_preview(preview_id)
@@ -1585,6 +1631,41 @@ async def upload_in_transit(
             filename=file.filename or "in_transit.xlsx",
             row_count=updated_count,
         )
+
+        # --- Ledger: reconcile transit ---
+        try:
+            ledger = get_ledger_service()
+            recon_items = []
+            for product in parse_result.products:
+                result = ledger.reconcile_transit(
+                    product_id=product.product_id,
+                    actual_m2=Decimal(str(product.in_transit_m2)),
+                    source_filename=file.filename,
+                )
+                if result:
+                    recon_items.append({
+                        "product_id": product.product_id,
+                        "actual_m2": float(product.in_transit_m2),
+                        "projected_m2": float(result.get("projected_value_m2", 0) or 0),
+                        "discrepancy_m2": float(result.get("discrepancy_m2", 0) or 0),
+                    })
+            for pid in reset_pids:
+                result = ledger.reconcile_transit(
+                    product_id=pid,
+                    actual_m2=Decimal("0"),
+                    source_filename=file.filename,
+                )
+                if result:
+                    recon_items.append({
+                        "product_id": pid,
+                        "actual_m2": 0.0,
+                        "projected_m2": float(result.get("projected_value_m2", 0) or 0),
+                        "discrepancy_m2": float(result.get("discrepancy_m2", 0) or 0),
+                    })
+            if recon_items:
+                ledger.generate_reconciliation_report("transit", recon_items, file.filename)
+        except Exception as ledger_err:
+            logger.warning("ledger_transit_hook_failed", error=str(ledger_err))
 
         # --- Reconciliation: compare dispatch vs ordered/confirmed drafts ---
         reconciliation = _reconcile_dispatch_vs_drafts(db, parse_result, products)

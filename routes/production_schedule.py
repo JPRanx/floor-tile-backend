@@ -38,6 +38,7 @@ from services.production_schedule_service import get_production_schedule_service
 from services import preview_cache_service
 from services.upload_history_service import get_upload_history_service
 from services.product_service import get_product_service
+from services.inventory_ledger_service import get_ledger_service
 from pydantic import BaseModel
 from exceptions import AppError, DatabaseError
 
@@ -760,6 +761,29 @@ async def confirm_production_upload(
             row_count=result.total_rows_parsed,
         )
 
+        # --- Ledger: reconcile production ---
+        try:
+            ledger = get_ledger_service()
+            recon_items = []
+            for record in production_records:
+                if record.product_id and record.requested_m2:
+                    recon_result = ledger.reconcile_production(
+                        product_id=record.product_id,
+                        actual_m2=Decimal(str(record.requested_m2)),
+                        source_filename=cached.get("filename"),
+                    )
+                    if recon_result:
+                        recon_items.append({
+                            "product_id": record.product_id,
+                            "actual_m2": float(record.requested_m2),
+                            "projected_m2": float(recon_result.get("projected_value_m2", 0) or 0),
+                            "discrepancy_m2": float(recon_result.get("discrepancy_m2", 0) or 0),
+                        })
+            if recon_items:
+                ledger.generate_reconciliation_report("production", recon_items, cached.get("filename"))
+        except Exception as ledger_err:
+            logger.warning("ledger_production_hook_failed", error=str(ledger_err))
+
         # Delete preview from cache
         preview_cache_service.delete_preview(preview_id)
 
@@ -1038,6 +1062,19 @@ def create_from_order_builder(request: OBProductionRequest):
         service = get_production_schedule_service()
         items = [item.model_dump() for item in request.items]
         created = service.create_from_order_builder(items, request.boat_departure)
+
+        # --- Ledger: record factory order export (Section 3) ---
+        try:
+            ledger = get_ledger_service()
+            for ob_item in request.items:
+                if ob_item.requested_m2:
+                    ledger.record_factory_order_exported(
+                        product_id=ob_item.product_id,
+                        requested_m2=Decimal(str(ob_item.requested_m2)),
+                    )
+        except Exception as ledger_err:
+            logger.warning("ledger_factory_export_hook_failed", error=str(ledger_err))
+
         return {
             "created": len(created),
             "items": created,
@@ -1096,6 +1133,18 @@ def confirm_piggyback(request: PiggybackConfirmRequest):
             additional_m2=request.additional_m2,
             notes=request.notes,
         )
+
+        # --- Ledger: record piggyback confirmation (Section 2) ---
+        try:
+            ledger = get_ledger_service()
+            ledger.record_piggyback_confirmed(
+                product_id=request.product_id,
+                added_m2=Decimal(str(request.additional_m2)),
+                source_id=result["history_entry"]["id"],
+            )
+        except Exception as ledger_err:
+            logger.warning("ledger_piggyback_hook_failed", error=str(ledger_err))
+
         return PiggybackConfirmResponse(
             success=True,
             new_requested_m2=result["production_schedule"]["requested_m2"],

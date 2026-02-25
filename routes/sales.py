@@ -35,6 +35,7 @@ from services.sales_service import get_sales_service
 from services.product_service import get_product_service
 from services import preview_cache_service
 from services.upload_history_service import get_upload_history_service
+from services.inventory_ledger_service import get_ledger_service
 from parsers.excel_parser import parse_owner_excel
 from parsers.sac_parser import parse_sac_csv
 from utils.text_utils import normalize_customer_name, clean_customer_name, normalize_product_name
@@ -321,6 +322,23 @@ async def confirm_sales_upload(preview_id: str, request: Optional[SalesConfirmRe
             filename=cached_data.get("filename", "unknown"),
             row_count=len(created),
         )
+
+        # --- Ledger: record sales as warehouse deductions ---
+        try:
+            ledger = get_ledger_service()
+            if sales_records:
+                agg: dict[str, float] = defaultdict(float)
+                for r in sales_records:
+                    agg[r.product_id] += float(r.quantity_m2)
+                ledger.record_sales_batch(
+                    items=[
+                        {"product_id": pid, "quantity_m2": qty, "event_date": max_date}
+                        for pid, qty in agg.items()
+                    ],
+                    source_filename=cached_data.get("filename"),
+                )
+        except Exception as ledger_err:
+            logger.warning("ledger_sales_hook_failed", error=str(ledger_err))
 
         preview_cache_service.delete_preview(preview_id)
 

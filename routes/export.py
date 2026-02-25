@@ -23,6 +23,7 @@ from models.warehouse_order import (
 )
 from services.factory_order_service import get_factory_order_service
 from services.warehouse_order_service import get_warehouse_order_service
+from services.inventory_ledger_service import get_ledger_service
 
 logger = structlog.get_logger(__name__)
 
@@ -218,6 +219,19 @@ async def atomic_export(request: ExportRequest):
             warehouse_order_id=warehouse_order_id,
             pv_number=pv_number,
         )
+
+        # --- Ledger: record warehouse order export (Section 1) ---
+        if warehouse_order_id:
+            try:
+                ledger = get_ledger_service()
+                for item in request.items:
+                    ledger.record_warehouse_order_exported(
+                        product_id=item.product_id,
+                        ordered_m2=item.m2,
+                        source_id=warehouse_order_id,
+                    )
+            except Exception as ledger_err:
+                logger.warning("ledger_warehouse_export_hook_failed", error=str(ledger_err))
 
         return ExportResponse(
             success=True,

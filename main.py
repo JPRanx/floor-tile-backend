@@ -225,6 +225,7 @@ from routes.forward_simulation import router as planning_router
 from routes.unfulfilled_demand import router as unfulfilled_demand_router
 from routes.committed_orders import router as committed_orders_router
 from routes.export import router as export_router
+from routes.ledger import router as ledger_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -257,6 +258,7 @@ app.include_router(planning_router, prefix="/api/planning", tags=["Planning"])
 app.include_router(unfulfilled_demand_router, prefix="/api/inventory/unfulfilled-demand", tags=["Unfulfilled Demand"])
 app.include_router(committed_orders_router, prefix="/api/committed-orders", tags=["Committed Orders"])
 app.include_router(export_router)  # Prefix already in router
+app.include_router(ledger_router)  # Prefix already in router
 
 
 if __name__ == "__main__":

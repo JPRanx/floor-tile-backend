@@ -188,9 +188,17 @@ class InventoryService:
         logger.info("getting_latest_inventory")
 
         try:
+            # Feature flag: use projected inventory if enabled
+            try:
+                from services.config_service import get_config_service
+                use_projected = get_config_service().get("use_projected_inventory") == "true"
+            except Exception:
+                use_projected = False
+            table = "inventory_projected_current" if use_projected else "inventory_current"
+
             # Query the view — one row per product, no dedup needed
             inv_result = (
-                self.db.table("inventory_current")
+                self.db.table(table)
                 .select("*")
                 .execute()
             )
