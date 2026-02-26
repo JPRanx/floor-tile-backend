@@ -34,6 +34,7 @@ class UrgencyBreakdown(BaseSchema):
     urgent: int = Field(0, ge=0, description="Products that should ship on this boat")
     soon: int = Field(0, ge=0, description="Products approaching reorder point")
     ok: int = Field(0, ge=0, description="Products with healthy stock levels")
+    actionable: int = Field(0, ge=0, description="Products with urgency AND factory stock available to ship")
 
 
 class SupplySource(BaseSchema):

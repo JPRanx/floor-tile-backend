@@ -390,7 +390,7 @@ class ForwardSimulationService:
         # Per-product projections
         product_details: list[dict] = []
         total_pallets = 0
-        urgency_counts = {"critical": 0, "urgent": 0, "soon": 0, "ok": 0}
+        urgency_counts = {"critical": 0, "urgent": 0, "soon": 0, "ok": 0, "actionable": 0}
 
         # Determine if unit-based factory
         is_unit_based = unit_config is not None and not unit_config.get("is_m2_based", True)
@@ -507,6 +507,9 @@ class ForwardSimulationService:
 
             urgency = _classify_urgency(days_of_stock)
             urgency_counts[urgency] += 1
+            # Actionable = needs attention AND has factory stock to ship
+            if urgency != "ok" and siesa_supply > 0:
+                urgency_counts["actionable"] += 1
 
             # Days of stock AFTER this boat fills the order
             if suggested_pallets > 0 and daily_vel > 0:
