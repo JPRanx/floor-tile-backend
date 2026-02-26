@@ -338,7 +338,15 @@ class OrderBuilderService:
         warehouse_current_m2 = sum(
             Decimal(str(inv.warehouse_qty)) for inv in inventory_snapshots
         )
-        warehouse_available_pallets = max(0, WAREHOUSE_CAPACITY - int(warehouse_current_m2 / M2_PER_PALLET))
+        # Cascade-aware: account for earlier boats' deliveries + consumption
+        warehouse_at_arrival = None
+        if factory_id and boat and boat.boat_id:
+            warehouse_at_arrival = self._get_warehouse_at_arrival(
+                boat, inventory_snapshots, trend_data, factory_id
+            )
+            warehouse_available_pallets = max(0, WAREHOUSE_CAPACITY - warehouse_at_arrival)
+        else:
+            warehouse_available_pallets = max(0, WAREHOUSE_CAPACITY - int(warehouse_current_m2 / M2_PER_PALLET))
 
         # Resolve auto BLs: calculate recommended before applying capacity
         if auto_bls:
@@ -355,7 +363,10 @@ class OrderBuilderService:
 
         # Step 5: Calculate summary (use BL capacity, not boat capacity)
         bl_max_containers = num_bls * MAX_CONTAINERS_PER_BL
-        summary = self._calculate_summary(all_products, bl_max_containers, inventory_snapshots)
+        summary = self._calculate_summary(
+            all_products, bl_max_containers, inventory_snapshots,
+            warehouse_at_arrival=warehouse_at_arrival if factory_id and boat and boat.boat_id else None,
+        )
 
         # Step 6: Generate alerts
         alerts = self._generate_alerts(all_products, summary, boat)
@@ -1522,6 +1533,19 @@ class OrderBuilderService:
                     adjusted_quantity_m2 - projected_stock
                 )
             else:
+                # Adjust days_of_stock for depletion during transit so urgency
+                # aligns with forward simulation's days_of_stock_at_arrival
+                if days_of_stock is not None and daily_velocity_m2 > 0 and days_to_cover > 0:
+                    warehouse_m2_val = rec.warehouse_m2 or Decimal("0")
+                    in_transit_m2_val = rec.in_transit_m2 or Decimal("0")
+                    available_m2 = warehouse_m2_val + in_transit_m2_val
+                    projected_m2 = available_m2 - (daily_velocity_m2 * days_to_cover)
+                    if projected_m2 > 0:
+                        days_of_stock = int(projected_m2 / daily_velocity_m2)
+                    else:
+                        days_of_stock = 0
+                    urgency = self._calculate_urgency(days_of_stock)
+
                 # CURRENT PATH: calculate from today's inventory
                 total_coverage_days = days_to_cover + buffer_days
                 base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
@@ -1951,6 +1975,76 @@ class OrderBuilderService:
         available = max(0, WAREHOUSE_CAPACITY - warehouse_current_pallets)
         return available
 
+    def _get_warehouse_at_arrival(
+        self, boat, inventory_snapshots, trend_data, factory_id: str
+    ) -> int:
+        """Compute projected warehouse pallets when this boat's goods arrive.
+
+        Accounts for:
+        - Current warehouse stock (snapshot)
+        - Sales consumption during transit (velocity × days)
+        - Earlier boats' deliveries arriving before this boat's departure
+        """
+        warehouse_current_m2 = sum(
+            Decimal(str(inv.warehouse_qty)) for inv in inventory_snapshots
+        )
+
+        # Depletion: total velocity × days until warehouse arrival
+        total_daily_m2 = sum(
+            Decimal(str(t.get("daily_velocity_m2", 0)))
+            for t in trend_data.values()
+        )
+        days = max(0, boat.days_until_warehouse or 0)
+        depletion_m2 = total_daily_m2 * days
+
+        # Earlier boats' deliveries: ordered/confirmed drafts arriving
+        # before this boat departs (same query pattern as FS._get_in_transit_drafts)
+        earlier_m2 = Decimal("0")
+        try:
+            db = self.inventory_service.db
+            drafts_result = (
+                db.table("boat_factory_drafts")
+                .select("id, boat_id, status")
+                .eq("factory_id", factory_id)
+                .in_("status", ["ordered", "confirmed"])
+                .execute()
+            )
+            if drafts_result.data:
+                filtered = [d for d in drafts_result.data if d["boat_id"] != boat.boat_id]
+                if filtered:
+                    boat_ids = list({d["boat_id"] for d in filtered})
+                    boats_result = (
+                        db.table("boat_schedules")
+                        .select("id, arrival_date")
+                        .in_("id", boat_ids)
+                        .execute()
+                    )
+                    arrival_map = {b["id"]: b["arrival_date"] for b in boats_result.data}
+
+                    draft_ids = [d["id"] for d in filtered]
+                    items_result = (
+                        db.table("draft_items")
+                        .select("draft_id, selected_pallets")
+                        .in_("draft_id", draft_ids)
+                        .execute()
+                    )
+                    draft_to_boat = {d["id"]: d["boat_id"] for d in filtered}
+
+                    for item in items_result.data:
+                        bid = draft_to_boat.get(item["draft_id"])
+                        arrival_str = arrival_map.get(bid) if bid else None
+                        if not arrival_str:
+                            continue
+                        arrival_dt = date.fromisoformat(arrival_str)
+                        warehouse_dt = arrival_dt + timedelta(days=WAREHOUSE_BUFFER_DAYS)
+                        if warehouse_dt <= boat.departure_date:
+                            earlier_m2 += Decimal(str(item["selected_pallets"])) * M2_PER_PALLET
+        except Exception as e:
+            logger.warning("warehouse_cascade_fallback", error=str(e))
+
+        projected_m2 = warehouse_current_m2 - depletion_m2 + earlier_m2
+        return max(0, int(projected_m2 / M2_PER_PALLET))
+
     def _get_days_since_last_sale(self, product_id: str) -> Optional[int]:
         """Days since last sale for a product."""
         sales_result = (
@@ -2373,6 +2467,7 @@ class OrderBuilderService:
         products: list[OrderBuilderProduct],
         boat_max_containers: int,
         inventory_snapshots: Optional[list] = None,
+        warehouse_at_arrival: Optional[int] = None,
     ) -> OrderBuilderSummary:
         """Calculate order summary from selected products with weight-based container limits."""
         # Get current warehouse level (use cached snapshot if provided)
@@ -2419,8 +2514,9 @@ class OrderBuilderService:
         total_containers = max(containers_by_pallets, containers_by_weight)
         weight_is_limiting = containers_by_weight > containers_by_pallets
 
-        # Warehouse after delivery
-        warehouse_after = warehouse_current_pallets + total_pallets
+        # Warehouse after delivery (cascade-aware if available)
+        warehouse_base = warehouse_at_arrival if warehouse_at_arrival is not None else warehouse_current_pallets
+        warehouse_after = warehouse_base + total_pallets
         utilization_after = Decimal(warehouse_after) / Decimal(WAREHOUSE_CAPACITY) * 100
 
         return OrderBuilderSummary(
