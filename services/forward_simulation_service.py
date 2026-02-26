@@ -457,26 +457,40 @@ class ForwardSimulationService:
             projected_stock = effective_stock - (daily_vel * days_until_arrival)
 
             # --- DEMAND: use draft or compute suggestion ---
-            # Only treat draft items as committed supply when the draft
-            # status is "ordered" or "confirmed".  Tentative drafts
-            # ("drafting", "action_needed") are still loaded so the
-            # Planning View can display badges, but their quantities
-            # must NOT lock the simulation — recalculate fresh instead.
+            # Use draft selections for cascade so Ashley can plan multiple
+            # boats at once.  Committed drafts (ordered/confirmed) are
+            # authoritative; tentative drafts (drafting/action_needed)
+            # cascade their user-selected quantities so later boats see
+            # reduced inventory, but are marked non-committed for display.
             draft_status = draft.get("status", "") if draft else ""
             is_committed_draft = draft_status in ("ordered", "confirmed")
+            has_draft_items = bool(draft and draft.get("items"))
 
             is_committed = False
-            if draft and draft.get("items") and is_committed_draft:
+            if has_draft_items and is_committed_draft:
+                # Committed draft — authoritative, locked quantities
                 draft_item = next((i for i in draft["items"] if i["product_id"] == pid), None)
                 if draft_item:
                     suggested_pallets = draft_item["selected_pallets"]
                     is_committed = True
                 else:
-                    # Product not in draft — no order for this product on this boat
                     suggested_pallets = 0
                     is_committed = True
+            elif has_draft_items:
+                # Tentative draft — use selections for cascade so later
+                # boats see updated inventory, but don't mark as committed
+                draft_item = next((i for i in draft["items"] if i["product_id"] == pid), None)
+                if draft_item and draft_item["selected_pallets"] > 0:
+                    suggested_pallets = draft_item["selected_pallets"]
+                else:
+                    # Product not selected in tentative draft — compute fresh
+                    coverage_gap_val = max(
+                        Decimal("0"),
+                        (daily_vel * coverage_target) - projected_stock,
+                    )
+                    suggested_pallets = math.ceil(coverage_gap_val / pallet_divisor) if coverage_gap_val > 0 else 0
             else:
-                # No committed draft — compute suggestion normally
+                # No draft — compute suggestion normally
                 coverage_gap_val = max(
                     Decimal("0"),
                     (daily_vel * coverage_target) - projected_stock,
