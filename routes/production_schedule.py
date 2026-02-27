@@ -157,8 +157,18 @@ async def upload_production_schedule(
 
     except ValueError as e:
         logger.error("production_schedule_parse_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -494,8 +504,18 @@ async def preview_production_upload(
         raise
     except ValueError as e:
         logger.error("production_schedule_preview_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -801,8 +821,20 @@ async def confirm_production_upload(
         raise
     except ValueError as e:
         logger.error("production_schedule_confirm_error", error=str(e))
+        _cd = locals().get("cached")
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        _cd = locals().get("cached")
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -898,8 +930,18 @@ async def upload_and_replace_schedule(
         raise
     except ValueError as e:
         logger.error("production_schedule_parse_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="production_schedule",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 

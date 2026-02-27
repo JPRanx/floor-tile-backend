@@ -530,12 +530,21 @@ Return JSON in this exact structure:
             # Create ProductionScheduleCreate records for database
             production_records = []
 
-            # Excel has Plant 1 and Plant 2 data side by side in each row
-            # Plant 1: columns without suffix
-            # Plant 2: columns with .1 suffix
-            plant_configs = [
-                {
-                    'plant': 1,
+            # Detect layout format:
+            # - Single-column: has 'Planta' column but NO 'Referencia.1'
+            #   (both plants share the same columns, Planta=1 or 2)
+            # - Side-by-side: has 'Referencia.1' column
+            #   (Plant 1 uses unsuffixed columns, Plant 2 uses .1 suffix)
+            has_planta_col = 'Planta' in df.columns
+            has_side_by_side = 'Referencia.1' in df.columns
+            is_single_column = has_planta_col and not has_side_by_side
+
+            if is_single_column:
+                logger.info("detected_single_column_format")
+                # Single-column layout: one set of columns, Planta column
+                # indicates which plant (1 or 2).
+                # "Real" section uses .1 suffix on m2 columns.
+                single_config = {
                     'referencia_col': 'Referencia',
                     'items_col': 'ITEMS',
                     'fecha_inicio_col': 'Fecha Inicio',
@@ -550,136 +559,72 @@ Return JSON in this exact structure:
                     'm2_primera_programa_col': 'm2 Primera exportacion',
                     'm2_primera_real_col': 'm2 Primera exportacion.1',
                     'm2_totales_real_col': 'm2 Totales\nNetos.1',
-                },
-                {
-                    'plant': 2,
-                    'referencia_col': 'Referencia.1',
-                    'items_col': 'ITEMS.1',
-                    'fecha_inicio_col': 'Fecha Inicio.1',
-                    'fecha_fin_col': 'Fecha Fin.1',
-                    'formato_col': 'Formato',  # Shared column
-                    'diseno_col': 'Diseño.1',
-                    'acabado_col': 'Acabado.1',
-                    'turnos_col': 'Nro de Turnos.1',
-                    'calidad_col': 'Calidad PROMEDIO.1',
-                    'calidad_real_col': 'Calidad Real.1',
-                    'm2_totales_col': 'm2 Totales\nNetos.2',
-                    'm2_primera_programa_col': 'm2 Primera exportacion.2',
-                    'm2_primera_real_col': 'm2 Primera exportacion.3',
-                    'm2_totales_real_col': 'm2 Totales\nNetos.3',
-                },
-            ]
+                }
 
-            for idx, row in df.iterrows():
-                for config in plant_configs:
-                    plant = config['plant']
+                for idx, row in df.iterrows():
+                    config = single_config
 
-                    # Get referencia for this plant
-                    referencia = row.get(config['referencia_col'])
-                    if pd.isna(referencia) or not referencia:
+                    # Read plant from the Planta column
+                    planta_val = row.get('Planta')
+                    if pd.isna(planta_val):
                         continue
-                    referencia = str(referencia).strip()
-                    if 'MANTENIMIENTO' in referencia.upper():
-                        continue
-                    # Skip junk rows: pure numbers, formulas, or too-short text
-                    if referencia.replace('.', '').replace('-', '').isdigit():
-                        continue
-                    if len(referencia) < 3 or '=' in referencia:
+                    plant = int(planta_val)
+                    if plant not in (1, 2):
                         continue
 
-                    # Get factory code
-                    factory_code = row.get(config['items_col'])
-                    if pd.isna(factory_code) or factory_code == 0:
-                        factory_code = None
-                    else:
-                        factory_code = str(int(factory_code))
-
-                    # Get dates
-                    fecha_inicio = self._parse_excel_date(row.get(config['fecha_inicio_col']))
-                    fecha_fin = self._parse_excel_date(row.get(config['fecha_fin_col']))
-                    # Use standard fecha entrega column pattern
-                    fecha_entrega_col = [c for c in df.columns if 'estimada entrega' in str(c).lower()]
-                    fecha_entrega = None
-                    if fecha_entrega_col:
-                        fecha_entrega = self._parse_excel_date(row.get(fecha_entrega_col[0]))
-
-                    # Get format, design, finish
-                    formato = str(row.get(config['formato_col'], '')).strip() if pd.notna(row.get(config['formato_col'])) else None
-                    diseno = str(row.get(config['diseno_col'], '')).strip() if pd.notna(row.get(config['diseno_col'])) else None
-                    acabado = str(row.get(config['acabado_col'], '')).strip() if pd.notna(row.get(config['acabado_col'])) else None
-
-                    # Get quality and shifts
-                    shifts = self._parse_decimal(row.get(config['turnos_col']))
-                    quality_target = self._parse_decimal(row.get(config['calidad_col']))
-                    if quality_target and quality_target <= 1:
-                        quality_target = quality_target * 100  # Convert to percentage
-                    quality_actual = self._parse_decimal(row.get(config['calidad_real_col']))
-                    if quality_actual and quality_actual <= 1:
-                        quality_actual = quality_actual * 100
-
-                    # Get m² values
-                    m2_totales_programa = self._parse_decimal(row.get(config['m2_totales_col']))
-                    m2_primera_programa = self._parse_decimal(row.get(config['m2_primera_programa_col']))
-                    m2_primera_real = self._parse_decimal(row.get(config['m2_primera_real_col']))
-
-                    # Get Real totals for fallback
-                    m2_totales_real_col = config.get('m2_totales_real_col')
-                    m2_totales_real = self._parse_decimal(row.get(m2_totales_real_col)) if m2_totales_real_col else None
-
-                    # Fallback: if m2 Primera exportacion is empty, use m2 Totales Netos
-                    # (some files don't fill Primera until export allocation is decided)
-                    if not m2_primera_programa and m2_totales_programa:
-                        m2_primera_programa = m2_totales_programa
-                    if not m2_primera_real and m2_totales_real:
-                        m2_primera_real = m2_totales_real
-
-                    # Create ParsedProductionSchedule line item (for Claude format compatibility)
-                    if factory_code and fecha_inicio:
-                        line_item = ProductionScheduleLineItem(
-                            production_date=fecha_inicio,
-                            factory_code=factory_code,
-                            product_name=referencia,
-                            plant=plant,
-                            format=formato,
-                            design=diseno,
-                            finish=acabado,
-                            shifts=shifts,
-                            quality_target_pct=quality_target,
-                            quality_actual_pct=quality_actual,
-                            m2_total_net=m2_totales_programa,
-                            m2_export_first=m2_primera_programa or Decimal("0"),
-                        )
-                        line_items.append(line_item)
-
-                    # Determine status based on Real values
-                    requested = m2_primera_programa or Decimal("0")
-                    completed = m2_primera_real or Decimal("0")
-
-                    if completed > 0:
-                        if completed >= requested * Decimal("0.95"):  # 95% threshold
-                            status = ProductionStatus.COMPLETED
-                        else:
-                            status = ProductionStatus.IN_PROGRESS
-                    else:
-                        status = ProductionStatus.SCHEDULED
-
-                    # Create ProductionScheduleCreate record
-                    plant_str = f"plant_{plant}"
-                    production_record = ProductionScheduleCreate(
-                        factory_item_code=factory_code,
-                        referencia=referencia,
-                        plant=plant_str,
-                        requested_m2=requested,
-                        completed_m2=completed,
-                        status=status,
-                        scheduled_start_date=fecha_inicio,
-                        scheduled_end_date=fecha_fin,
-                        estimated_delivery_date=fecha_entrega,
-                        source_file=filename,
-                        source_month=month_sheet,
-                        source_row=idx + 17  # Actual row in Excel
+                    line_items, production_records = self._process_row(
+                        row, idx, config, plant, df, filename, month_sheet,
+                        line_items, production_records
                     )
-                    production_records.append(production_record)
+            else:
+                logger.info("detected_side_by_side_format")
+                # Side-by-side layout: Plant 1 and Plant 2 in parallel columns
+                # Plant 1: columns without suffix
+                # Plant 2: columns with .1 suffix
+                plant_configs = [
+                    {
+                        'plant': 1,
+                        'referencia_col': 'Referencia',
+                        'items_col': 'ITEMS',
+                        'fecha_inicio_col': 'Fecha Inicio',
+                        'fecha_fin_col': 'Fecha Fin',
+                        'formato_col': 'Formato',
+                        'diseno_col': 'Diseño',
+                        'acabado_col': 'Acabado',
+                        'turnos_col': 'Nro de Turnos',
+                        'calidad_col': 'Calidad PROMEDIO',
+                        'calidad_real_col': 'Calidad Real',
+                        'm2_totales_col': 'm2 Totales\nNetos',
+                        'm2_primera_programa_col': 'm2 Primera exportacion',
+                        'm2_primera_real_col': 'm2 Primera exportacion.1',
+                        'm2_totales_real_col': 'm2 Totales\nNetos.1',
+                    },
+                    {
+                        'plant': 2,
+                        'referencia_col': 'Referencia.1',
+                        'items_col': 'ITEMS.1',
+                        'fecha_inicio_col': 'Fecha Inicio.1',
+                        'fecha_fin_col': 'Fecha Fin.1',
+                        'formato_col': 'Formato',  # Shared column
+                        'diseno_col': 'Diseño.1',
+                        'acabado_col': 'Acabado.1',
+                        'turnos_col': 'Nro de Turnos.1',
+                        'calidad_col': 'Calidad PROMEDIO.1',
+                        'calidad_real_col': 'Calidad Real.1',
+                        'm2_totales_col': 'm2 Totales\nNetos.2',
+                        'm2_primera_programa_col': 'm2 Primera exportacion.2',
+                        'm2_primera_real_col': 'm2 Primera exportacion.3',
+                        'm2_totales_real_col': 'm2 Totales\nNetos.3',
+                    },
+                ]
+
+                for idx, row in df.iterrows():
+                    for config in plant_configs:
+                        plant = config['plant']
+                        line_items, production_records = self._process_row(
+                            row, idx, config, plant, df, filename, month_sheet,
+                            line_items, production_records
+                        )
 
             # Extract version from filename
             version = None
@@ -711,6 +656,136 @@ Return JSON in this exact structure:
         except Exception as e:
             logger.error("production_schedule_excel_parsing_failed", error=str(e))
             raise ValueError(f"Excel parsing failed: {str(e)}")
+
+    def _process_row(
+        self,
+        row,
+        idx: int,
+        config: dict,
+        plant: int,
+        df: pd.DataFrame,
+        filename: Optional[str],
+        month_sheet: str,
+        line_items: list,
+        production_records: list,
+    ) -> Tuple[list, list]:
+        """
+        Process a single row for a given plant using the column config.
+
+        Extracts product info, dates, m2 values, determines status,
+        and appends to line_items and production_records.
+
+        Returns:
+            Updated (line_items, production_records) tuple.
+        """
+        # Get referencia for this plant
+        referencia = row.get(config['referencia_col'])
+        if pd.isna(referencia) or not referencia:
+            return line_items, production_records
+        referencia = str(referencia).strip()
+        if 'MANTENIMIENTO' in referencia.upper():
+            return line_items, production_records
+        # Skip junk rows: pure numbers, formulas, or too-short text
+        if referencia.replace('.', '').replace('-', '').isdigit():
+            return line_items, production_records
+        if len(referencia) < 3 or '=' in referencia:
+            return line_items, production_records
+
+        # Get factory code
+        factory_code = row.get(config['items_col'])
+        if pd.isna(factory_code) or factory_code == 0:
+            factory_code = None
+        else:
+            factory_code = str(int(factory_code))
+
+        # Get dates
+        fecha_inicio = self._parse_excel_date(row.get(config['fecha_inicio_col']))
+        fecha_fin = self._parse_excel_date(row.get(config['fecha_fin_col']))
+        # Use standard fecha entrega column pattern
+        fecha_entrega_col = [c for c in df.columns if 'estimada entrega' in str(c).lower()]
+        fecha_entrega = None
+        if fecha_entrega_col:
+            fecha_entrega = self._parse_excel_date(row.get(fecha_entrega_col[0]))
+
+        # Get format, design, finish
+        formato = str(row.get(config['formato_col'], '')).strip() if pd.notna(row.get(config['formato_col'])) else None
+        diseno = str(row.get(config['diseno_col'], '')).strip() if pd.notna(row.get(config['diseno_col'])) else None
+        acabado = str(row.get(config['acabado_col'], '')).strip() if pd.notna(row.get(config['acabado_col'])) else None
+
+        # Get quality and shifts
+        shifts = self._parse_decimal(row.get(config['turnos_col']))
+        quality_target = self._parse_decimal(row.get(config['calidad_col']))
+        if quality_target and quality_target <= 1:
+            quality_target = quality_target * 100  # Convert to percentage
+        quality_actual = self._parse_decimal(row.get(config['calidad_real_col']))
+        if quality_actual and quality_actual <= 1:
+            quality_actual = quality_actual * 100
+
+        # Get m² values
+        m2_totales_programa = self._parse_decimal(row.get(config['m2_totales_col']))
+        m2_primera_programa = self._parse_decimal(row.get(config['m2_primera_programa_col']))
+        m2_primera_real = self._parse_decimal(row.get(config['m2_primera_real_col']))
+
+        # Get Real totals for fallback
+        m2_totales_real_col = config.get('m2_totales_real_col')
+        m2_totales_real = self._parse_decimal(row.get(m2_totales_real_col)) if m2_totales_real_col else None
+
+        # Fallback: if m2 Primera exportacion is empty, use m2 Totales Netos
+        # (some files don't fill Primera until export allocation is decided)
+        if not m2_primera_programa and m2_totales_programa:
+            m2_primera_programa = m2_totales_programa
+        if not m2_primera_real and m2_totales_real:
+            m2_primera_real = m2_totales_real
+
+        # Create ParsedProductionSchedule line item (for Claude format compatibility)
+        if factory_code and fecha_inicio:
+            line_item = ProductionScheduleLineItem(
+                production_date=fecha_inicio,
+                factory_code=factory_code,
+                product_name=referencia,
+                plant=plant,
+                format=formato,
+                design=diseno,
+                finish=acabado,
+                shifts=shifts,
+                quality_target_pct=quality_target,
+                quality_actual_pct=quality_actual,
+                m2_total_net=m2_totales_programa,
+                m2_export_first=m2_primera_programa or Decimal("0"),
+            )
+            line_items.append(line_item)
+
+        # Determine status based on Real values
+        requested = m2_primera_programa or Decimal("0")
+        completed = m2_primera_real or Decimal("0")
+
+        if completed > 0:
+            if completed >= requested * Decimal("0.95"):  # 95% threshold
+                status = ProductionStatus.COMPLETED
+            else:
+                status = ProductionStatus.IN_PROGRESS
+        else:
+            status = ProductionStatus.SCHEDULED
+
+        # Create ProductionScheduleCreate record
+        plant_str = f"plant_{plant}"
+        production_record = ProductionScheduleCreate(
+            factory_item_code=factory_code,
+            referencia=referencia,
+            plant=plant_str,
+            requested_m2=requested,
+            completed_m2=completed,
+            status=status,
+            scheduled_start_date=fecha_inicio,
+            scheduled_end_date=fecha_fin,
+            estimated_delivery_date=fecha_entrega,
+            source_file=filename,
+            source_month=month_sheet,
+            source_row=idx + 17  # Actual row in Excel
+        )
+        production_records.append(production_record)
+
+        return line_items, production_records
 
     def _parse_excel_date(self, value) -> Optional[date]:
         """Parse date from Excel cell."""

@@ -322,8 +322,18 @@ async def preview_boat_upload(file: UploadFile = File(...)):
         )
 
     except BoatScheduleUploadError as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="boats",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="boats",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -421,6 +431,12 @@ async def confirm_boat_upload(preview_id: str, request: Optional[BoatConfirmRequ
     except HTTPException:
         raise
     except Exception as e:
+        _cd = locals().get("cached")
+        get_upload_history_service().record_failed_upload(
+            upload_type="boats",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -462,8 +478,18 @@ async def upload_boat_schedules(file: UploadFile = File(...)):
         return result
 
     except BoatScheduleUploadError as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="boats",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="boats",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 

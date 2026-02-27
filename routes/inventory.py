@@ -331,9 +331,19 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
         )
 
     except (InventoryUploadError, AppError) as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="inventory",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("inventory_preview_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="inventory",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -453,6 +463,12 @@ async def confirm_inventory_upload(preview_id: str, request: Optional[InventoryC
         raise
     except Exception as e:
         logger.error("inventory_confirm_failed", error=str(e), preview_id=preview_id)
+        _cd = locals().get("cache_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="inventory",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -633,6 +649,11 @@ async def upload_inventory(file: UploadFile = File(...)):
         raise
     except Exception as e:
         logger.error("inventory_upload_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="inventory",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -831,12 +852,27 @@ async def preview_siesa_upload(
 
     except SIESAMissingColumnsError as e:
         logger.error("siesa_preview_missing_columns", missing=e.details.get("missing_columns"))
+        get_upload_history_service().record_failed_upload(
+            upload_type="siesa",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except SIESAParseError as e:
         logger.error("siesa_preview_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="siesa",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("siesa_preview_failed", error=str(e), type=type(e).__name__)
+        get_upload_history_service().record_failed_upload(
+            upload_type="siesa",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -1054,6 +1090,12 @@ async def confirm_siesa_upload(
         raise
     except Exception as e:
         logger.error("siesa_confirm_failed", error=str(e), preview_id=preview_id)
+        _cd = locals().get("cache_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="siesa",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -1302,12 +1344,27 @@ async def upload_siesa_inventory(
 
     except SIESAMissingColumnsError as e:
         logger.error("siesa_missing_columns", missing=e.details.get("missing_columns"))
+        get_upload_history_service().record_failed_upload(
+            upload_type="siesa",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except SIESAParseError as e:
         logger.error("siesa_parse_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="siesa",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("siesa_upload_failed", error=str(e), type=type(e).__name__)
+        get_upload_history_service().record_failed_upload(
+            upload_type="siesa",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -1525,12 +1582,22 @@ async def parse_in_transit(
 
     except ValueError as e:
         logger.error("in_transit_parse_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="in_transit",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "PARSE_ERROR", "message": str(e)}}
         )
     except Exception as e:
         logger.error("in_transit_parse_failed", error=str(e), type=type(e).__name__)
+        get_upload_history_service().record_failed_upload(
+            upload_type="in_transit",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -1721,12 +1788,22 @@ async def upload_in_transit(
 
     except ValueError as e:
         logger.error("in_transit_parse_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="in_transit",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "PARSE_ERROR", "message": str(e)}}
         )
     except Exception as e:
         logger.error("in_transit_upload_failed", error=str(e), type=type(e).__name__)
+        get_upload_history_service().record_failed_upload(
+            upload_type="in_transit",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 

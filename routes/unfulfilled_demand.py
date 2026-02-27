@@ -269,14 +269,29 @@ async def preview_unfulfilled_demand(file: UploadFile = File(...)):
 
     except ValueError as e:
         logger.error("unfulfilled_demand_parse_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="unfulfilled_demand",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "PARSE_ERROR", "message": str(e)}}
         )
     except (AppError,) as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="unfulfilled_demand",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return _handle_error(e)
     except Exception as e:
         logger.error("unfulfilled_demand_preview_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="unfulfilled_demand",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return _handle_error(e)
 
 
@@ -387,5 +402,11 @@ async def confirm_unfulfilled_demand(
             "unfulfilled_demand_confirm_failed",
             error=str(e),
             preview_id=preview_id,
+        )
+        _cd = locals().get("cache_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="unfulfilled_demand",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
         )
         return _handle_error(e)

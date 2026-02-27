@@ -1277,18 +1277,33 @@ async def preview_pdf_upload(
 
     except PDFParseError as e:
         logger.error("pdf_parsing_failed", filename=file.filename, error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="shipment_pdf",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Failed to parse PDF: {str(e)}"
         )
     except ValueError as e:
         logger.error("pdf_parsing_failed", filename=file.filename, error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="shipment_pdf",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Failed to parse PDF: {str(e)}"
         )
     except Exception as e:
         logger.error("pdf_preview_error", filename=file.filename, error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="shipment_pdf",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Error processing PDF: {str(e)}"
@@ -1339,23 +1354,35 @@ async def confirm_pdf_preview(preview_id: str, data: ConfirmIngestRequest) -> In
         filename=cached.get("filename")
     )
 
-    # Call the existing confirm logic
-    # The existing /confirm endpoint has all the business logic we need
-    result = await confirm_ingest(data)
+    try:
+        # Call the existing confirm logic
+        # The existing /confirm endpoint has all the business logic we need
+        result = await confirm_ingest(data)
 
-    # Record upload history
-    get_upload_history_service().record_upload(
-        upload_type=cached.get("upload_type", "shipment_pdf"),
-        file_hash=cached.get("file_hash", ""),
-        filename=cached.get("filename", "unknown"),
-        row_count=1,
-    )
+        # Record upload history
+        get_upload_history_service().record_upload(
+            upload_type=cached.get("upload_type", "shipment_pdf"),
+            file_hash=cached.get("file_hash", ""),
+            filename=cached.get("filename", "unknown"),
+            row_count=1,
+        )
 
-    # Delete from cache after successful confirmation
-    preview_cache_service.delete_preview(preview_id)
-    logger.info("preview_cache_deleted", preview_id=preview_id)
+        # Delete from cache after successful confirmation
+        preview_cache_service.delete_preview(preview_id)
+        logger.info("preview_cache_deleted", preview_id=preview_id)
 
-    return result
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("pdf_confirm_failed", error=str(e), preview_id=preview_id)
+        get_upload_history_service().record_failed_upload(
+            upload_type="shipment_pdf",
+            filename=cached.get("filename", "unknown"),
+            error_message=str(e),
+        )
+        raise
 
 
 @router.post("/structured", response_model=IngestResponse)

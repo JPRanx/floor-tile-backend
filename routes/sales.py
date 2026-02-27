@@ -199,9 +199,19 @@ async def preview_sales_upload(file: UploadFile = File(...)):
         )
 
     except (ExcelParseError, AppError) as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("sales_preview_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -354,9 +364,21 @@ async def confirm_sales_upload(preview_id: str, request: Optional[SalesConfirmRe
     except HTTPException:
         raise
     except (AppError,) as e:
+        _cd = locals().get("cached_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="sales",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("sales_confirm_failed", error=str(e), preview_id=preview_id)
+        _cd = locals().get("cached_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="sales",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -468,9 +490,19 @@ async def upload_sales(file: UploadFile = File(...)):
         )
 
     except (ExcelParseError, AppError) as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("sales_upload_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -587,9 +619,19 @@ async def preview_sac_upload(file: UploadFile = File(...)):
         )
 
     except (SACParseError, SACMissingColumnsError, AppError) as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="sac_sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("sac_preview_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="sac_sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -662,9 +704,21 @@ async def confirm_sac_upload(preview_id: str):
     except HTTPException:
         raise
     except (AppError,) as e:
+        _cd = locals().get("cached_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="sac_sales",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("sac_confirm_failed", error=str(e), preview_id=preview_id)
+        _cd = locals().get("cached_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="sac_sales",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 
@@ -772,9 +826,19 @@ async def upload_sac_sales(file: UploadFile = File(...)):
         )
 
     except (SACParseError, SACMissingColumnsError, AppError) as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="sac_sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
     except Exception as e:
         logger.error("sac_upload_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="sac_sales",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return handle_error(e)
 
 

@@ -347,14 +347,29 @@ async def preview_committed_orders(file: UploadFile = File(...)):
 
     except ValueError as e:
         logger.error("committed_orders_parse_error", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="committed_orders",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return JSONResponse(
             status_code=400,
             content={"error": {"code": "PARSE_ERROR", "message": str(e)}}
         )
     except (AppError,) as e:
+        get_upload_history_service().record_failed_upload(
+            upload_type="committed_orders",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return _handle_error(e)
     except Exception as e:
         logger.error("committed_orders_preview_failed", error=str(e))
+        get_upload_history_service().record_failed_upload(
+            upload_type="committed_orders",
+            filename=file.filename or "unknown",
+            error_message=str(e),
+        )
         return _handle_error(e)
 
 
@@ -467,5 +482,11 @@ async def confirm_committed_orders(
             "committed_orders_confirm_failed",
             error=str(e),
             preview_id=preview_id,
+        )
+        _cd = locals().get("cache_data")
+        get_upload_history_service().record_failed_upload(
+            upload_type="committed_orders",
+            filename=_cd.get("filename", "unknown") if _cd else "unknown",
+            error_message=str(e),
         )
         return _handle_error(e)

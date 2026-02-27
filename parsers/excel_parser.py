@@ -708,7 +708,7 @@ def _is_movement_tracking_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
     """
     Detect if the sheet uses movement-tracking format (INICIAL/INGRESOS/SALIDAS/SALDO).
 
-    Two known variants:
+    Three known variants:
     1. Legacy format:
        - Row 2 (0-indexed): "FECHA ACTUALIZACION: DD/MM/YYYY"
        - Row 3: REFERENCIAS, FORMATO, INICIAL, INGRESOS, SALIDAS, SALDO
@@ -720,6 +720,12 @@ def _is_movement_tracking_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
        - Row 2: Sub-headers (Referencia, Formato, Pallets, Cant ...)
        - Row 3+: Category sections (CERAMICO, MUEBLES)
        - Data starts at row 4
+
+    3. Barrios compact format (no title row):
+       - Row 0: PRODUCTO | (blank) | INICIAL | ... | SALDO | (blank)
+       - Row 1: Referencia | Formato | Pallets | Cant | ...
+       - Row 2+: Data rows (Formato column contains category)
+       - Data starts at row 2
     """
     try:
         # Read first few rows without header
@@ -737,8 +743,8 @@ def _is_movement_tracking_format(excel: pd.ExcelFile, sheet_name: str) -> bool:
             if "INVENTARIO" in row0_text.upper() and "DIDARIO" in row0_text.upper():
                 return True
 
-        # Also check for SALDO column header in rows 1-3
-        for row_idx in range(1, min(4, len(df))):
+        # Also check for SALDO column header in rows 0-3
+        for row_idx in range(0, min(4, len(df))):
             row_vals = df.iloc[row_idx].astype(str).str.upper()
             if any("SALDO" in str(cell) for cell in row_vals):
                 return True
@@ -901,7 +907,8 @@ def _extract_date_from_header(df: pd.DataFrame) -> date:
 
     Supported formats:
     1. Legacy: Row 2 contains "FECHA ACTUALIZACION: DD/MM/YYYY"
-    2. Barrios: Row 0 contains "INVENTARIO DIDARIO DD.MM.YY"
+    2. Barrios title: Row 0 contains "INVENTARIO DIDARIO DD.MM.YY"
+    3. Barrios compact: No date in header — falls back to today's date
 
     Args:
         df: DataFrame with raw Excel data (no header parsing)
@@ -939,11 +946,44 @@ def _extract_date_from_header(df: pd.DataFrame) -> date:
 
 
 def _is_barrios_daily_format(df: pd.DataFrame) -> bool:
-    """Check if this is the Barrios daily inventory format (INVENTARIO DIDARIO)."""
-    if len(df) > 0 and pd.notna(df.iloc[0, 0]):
+    """
+    Check if this is the Barrios daily inventory format.
+
+    Two sub-variants:
+    1. Title variant: Row 0 contains "INVENTARIO DIDARIO DD.MM.YY"
+    2. Compact variant: Row 0 contains "PRODUCTO" in col 0 and "SALDO" elsewhere
+       (no title row — group headers are in row 0, sub-headers in row 1, data at row 2)
+    """
+    if len(df) == 0:
+        return False
+    if pd.notna(df.iloc[0, 0]):
         title = str(df.iloc[0, 0]).upper()
+        # Title variant: "INVENTARIO DIDARIO 18.02.26"
         if "INVENTARIO" in title and "DIDARIO" in title:
             return True
+        # Compact variant: "PRODUCTO" in col 0 + "SALDO" somewhere in row 0
+        if "PRODUCTO" in title:
+            row0_vals = [str(c).upper() for c in df.iloc[0] if pd.notna(c)]
+            if any("SALDO" in v for v in row0_vals):
+                return True
+    return False
+
+
+def _is_barrios_compact_format(df: pd.DataFrame) -> bool:
+    """
+    Check if this is the compact Barrios variant (no title row).
+
+    Compact: Row 0 has PRODUCTO + SALDO as group headers, data starts at row 2.
+    Title: Row 0 has "INVENTARIO DIDARIO", data starts at row 4.
+    """
+    if len(df) == 0:
+        return False
+    if pd.notna(df.iloc[0, 0]):
+        title = str(df.iloc[0, 0]).upper()
+        if "PRODUCTO" in title:
+            row0_vals = [str(c).upper() for c in df.iloc[0] if pd.notna(c)]
+            if any("SALDO" in v for v in row0_vals):
+                return True
     return False
 
 
@@ -967,7 +1007,7 @@ def _parse_movement_tracking_sheet(
     """
     Parse movement-tracking format inventory sheet.
 
-    Supports two variants:
+    Supports three variants:
 
     1. Legacy format:
        - Row 0-1: Empty/title
@@ -976,7 +1016,7 @@ def _parse_movement_tracking_sheet(
        - Row 4: Sub-headers (PALETT | CANTIDAD M2 | ...)
        - Row 5+: Data (flat list, no category sections)
 
-    2. Barrios daily format:
+    2. Barrios daily format (title variant):
        - Row 0: "INVENTARIO DIDARIO DD.MM.YY"
        - Row 1: Group headers (PRODUCTO | INICIAL | INGRESOS | SALIDAS | SALDO)
        - Row 2: Sub-headers (Referencia | Formato | Pallets | Cant | ...)
@@ -987,7 +1027,12 @@ def _parse_movement_tracking_sheet(
        - Rows N+3-M: Furniture product data
        - Row M+1: Subtotal
 
-    Column mapping (both formats, 0-indexed):
+    3. Barrios compact format (no title row):
+       - Row 0: Group headers (PRODUCTO | INICIAL | INGRESOS | SALIDAS | SALDO)
+       - Row 1: Sub-headers (Referencia | Formato | Pallets | Cant | ...)
+       - Row 2+: Data rows (Formato column has category per row)
+
+    Column mapping (all formats, 0-indexed):
     - Column 0: SKU / Referencia
     - Column 1: Formato (Barrios only — "CERAMICO" or "MUEBLES")
     - Column 9: SALDO quantity (m² for tiles, units for furniture)
@@ -1012,14 +1057,22 @@ def _parse_movement_tracking_sheet(
 
     # Determine format variant and data start row
     is_barrios = _is_barrios_daily_format(df)
-    # Barrios: data starts at row 4 (after title, group headers, sub-headers, first category)
+    is_compact = _is_barrios_compact_format(df)
+    # Compact Barrios: data starts at row 2 (group headers + sub-headers only)
+    # Title Barrios: data starts at row 4 (title + group headers + sub-headers + category)
     # Legacy: data starts at row 5
-    data_start = 4 if is_barrios else 5
+    if is_compact:
+        data_start = 2
+    elif is_barrios:
+        data_start = 4
+    else:
+        data_start = 5
     data_df = df.iloc[data_start:].copy()
 
+    variant_name = "barrios_compact" if is_compact else ("barrios" if is_barrios else "legacy")
     logger.info(
         "movement_tracking_variant",
-        variant="barrios" if is_barrios else "legacy",
+        variant=variant_name,
         data_start=data_start,
         total_rows=len(df),
     )
@@ -1092,7 +1145,7 @@ def _parse_movement_tracking_sheet(
     logger.info(
         "movement_tracking_parsed",
         sheet=sheet_name,
-        variant="barrios" if is_barrios else "legacy",
+        variant=variant_name,
         records=len(result.inventory),
         errors=len(result.errors)
     )
@@ -1105,8 +1158,8 @@ def _extract_products_from_movement_tracking(
     """
     Extract unique products from movement-tracking format inventory sheet.
 
-    Handles both legacy (SKUs at row 5+) and Barrios (SKUs at row 4+, with
-    category in column 1 — "CERAMICO" or "MUEBLES").
+    Handles legacy (SKUs at row 5+), Barrios title variant (SKUs at row 4+),
+    and Barrios compact variant (SKUs at row 2+, with category in column 1).
     """
     try:
         df = excel.parse(sheet_name, header=None)
@@ -1116,7 +1169,13 @@ def _extract_products_from_movement_tracking(
 
     # Determine format and data start
     is_barrios = _is_barrios_daily_format(df)
-    data_start = 4 if is_barrios else 5
+    is_compact = _is_barrios_compact_format(df)
+    if is_compact:
+        data_start = 2
+    elif is_barrios:
+        data_start = 4
+    else:
+        data_start = 5
     data_df = df.iloc[data_start:].copy()
 
     products_seen = set()

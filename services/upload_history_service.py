@@ -40,6 +40,7 @@ class UploadHistoryService:
             "file_hash": file_hash,
             "filename": filename,
             "row_count": row_count,
+            "status": "success",
         }).execute()
         logger.info(
             "upload_recorded",
@@ -47,6 +48,39 @@ class UploadHistoryService:
             filename=filename,
             row_count=row_count,
         )
+
+    def record_failed_upload(
+        self,
+        upload_type: str,
+        filename: str,
+        error_message: str,
+        file_hash: str = "",
+    ) -> None:
+        """Record a failed upload for later diagnosis."""
+        # Truncate error message to prevent excessively long entries
+        truncated_msg = error_message[:2000] if error_message else "Unknown error"
+        try:
+            self.db.table(self.table).insert({
+                "upload_type": upload_type,
+                "file_hash": file_hash or "",
+                "filename": filename or "unknown",
+                "row_count": 0,
+                "status": "error",
+                "error_message": truncated_msg,
+            }).execute()
+            logger.info(
+                "failed_upload_recorded",
+                upload_type=upload_type,
+                filename=filename,
+                error=truncated_msg[:200],
+            )
+        except Exception as log_err:
+            # Never let failure logging break the error response
+            logger.warning(
+                "failed_to_record_upload_error",
+                upload_type=upload_type,
+                log_error=str(log_err),
+            )
 
 
 _service: Optional[UploadHistoryService] = None

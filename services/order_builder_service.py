@@ -1506,12 +1506,16 @@ class OrderBuilderService:
                     days_of_stock = int(round(proj_days))
                     urgency = self._calculate_urgency(days_of_stock)
                 # PROJECTION PATH: use projected stock at boat's arrival
-                # projected_stock already accounts for:
-                # - Warehouse depletion (velocity × days_to_arrival)
-                # - Earlier boat drafts consuming stock
-                # - SIESA, production, in_transit supply
-                # - Pending orders (via ordered/confirmed drafts)
                 projected_stock = projection["projected_stock_m2"]
+                supply = projection["supply_breakdown"]
+
+                # Separate warehouse stock from factory supply for coverage gap.
+                # SIESA and production are factory supply (what's available TO order),
+                # not existing stock (what we already have in warehouse).
+                # warehouse_projected = (warehouse + transit) - velocity × days
+                factory_supply_m2 = supply["factory_siesa_m2"] + supply["production_pipeline_m2"]
+                warehouse_projected = projected_stock - factory_supply_m2
+
                 total_coverage_days = buffer_days  # Only cover gap to NEXT boat
                 base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
 
@@ -1520,7 +1524,7 @@ class OrderBuilderService:
                 )
                 adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
 
-                minus_current = projected_stock
+                minus_current = max(Decimal("0"), warehouse_projected)
                 minus_incoming = Decimal("0")  # Already in projection
 
                 # Skip pending orders — already baked into projected_stock
@@ -1528,9 +1532,10 @@ class OrderBuilderService:
                 pending_order_pallets = 0
                 pending_order_boat = None
 
+                # Coverage gap against warehouse-only projected stock
                 final_suggestion_m2 = max(
                     Decimal("0"),
-                    adjusted_quantity_m2 - projected_stock
+                    adjusted_quantity_m2 - max(Decimal("0"), warehouse_projected)
                 )
             else:
                 # Adjust days_of_stock for depletion during transit so urgency
