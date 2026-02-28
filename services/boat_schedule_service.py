@@ -209,19 +209,7 @@ class BoatScheduleService:
                 )
 
             result = query.execute()
-
-            # Filter out boats with ordered/confirmed drafts
-            schedules = result.data
-            if schedules:
-                ordered_ids = self._get_ordered_boat_ids(
-                    [s["id"] for s in schedules]
-                )
-                if ordered_ids:
-                    schedules = [
-                        s for s in schedules if s["id"] not in ordered_ids
-                    ]
-
-            return [BoatScheduleResponse.from_db(row) for row in schedules]
+            return [BoatScheduleResponse.from_db(row) for row in result.data]
 
         except Exception as e:
             logger.error("get_available_boats_failed", error=str(e))
