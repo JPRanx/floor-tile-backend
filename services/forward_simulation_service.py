@@ -84,12 +84,14 @@ class ForwardSimulationService:
             # Fetch all required data
             factory = self._get_factory(factory_id)
             unit_config = get_unit_config(self.db, factory_id)
-            real_boats = self._get_upcoming_boats(factory["origin_port"], today, horizon_end)
+            all_real_boats = self._get_upcoming_boats(factory["origin_port"], today, horizon_end)
             # Filter out boats with ordered/confirmed drafts — they're done
-            ordered_boat_ids = self._get_ordered_boat_ids(factory_id, real_boats)
-            real_boats = [b for b in real_boats if b["id"] not in ordered_boat_ids]
+            ordered_boat_ids = self._get_ordered_boat_ids(factory_id, all_real_boats)
+            real_boats = [b for b in all_real_boats if b["id"] not in ordered_boat_ids]
             routes = self._get_shipping_routes(factory["origin_port"])
-            boats = _merge_with_phantom_boats(real_boats, routes, today, horizon_end)
+            # Pass ALL real boats (including ordered) so phantoms don't fill ordered slots
+            boats = _merge_with_phantom_boats(real_boats, routes, today, horizon_end,
+                                              suppress_dates=all_real_boats)
             products = self._get_active_products(factory_id)
             inventory_map = self._get_latest_inventory(products)
             velocity_map = self._get_daily_velocities(products, today)
@@ -1268,6 +1270,7 @@ def _merge_with_phantom_boats(
     routes: list[dict],
     start: date,
     end: date,
+    suppress_dates: list[dict] | None = None,
 ) -> list[dict]:
     """
     Fill gaps in the real boat schedule with phantom (estimated) boats
@@ -1276,13 +1279,20 @@ def _merge_with_phantom_boats(
     For each route, generates expected departure dates within the horizon.
     If a real boat already departs within +/- 2 days of an expected date,
     the phantom is skipped (real boat takes priority).
+
+    Args:
+        suppress_dates: Additional boats whose dates should suppress phantoms
+                        (e.g. ordered boats removed from real_boats but still
+                        occupying their departure slot).
     """
     if not routes:
         return real_boats
 
     # Build set of real departure dates for quick lookup
+    # Include suppress_dates so ordered boats still block phantom generation
+    all_boats_for_dates = suppress_dates if suppress_dates else real_boats
     real_departure_dates = set()
-    for boat in real_boats:
+    for boat in all_boats_for_dates:
         real_departure_dates.add(_parse_date(boat["departure_date"]))
 
     phantoms: list[dict] = []
