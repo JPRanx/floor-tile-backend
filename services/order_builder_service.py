@@ -1710,11 +1710,9 @@ class OrderBuilderService:
             factory_largest_lot_code = factory_avail.get("factory_largest_lot_code")
             factory_lot_count = factory_avail.get("factory_lot_count", 0)
 
-            # Override with cascade-aware SIESA supply when projection available.
-            # Earlier boats' drafts consume SIESA — this boat only sees what's left.
-            if projection is not None:
-                proj_supply = projection.get("supply_breakdown", {})
-                factory_available_m2 = proj_supply.get("factory_siesa_m2", Decimal("0"))
+            # factory_available_m2 uses REAL inventory (not cascade).
+            # Cascade awareness comes from suggested_pallets (SIESA conflation fix, line 1512).
+            # Real SIESA drives factory_fill_status and frontend SIESA/no-SIESA split.
 
             # Calculate factory fill status based on SIESA availability
             # Priority: Check if stock exists FIRST, then compare to suggested quantity
@@ -1783,25 +1781,11 @@ class OrderBuilderService:
                     adjusted_gap=float(adjusted_coverage_gap),
                 )
 
-            # Calculate availability breakdown (what's available for this boat)
+            # Calculate availability breakdown using REAL factory data.
+            # suggested_pallets is already cascade-aware (SIESA conflation fix).
+            # Availability uses real SIESA + real production — what's physically at factory.
             availability_breakdown = None
-            if projection is not None:
-                # Use cascade-aware supply: SIESA + production after earlier boats consumed their share
-                proj_supply = projection.get("supply_breakdown", {})
-                proj_siesa = proj_supply.get("factory_siesa_m2", Decimal("0"))
-                proj_prod = proj_supply.get("production_pipeline_m2", Decimal("0"))
-                proj_total = proj_siesa + proj_prod
-                shortfall = max(Decimal("0"), final_suggestion_m2 - proj_total)
-                availability_breakdown = AvailabilityBreakdown(
-                    siesa_now_m2=proj_siesa,
-                    production_completing_m2=proj_prod,
-                    total_available_m2=proj_total,
-                    suggested_order_m2=final_suggestion_m2,
-                    shortfall_m2=shortfall,
-                    can_fulfill=proj_total >= final_suggestion_m2,
-                    shortfall_note=f"{int(shortfall):,} m² needs future production" if shortfall > 0 else None,
-                )
-            elif order_deadline:
+            if order_deadline:
                 availability_breakdown = self._calculate_availability_breakdown(
                     factory_available_m2=factory_available_m2,
                     production_status=production_status,
