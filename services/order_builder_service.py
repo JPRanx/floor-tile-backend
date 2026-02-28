@@ -2760,11 +2760,14 @@ class OrderBuilderService:
         # Generate key insights
         key_insights = []
 
-        # Insight 1: Stockout risk count
+        # Insight 1: Stockout risk count (cascade-aware)
+        # Use priority + suggested_pallets as source of truth.
+        # Products whose gaps are already covered by earlier boats
+        # have suggested_pallets=0 and priority=WELL_COVERED — excluded here.
         stockout_risk_count = sum(
             1 for p in all_products
-            if p.reasoning and p.reasoning.stock.gap_days is not None
-            and p.reasoning.stock.gap_days < 0
+            if p.priority in ("HIGH_PRIORITY", "CONSIDER")
+            and p.suggested_pallets > 0
         )
         if stockout_risk_count > 0:
             key_insights.append(
@@ -2866,10 +2869,11 @@ class OrderBuilderService:
         # Why are we ordering? Include actionable context about shippability.
         if stockout_risk_count > 0:
             # Count how many at-risk products can actually ship (have SIESA stock)
+            # Uses same cascade-aware criteria as stockout_risk_count above.
             at_risk = [
                 p for p in all_products
-                if p.reasoning and p.reasoning.stock.gap_days is not None
-                and p.reasoning.stock.gap_days < 0
+                if p.priority in ("HIGH_PRIORITY", "CONSIDER")
+                and p.suggested_pallets > 0
             ]
             shippable = [p for p in at_risk if float(p.factory_available_m2 or 0) > 0]
             unshippable = [p for p in at_risk if float(p.factory_available_m2 or 0) <= 0]
