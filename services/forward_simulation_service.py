@@ -85,6 +85,9 @@ class ForwardSimulationService:
             factory = self._get_factory(factory_id)
             unit_config = get_unit_config(self.db, factory_id)
             real_boats = self._get_upcoming_boats(factory["origin_port"], today, horizon_end)
+            # Filter out boats with ordered/confirmed drafts — they're done
+            ordered_boat_ids = self._get_ordered_boat_ids(factory_id, real_boats)
+            real_boats = [b for b in real_boats if b["id"] not in ordered_boat_ids]
             routes = self._get_shipping_routes(factory["origin_port"])
             boats = _merge_with_phantom_boats(real_boats, routes, today, horizon_end)
             products = self._get_active_products(factory_id)
@@ -950,6 +953,30 @@ class ForwardSimulationService:
         except Exception as e:
             logger.error("fetch_boats_failed", error=str(e))
             raise DatabaseError("select", str(e))
+
+    def _get_ordered_boat_ids(
+        self, factory_id: str, boats: list[dict]
+    ) -> set[str]:
+        """Get boat IDs that have ordered/confirmed drafts for this factory."""
+        if not boats:
+            return set()
+        boat_ids = [b["id"] for b in boats]
+        try:
+            result = (
+                self.db.table("boat_factory_drafts")
+                .select("boat_id")
+                .eq("factory_id", factory_id)
+                .in_("boat_id", boat_ids)
+                .in_("status", ["ordered", "confirmed"])
+                .execute()
+            )
+            ids = {row["boat_id"] for row in result.data}
+            if ids:
+                logger.debug("filtered_ordered_boats", count=len(ids))
+            return ids
+        except Exception as e:
+            logger.warning("fetch_ordered_boats_failed", error=str(e))
+            return set()
 
     def _get_active_products(self, factory_id: str) -> list[dict]:
         """Fetch active products for the factory."""

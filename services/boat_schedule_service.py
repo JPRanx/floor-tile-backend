@@ -210,11 +210,36 @@ class BoatScheduleService:
 
             result = query.execute()
 
-            return [BoatScheduleResponse.from_db(row) for row in result.data]
+            # Filter out boats with ordered/confirmed drafts
+            schedules = result.data
+            if schedules:
+                ordered_ids = self._get_ordered_boat_ids(
+                    [s["id"] for s in schedules]
+                )
+                if ordered_ids:
+                    schedules = [
+                        s for s in schedules if s["id"] not in ordered_ids
+                    ]
+
+            return [BoatScheduleResponse.from_db(row) for row in schedules]
 
         except Exception as e:
             logger.error("get_available_boats_failed", error=str(e))
             raise DatabaseError("select", str(e))
+
+    def _get_ordered_boat_ids(self, boat_ids: list[str]) -> set[str]:
+        """Get boat IDs that have any ordered/confirmed draft."""
+        try:
+            result = (
+                self.db.table("boat_factory_drafts")
+                .select("boat_id")
+                .in_("boat_id", boat_ids)
+                .in_("status", ["ordered", "confirmed"])
+                .execute()
+            )
+            return {row["boat_id"] for row in result.data}
+        except Exception:
+            return set()
 
     def get_next_available(self) -> Optional[BoatScheduleResponse]:
         """
