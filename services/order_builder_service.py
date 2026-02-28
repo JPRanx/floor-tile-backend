@@ -1539,11 +1539,16 @@ class OrderBuilderService:
                 )
             else:
                 # Adjust days_of_stock for depletion during transit so urgency
-                # aligns with forward simulation's days_of_stock_at_arrival
+                # aligns with forward simulation's days_of_stock_at_arrival.
+                # Include SIESA (factory finished goods) so products with large
+                # SIESA stock aren't marked critical just because warehouse is low.
                 if days_of_stock is not None and daily_velocity_m2 > 0 and days_to_cover > 0:
                     warehouse_m2_val = rec.warehouse_m2 or Decimal("0")
                     in_transit_m2_val = rec.in_transit_m2 or Decimal("0")
-                    available_m2 = warehouse_m2_val + in_transit_m2_val
+                    fallback_siesa = factory_availability_map.get(
+                        rec.product_id, {}
+                    ).get("factory_available_m2", Decimal("0"))
+                    available_m2 = warehouse_m2_val + in_transit_m2_val + fallback_siesa
                     projected_m2 = available_m2 - (daily_velocity_m2 * days_to_cover)
                     if projected_m2 > 0:
                         days_of_stock = int(projected_m2 / daily_velocity_m2)
