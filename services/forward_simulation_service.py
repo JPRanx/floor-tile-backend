@@ -544,12 +544,17 @@ class ForwardSimulationService:
                 "is_draft_committed": is_committed,
             })
 
-            # Cascade: update running stock for next boat
+            # Cascade: update running stock for next boat.
+            # Use effective_stock (before depletion) so each boat independently
+            # applies its own depletion from today. Using projected_stock here
+            # would double-count depletion for later boats because projected
+            # already subtracted vel × days_until_arrival, and the next boat
+            # would subtract vel × its_own_days_until_arrival from today again.
             if suggested_pallets > 0:
                 filled_qty = Decimal(suggested_pallets) * pallet_divisor
-                current_stock[pid] = projected_stock + filled_qty
+                current_stock[pid] = effective_stock + filled_qty
             else:
-                current_stock[pid] = projected_stock
+                current_stock[pid] = effective_stock
 
         # Confidence
         days_out = (departure_date - today).days
@@ -1012,7 +1017,7 @@ class ForwardSimulationService:
             result = (
                 self.db.table("production_schedule")
                 .select("id, product_id, status, requested_m2, completed_m2, estimated_delivery_date")
-                .in_("status", ["scheduled", "in_progress", "completed"])
+                .in_("status", ["scheduled", "in_progress"])
                 .not_.is_("product_id", "null")
                 .not_.is_("estimated_delivery_date", "null")
                 .lte("estimated_delivery_date", horizon_end.isoformat())

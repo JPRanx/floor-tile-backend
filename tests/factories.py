@@ -5,7 +5,7 @@ See STANDARDS_TESTING.md for patterns.
 Uses factory pattern to generate consistent test data.
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from uuid import uuid4
 
@@ -198,3 +198,74 @@ class SalesFactory:
     def create_batch(cls, count: int, **overrides) -> list:
         """Create multiple sales."""
         return [cls.create(**overrides) for _ in range(count)]
+
+
+class BoatFactory:
+    """Factory for creating test boat schedule data."""
+
+    _counter = 0
+
+    @classmethod
+    def _next_counter(cls) -> int:
+        cls._counter += 1
+        return cls._counter
+
+    @classmethod
+    def create(
+        cls,
+        id: Optional[str] = None,
+        vessel_name: Optional[str] = None,
+        departure_date: Optional[str] = None,
+        arrival_date: Optional[str] = None,
+        origin_port: str = "Barranquilla",
+        carrier: str = "TIBA",
+        status: str = "available",
+        max_containers: int = 5,
+        shipping_line: Optional[str] = None,
+    ) -> dict:
+        """Create a single boat schedule dict."""
+        counter = cls._next_counter()
+        dep = departure_date or (date.today() + timedelta(days=30)).isoformat()
+        arr = arrival_date or (date.today() + timedelta(days=45)).isoformat()
+
+        return {
+            "id": id or str(uuid4()),
+            "vessel_name": vessel_name or f"Test Vessel {counter}",
+            "departure_date": dep,
+            "arrival_date": arr,
+            "origin_port": origin_port,
+            "carrier": carrier,
+            "status": status,
+            "max_containers": max_containers,
+            "shipping_line": shipping_line or carrier,
+        }
+
+    @classmethod
+    def reset_counter(cls):
+        cls._counter = 0
+
+
+class ProductionScheduleFactory:
+    """Factory for creating test production schedule data."""
+
+    @classmethod
+    def create(
+        cls,
+        id: Optional[str] = None,
+        product_id: Optional[str] = None,
+        status: str = "in_progress",
+        requested_m2: float = 2000.0,
+        completed_m2: float = 0.0,
+        estimated_delivery_date: Optional[str] = None,
+    ) -> dict:
+        """Create a single production schedule row."""
+        delivery = estimated_delivery_date or (date.today() + timedelta(days=30)).isoformat()
+
+        return {
+            "id": id or str(uuid4()),
+            "product_id": product_id or str(uuid4()),
+            "status": status,
+            "requested_m2": requested_m2,
+            "completed_m2": completed_m2,
+            "estimated_delivery_date": delivery,
+        }
