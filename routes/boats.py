@@ -120,6 +120,17 @@ async def get_available_boats(
     try:
         service = get_boat_schedule_service()
         schedules = service.get_available(from_date=from_date, limit=limit)
+
+        # Filter out boats with ordered/confirmed drafts at route level only.
+        # Internal callers (OB, stockout, recommendation) need all boats for
+        # cascade math — only the booking dropdown should exclude ordered ones.
+        if schedules:
+            ordered_ids = service._get_ordered_boat_ids(
+                [s.id for s in schedules]
+            )
+            if ordered_ids:
+                schedules = [s for s in schedules if s.id not in ordered_ids]
+
         return schedules
 
     except Exception as e:
