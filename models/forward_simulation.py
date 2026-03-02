@@ -53,7 +53,7 @@ class ProductProjection(BaseSchema):
     product_id: str = Field(..., description="Product UUID")
     sku: str = Field("", description="Product SKU")
     daily_velocity_m2: float = Field(0, ge=0, description="Daily sales velocity in m2")
-    current_stock_m2: float = Field(0, description="Current warehouse + in-transit stock in m2")
+    current_stock_m2: float = Field(0, description="Current warehouse stock in m2")
     projected_stock_m2: float = Field(0, description="Projected stock at arrival in m2")
     days_of_stock_at_arrival: float = Field(0, description="Days of stock remaining at arrival")
     urgency: str = Field("ok", description="Urgency level: critical, urgent, soon, ok")

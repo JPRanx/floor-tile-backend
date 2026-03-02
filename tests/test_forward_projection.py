@@ -41,7 +41,7 @@ def _make_product_detail(
         "product_id": product_id,
         "sku": sku,
         "daily_velocity_m2": daily_velocity_m2,
-        "current_stock_m2": warehouse_m2 + factory_siesa_m2 + production_pipeline_m2 + in_transit_m2,
+        "current_stock_m2": warehouse_m2,
         "projected_stock_m2": projected_stock_m2,
         "days_of_stock_at_arrival": days_of_stock_at_arrival,
         "days_of_stock_after_fill": days_of_stock_after_fill,

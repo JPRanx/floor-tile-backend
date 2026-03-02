@@ -1021,6 +1021,10 @@ class OrderBuilderService:
         selection_constraint_note: Optional[str],
         # Dynamic buffer
         buffer_days: Optional[int] = None,
+        # Forward simulation overrides (when FS projection is available)
+        projection_coverage_pallets: Optional[int] = None,
+        projection_projected_stock_m2: Optional[Decimal] = None,
+        projection_earlier_drafts_consumed_m2: Optional[Decimal] = None,
     ) -> FullCalculationBreakdown:
         """
         Build complete calculation breakdown showing all math.
@@ -1044,6 +1048,15 @@ class OrderBuilderService:
         coverage_suggested_pallets = math.ceil(float(coverage_gap_m2 / M2_PER_PALLET)) if coverage_gap_m2 > 0 else 0
         coverage_suggested_m2 = Decimal(coverage_suggested_pallets) * M2_PER_PALLET
 
+        # When forward simulation projection is available, override the final
+        # suggested pallets/m2 with the FS values (cascade-aware).  Keep all
+        # the intermediate display fields (velocity, target_days, gap, etc.)
+        # computed above so the UI can still show the math.
+        uses_projection = projection_coverage_pallets is not None
+        if uses_projection:
+            coverage_suggested_pallets = projection_coverage_pallets
+            coverage_suggested_m2 = Decimal(coverage_suggested_pallets) * M2_PER_PALLET
+
         coverage = CoverageCalculation(
             target_coverage_days=target_days,
             days_to_warehouse=days_to_cover,
@@ -1059,6 +1072,9 @@ class OrderBuilderService:
             warehouse_m2=warehouse_m2,
             in_transit_m2=in_transit_m2,
             pending_order_m2=pending_order_m2,
+            uses_projection=uses_projection,
+            projected_stock_m2=projection_projected_stock_m2,
+            earlier_drafts_consumed_m2=projection_earlier_drafts_consumed_m2,
             coverage_gap_m2=round(coverage_gap_m2, 2),
             coverage_gap_pallets=coverage_gap_pallets,
             suggested_pallets=coverage_suggested_pallets,
@@ -1844,6 +1860,10 @@ class OrderBuilderService:
                 selection_constraint_note=None,
                 # Dynamic buffer based on next boat arrival
                 buffer_days=buffer_days,
+                # Forward simulation overrides
+                projection_coverage_pallets=projection.get("suggested_pallets", 0) if projection is not None else None,
+                projection_projected_stock_m2=Decimal(str(projection.get("projected_stock_m2", 0))) if projection is not None else None,
+                projection_earlier_drafts_consumed_m2=Decimal(str(projection.get("earlier_drafts_consumed_m2", 0))) if projection is not None else None,
             )
 
             # Look up per-product weight from product type config

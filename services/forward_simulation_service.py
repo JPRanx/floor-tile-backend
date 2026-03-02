@@ -755,7 +755,7 @@ class ForwardSimulationService:
                 "product_id": pid,
                 "sku": product.get("sku", ""),
                 "daily_velocity_m2": float(daily_vel.quantize(Decimal("0.01"))),
-                "current_stock_m2": float(effective_stock.quantize(Decimal("0.01"))),
+                "current_stock_m2": float(stock.quantize(Decimal("0.01"))),
                 "projected_stock_m2": float(projected_stock.quantize(Decimal("0.01"))),
                 "days_of_stock_at_arrival": round(days_of_stock, 1),
                 "days_of_stock_after_fill": round(days_after_fill, 1),
@@ -796,8 +796,8 @@ class ForwardSimulationService:
         confidence_label, confidence_score = _compute_confidence(days_out)
 
         # Pallet range (uncertainty band)
-        estimated_pallets_min = int(total_pallets * (confidence_score / 100))
-        estimated_pallets_max = int(total_pallets * (2 - confidence_score / 100))
+        estimated_pallets_min = round(total_pallets * (confidence_score / 100))
+        estimated_pallets_max = round(total_pallets * (2 - confidence_score / 100))
 
         # Deadlines
         production_lead = int(factory.get("production_lead_days", 0))
