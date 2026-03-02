@@ -1507,6 +1507,10 @@ class OrderBuilderService:
                     days_of_stock = int(round(proj_days))
                     urgency = self._calculate_urgency(days_of_stock)
 
+                # Override trend labels with FS values so both views match
+                direction = projection.get("trend_direction", direction)
+                strength = projection.get("trend_strength", strength)
+
                 # FS's coverage_gap_m2 is the ordering suggestion in m²
                 final_suggestion_m2 = projection.get("coverage_gap_m2", Decimal("0"))
 
