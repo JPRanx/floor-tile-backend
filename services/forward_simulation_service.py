@@ -21,6 +21,7 @@ from config.shipping import (
     M2_PER_PALLET,
     WAREHOUSE_BUFFER_DAYS,
     ORDERING_CYCLE_DAYS,
+    SEASONAL_DAMPENING,
 )
 from models.boat_schedule import ORDER_DEADLINE_DAYS
 from services.unit_config_service import get_unit_config
@@ -43,6 +44,27 @@ CONFIDENCE_DEFAULT = ("very_low", 10, 29)
 
 VELOCITY_LOOKBACK_DAYS = 90
 
+# Trend thresholds (mirrored from OB for coherence)
+_GROWING_THRESHOLD = Decimal("1.20")
+_DECLINING_THRESHOLD = Decimal("0.80")
+
+
+def _calculate_trend_factor(direction: str, strength: str) -> Decimal:
+    """Return a multiplier for trend-adjusted demand.
+
+    Same percentages as OB's ``_calculate_trend_adjustment``:
+    up/strong → 1.20, up/moderate → 1.10, up/weak → 1.05,
+    down/strong → 0.80, down/moderate → 0.90, down/weak → 0.95,
+    stable → 1.0.
+    """
+    if direction == "up":
+        return {"strong": Decimal("1.20"), "moderate": Decimal("1.10"),
+                "weak": Decimal("1.05")}.get(strength, Decimal("1.0"))
+    if direction == "down":
+        return {"strong": Decimal("0.80"), "moderate": Decimal("0.90"),
+                "weak": Decimal("0.95")}.get(strength, Decimal("1.0"))
+    return Decimal("1.0")
+
 
 class ForwardSimulationService:
     """
@@ -55,6 +77,171 @@ class ForwardSimulationService:
 
     def __init__(self):
         self.db = get_supabase_client()
+
+    # ------------------------------------------------------------------
+    # Demand intelligence (trend + customer demand)
+    # ------------------------------------------------------------------
+
+    def _get_trend_factors(self, products: list[dict]) -> dict[str, dict]:
+        """Fetch trend direction/strength per product_id.
+
+        Replicates OB's dual-velocity comparison (90d vs 180d) with seasonal
+        dampening so both views use the same trend classification.
+
+        Returns ``{product_id: {"direction": str, "strength": str,
+        "factor": Decimal}}`` where factor is the multiplier (1.0 = stable).
+        """
+        try:
+            from services.trend_service import get_trend_service
+            trend_service = get_trend_service()
+
+            trends_90d = trend_service.get_product_trends(
+                period_days=90, comparison_period_days=90, limit=200,
+            )
+            trends_180d = trend_service.get_product_trends(
+                period_days=180, comparison_period_days=180, limit=200,
+            )
+
+            # Build lookups keyed by SKU
+            velocity_180d_by_sku = {
+                t.sku: t.current_velocity_m2_day for t in trends_180d
+            }
+
+            # SKU → product_id mapping
+            sku_to_pid = {p["sku"]: p["id"] for p in products}
+
+            current_month = date.today().month
+            seasonal_factor = SEASONAL_DAMPENING.get(current_month, 1.0)
+
+            result: dict[str, dict] = {}
+            for t in trends_90d:
+                pid = sku_to_pid.get(t.sku)
+                if not pid:
+                    continue
+
+                velocity_90d = t.current_velocity_m2_day
+                velocity_180d = velocity_180d_by_sku.get(t.sku, Decimal("0"))
+
+                # Dual-velocity comparison with seasonal dampening
+                if velocity_180d > 0:
+                    trend_ratio_raw = velocity_90d / velocity_180d
+                    trend_ratio = Decimal("1.0") + (
+                        trend_ratio_raw - Decimal("1.0")
+                    ) * Decimal(str(seasonal_factor))
+                else:
+                    trend_ratio = Decimal("1.0")
+
+                # Direction from 90d trend object
+                direction = (
+                    t.direction.value
+                    if hasattr(t.direction, "value")
+                    else str(t.direction)
+                )
+                strength = (
+                    t.strength.value
+                    if hasattr(t.strength, "value")
+                    else str(t.strength)
+                )
+
+                # Override direction if dampened ratio disagrees
+                if trend_ratio >= _GROWING_THRESHOLD:
+                    direction = "up"
+                elif trend_ratio <= _DECLINING_THRESHOLD:
+                    direction = "down"
+                else:
+                    direction = "stable"
+
+                factor = _calculate_trend_factor(direction, strength)
+
+                result[pid] = {
+                    "direction": direction,
+                    "strength": strength,
+                    "factor": factor,
+                }
+
+            return result
+
+        except Exception as e:
+            logger.warning("fs_trend_fetch_failed", error=str(e))
+            return {}
+
+    def _get_customer_demand(self, products: list[dict]) -> dict[str, dict]:
+        """Fetch customer demand scores per product_id.
+
+        Replicates OB's customer demand scoring so both views use the same
+        expected-m² values.
+
+        Returns ``{product_id: {"expected_m2": Decimal, "score": int,
+        "customers_count": int, "customer_names": list[str]}}``.
+        """
+        try:
+            from services.trend_service import get_trend_service
+            trend_service = get_trend_service()
+
+            customer_trends = trend_service.get_customer_trends(
+                period_days=90, comparison_period_days=90, limit=100,
+            )
+
+            sku_to_pid = {p["sku"]: p["id"] for p in products}
+            tier_weights = {"A": 100, "B": 50, "C": 25}
+
+            sku_demand: dict[str, dict] = {}
+
+            for customer in customer_trends:
+                if not customer.avg_days_between_orders or customer.order_count < 2:
+                    continue
+                if customer.days_overdue < -14:
+                    continue
+
+                days_overdue = customer.days_overdue
+                if days_overdue <= 14:
+                    overdue_mult = 1.0
+                elif days_overdue <= 30:
+                    overdue_mult = 1.5
+                elif days_overdue <= 60:
+                    overdue_mult = 2.0
+                else:
+                    overdue_mult = 2.5
+
+                tier = (
+                    customer.tier.value
+                    if hasattr(customer.tier, "value")
+                    else str(customer.tier)
+                )
+                customer_score = int(tier_weights.get(tier, 25) * overdue_mult)
+
+                for prod in customer.top_products[:5]:
+                    sku = prod.sku
+                    if sku not in sku_demand:
+                        sku_demand[sku] = {
+                            "score": 0,
+                            "customers": set(),
+                            "expected_m2": Decimal("0"),
+                        }
+                    sku_demand[sku]["score"] += customer_score
+                    sku_demand[sku]["customers"].add(customer.customer_normalized)
+                    if customer.order_count > 0 and prod.total_m2:
+                        avg_m2 = Decimal(str(prod.total_m2)) / customer.order_count
+                        sku_demand[sku]["expected_m2"] += avg_m2
+
+            # Convert to product_id keys
+            result: dict[str, dict] = {}
+            for sku, data in sku_demand.items():
+                pid = sku_to_pid.get(sku)
+                if not pid:
+                    continue
+                result[pid] = {
+                    "expected_m2": round(data["expected_m2"], 2),
+                    "score": data["score"],
+                    "customers_count": len(data["customers"]),
+                    "customer_names": list(data["customers"])[:5],
+                }
+
+            return result
+
+        except Exception as e:
+            logger.warning("fs_customer_demand_failed", error=str(e))
+            return {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -92,11 +279,15 @@ class ForwardSimulationService:
             velocity_map = self._get_daily_velocities(products, today)
             drafts_map = self._get_existing_drafts(factory_id, boats)
 
-            # NEW: Fetch enriched supply sources
+            # Enriched supply sources
             production_pipeline = self._get_production_pipeline(products, horizon_end)
             # Exclude horizon boats — their drafts are already handled via drafts_map cascade
             horizon_boat_ids = {b["id"] for b in boats}
             in_transit_drafts = self._get_in_transit_drafts(factory_id, horizon_boat_ids)
+
+            # Demand intelligence (trend + customer demand)
+            trend_map = self._get_trend_factors(products)
+            customer_demand_map = self._get_customer_demand(products)
 
             # Build running stock tracker — warehouse only (no lump-sum in_transit)
             current_stock: dict[str, Decimal] = {}
@@ -117,7 +308,8 @@ class ForwardSimulationService:
 
             # Simulate each boat in departure order
             boat_projections: list[dict] = []
-            for boat in boats:
+            for i, boat in enumerate(boats):
+                next_boat = boats[i + 1] if i + 1 < len(boats) else None
                 projection = self._simulate_boat(
                     boat=boat,
                     factory=factory,
@@ -132,6 +324,9 @@ class ForwardSimulationService:
                     production_consumed=production_consumed,
                     in_transit_drafts=in_transit_drafts,
                     unit_config=unit_config,
+                    next_boat=next_boat,
+                    trend_map=trend_map,
+                    customer_demand_map=customer_demand_map,
                 )
                 boat_projections.append(projection)
 
@@ -329,6 +524,15 @@ class ForwardSimulationService:
                     "earlier_drafts_consumed_m2": earlier_consumed,
                     "coverage_gap_m2": Decimal(str(pd["coverage_gap_m2"])),
                     "days_of_stock_at_arrival": pd["days_of_stock_at_arrival"],
+                    # Demand intelligence (for OB consumption)
+                    "suggested_pallets": pd["suggested_pallets"],
+                    "trend_direction": pd.get("trend_direction", "stable"),
+                    "trend_strength": pd.get("trend_strength", "moderate"),
+                    "trend_adjustment_pct": pd.get("trend_adjustment_pct", 0),
+                    "customer_demand_m2": Decimal(str(pd.get("customer_demand_m2", 0))),
+                    "customers_expecting_count": pd.get("customers_expecting_count", 0),
+                    "customer_names": pd.get("customer_names", []),
+                    "buffer_days": pd.get("buffer_days", ORDERING_CYCLE_DAYS),
                 }
 
             return result
@@ -361,6 +565,9 @@ class ForwardSimulationService:
         production_consumed: set[str],
         in_transit_drafts: dict[str, list[dict]],
         unit_config: Optional[dict] = None,
+        next_boat: Optional[dict] = None,
+        trend_map: Optional[dict[str, dict]] = None,
+        customer_demand_map: Optional[dict[str, dict]] = None,
     ) -> dict:
         """
         Simulate a single boat: project stock at arrival, compute needs.
@@ -381,7 +588,16 @@ class ForwardSimulationService:
         if days_until_arrival < 1:
             days_until_arrival = 1
 
-        coverage_target = ORDERING_CYCLE_DAYS + days_until_arrival
+        # Dynamic buffer: days from this boat's arrival to next boat's arrival.
+        # Replaces static ORDERING_CYCLE_DAYS + days_until_arrival so FS and OB
+        # agree on how much stock each boat should carry.
+        if next_boat:
+            next_arrival = _parse_date(next_boat["arrival_date"])
+            buffer_days = (next_arrival - arrival_date).days + WAREHOUSE_BUFFER_DAYS
+            buffer_days = max(14, min(60, buffer_days))
+        else:
+            buffer_days = ORDERING_CYCLE_DAYS
+
         transport_to_port = int(factory.get("transport_to_port_days", 0))
 
         # Existing draft for this boat
@@ -456,6 +672,15 @@ class ForwardSimulationService:
             effective_stock = stock + siesa_supply + prod_supply + transit_supply
             projected_stock = effective_stock - (daily_vel * days_until_arrival)
 
+            # --- Demand intelligence for this product ---
+            trend_info = (trend_map or {}).get(pid, {})
+            trend_factor = trend_info.get("factor", Decimal("1.0"))
+            trend_direction = trend_info.get("direction", "stable")
+            trend_strength = trend_info.get("strength", "moderate")
+
+            cust_info = (customer_demand_map or {}).get(pid, {})
+            cust_demand_m2 = cust_info.get("expected_m2", Decimal("0"))
+
             # --- DEMAND: use draft or compute suggestion ---
             # Use draft selections for cascade so Ashley can plan multiple
             # boats at once.  Committed drafts (ordered/confirmed) are
@@ -484,18 +709,21 @@ class ForwardSimulationService:
                     suggested_pallets = draft_item["selected_pallets"]
                 else:
                     # Product not selected in tentative draft — compute fresh
-                    coverage_gap_val = max(
-                        Decimal("0"),
-                        (daily_vel * coverage_target) - projected_stock,
-                    )
-                    suggested_pallets = math.ceil(coverage_gap_val / pallet_divisor) if coverage_gap_val > 0 else 0
+                    # Demand-aware: trend-adjusted velocity × buffer, minus warehouse-only stock
+                    base_demand = daily_vel * Decimal(buffer_days)
+                    adjusted_demand = base_demand * trend_factor + cust_demand_m2
+                    wh_projected = projected_stock - (siesa_supply + prod_supply)
+                    wh_available = max(Decimal("0"), wh_projected)
+                    suggestion_m2 = max(Decimal("0"), adjusted_demand - wh_available)
+                    suggested_pallets = math.ceil(suggestion_m2 / pallet_divisor) if suggestion_m2 > 0 else 0
             else:
-                # No draft — compute suggestion normally
-                coverage_gap_val = max(
-                    Decimal("0"),
-                    (daily_vel * coverage_target) - projected_stock,
-                )
-                suggested_pallets = math.ceil(coverage_gap_val / pallet_divisor) if coverage_gap_val > 0 else 0
+                # No draft — compute suggestion with demand intelligence
+                base_demand = daily_vel * Decimal(buffer_days)
+                adjusted_demand = base_demand * trend_factor + cust_demand_m2
+                wh_projected = projected_stock - (siesa_supply + prod_supply)
+                wh_available = max(Decimal("0"), wh_projected)
+                suggestion_m2 = max(Decimal("0"), adjusted_demand - wh_available)
+                suggested_pallets = math.ceil(suggestion_m2 / pallet_divisor) if suggestion_m2 > 0 else 0
 
             total_pallets += suggested_pallets
 
@@ -518,11 +746,10 @@ class ForwardSimulationService:
             else:
                 days_after_fill = days_of_stock
 
-            # Coverage gap (for display — always computed even if draft committed)
-            coverage_gap = max(
-                Decimal("0"),
-                (daily_vel * coverage_target) - projected_stock,
-            )
+            # Coverage gap (for display — demand-aware, matches suggested_pallets formula)
+            display_demand = daily_vel * Decimal(buffer_days) * trend_factor + cust_demand_m2
+            display_wh = max(Decimal("0"), projected_stock - (siesa_supply + prod_supply))
+            coverage_gap = max(Decimal("0"), display_demand - display_wh)
 
             product_details.append({
                 "product_id": pid,
@@ -542,6 +769,14 @@ class ForwardSimulationService:
                     "in_transit_m2": float(transit_supply.quantize(Decimal("0.01"))),
                 },
                 "is_draft_committed": is_committed,
+                # Demand intelligence fields
+                "trend_direction": trend_direction,
+                "trend_strength": trend_strength,
+                "trend_adjustment_pct": float((trend_factor - Decimal("1")) * 100),
+                "customer_demand_m2": float(cust_demand_m2.quantize(Decimal("0.01"))),
+                "customers_expecting_count": cust_info.get("customers_count", 0),
+                "customer_names": cust_info.get("customer_names", []),
+                "buffer_days": buffer_days,
             })
 
             # Cascade: update running stock for next boat.
