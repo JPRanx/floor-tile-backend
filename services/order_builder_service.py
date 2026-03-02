@@ -1547,15 +1547,6 @@ class OrderBuilderService:
                 pending_order_pallets = 0
                 pending_order_boat = None
 
-                # Override current_stock_m2 with FS cascade-aware value
-                # so the product card matches the breakdown math (boats 2+
-                # have draft-adjusted stock from forward simulation).
-                fs_current_stock = projection.get("current_stock_m2")
-                if fs_current_stock is not None:
-                    display_warehouse_m2 = Decimal(str(fs_current_stock))
-                else:
-                    display_warehouse_m2 = rec.warehouse_m2
-
                 # For downstream reasoning display
                 total_coverage_days = buffer_days_from_fs
                 adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
@@ -1589,9 +1580,6 @@ class OrderBuilderService:
 
                 minus_current = rec.warehouse_m2 or Decimal("0")
                 minus_incoming = rec.in_transit_m2 or Decimal("0")
-
-                # No FS projection — use raw warehouse stock
-                display_warehouse_m2 = rec.warehouse_m2
 
                 pending_info = pending_orders_map.get(rec.sku, {})
                 pending_order_m2 = Decimal(str(pending_info.get("total_m2", 0)))
@@ -1888,7 +1876,7 @@ class OrderBuilderService:
                 weight_per_m2_kg=product_weight_per_m2,
                 priority=effective_priority,
                 action_type=rec.action_type.value,
-                current_stock_m2=display_warehouse_m2,
+                current_stock_m2=rec.warehouse_m2,
                 in_transit_m2=rec.in_transit_m2,
                 # Pending orders (already ordered, awaiting shipment)
                 pending_order_m2=pending_order_m2,
