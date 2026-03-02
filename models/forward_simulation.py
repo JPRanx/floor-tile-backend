@@ -10,6 +10,7 @@ See STANDARDS_VALIDATION.md for patterns.
 from pydantic import Field
 from typing import Optional
 from enum import Enum
+from typing import List
 
 from models.base import BaseSchema
 
@@ -65,6 +66,37 @@ class ProductProjection(BaseSchema):
     is_draft_committed: bool = Field(
         False,
         description="True if this quantity comes from a saved draft (not a simulation suggestion)"
+    )
+    trend_direction: str = Field(
+        "stable",
+        description="Trend direction: up, down, stable"
+    )
+    trend_strength: str = Field(
+        "moderate",
+        description="Trend strength: strong, moderate, weak"
+    )
+    trend_adjustment_pct: float = Field(
+        0,
+        description="Trend adjustment percentage applied to demand (+20 = 20% uptrend)"
+    )
+    customer_demand_m2: float = Field(
+        0,
+        ge=0,
+        description="Expected customer demand in m2 (from customer ordering patterns)"
+    )
+    customers_expecting_count: int = Field(
+        0,
+        ge=0,
+        description="Number of customers expected to order this product"
+    )
+    customer_names: List[str] = Field(
+        default_factory=list,
+        description="Names of customers expected to order"
+    )
+    buffer_days: int = Field(
+        0,
+        ge=0,
+        description="Coverage buffer days used for this boat's calculation"
     )
 
 
