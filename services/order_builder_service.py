@@ -8,6 +8,7 @@ See BUILDER_BLUEPRINT.md for algorithm details.
 """
 
 from typing import Optional
+from dataclasses import dataclass, field
 from decimal import Decimal
 from datetime import date, timedelta
 import math
@@ -104,6 +105,63 @@ WAREHOUSE_CAPACITY = settings.warehouse_max_pallets  # From config.settings
 # Factory request constants
 MIN_CONTAINER_M2 = M2_PER_PALLET * PALLETS_PER_CONTAINER  # 1,881.6 m²
 LOW_VOLUME_THRESHOLD_DAYS = 365  # 1 year — products that take longer to consume 1 container are flagged
+
+
+@dataclass
+class ProductAnalysis:
+    """
+    Single intermediate between FS/inventory and OrderBuilderProduct.
+
+    ONE branch at the top decides which analyzer fills this.
+    Everything downstream reads from here -- zero forks.
+    """
+    # Source flag
+    uses_projection: bool
+
+    # Stock position
+    days_of_stock: Optional[int]
+    urgency: str
+
+    # Trend (may be overridden by FS)
+    trend_direction: str
+    trend_strength: str
+
+    # Quantity chain
+    base_quantity_m2: Decimal
+    trend_adjustment_m2: Decimal
+    trend_adjustment_pct: Decimal
+    adjusted_quantity_m2: Decimal
+    buffer_days: int
+    total_coverage_days: int
+
+    # Deductions
+    minus_current: Decimal
+    minus_incoming: Decimal
+    pending_order_m2: Decimal
+    pending_order_pallets: int
+    pending_order_boat: Optional[str]
+
+    # Suggestion
+    final_suggestion_m2: Decimal
+    final_suggestion_pallets: int
+    adjusted_coverage_gap: Decimal
+
+    # Customer demand
+    customer_demand_score: int
+    customers_expecting_count: int
+    expected_customer_orders_m2: Decimal
+    customer_names: list = field(default_factory=list)
+
+    # Factory cascade-aware m2 (for computation: coverage gap, fill status, SIESA cap)
+    factory_cascade_m2: Decimal = Decimal("0")
+
+    # FS transparency
+    projected_stock_m2: Optional[Decimal] = None
+    earlier_drafts_consumed_m2: Optional[Decimal] = None
+
+    # For CalculationBreakdown
+    lead_time_days_for_breakdown: int = 0
+    ordering_cycle_days_for_breakdown: int = 30
 
 
 def _get_next_monday(from_date: date) -> date:
@@ -997,168 +1055,116 @@ class OrderBuilderService:
 
     def _build_full_calculation_breakdown(
         self,
-        # Coverage inputs
+        analysis: ProductAnalysis,
         days_to_cover: int,
         daily_velocity_m2: Decimal,
         velocity_source: str,
-        trend_direction: str,
-        velocity_change_pct: Decimal,  # Raw velocity change (e.g., -52%)
-        trend_adjustment_pct: Decimal,  # Order adjustment (capped ±20%)
-        warehouse_m2: Decimal,
-        in_transit_m2: Decimal,
-        pending_order_m2: Decimal,  # Pending warehouse orders
-        coverage_gap_pallets: int,
-        # Customer demand inputs
-        customers_expecting_count: int,
-        customer_names: list[str],
-        expected_orders_m2: Decimal,
-        customer_demand_score: int,
-        # Factory constraint
+        velocity_change_pct: Decimal,
         factory_available_m2: Decimal,
-        # Final selection
         final_selected_pallets: int,
-        minimum_applied: bool,
-        selection_constraint_note: Optional[str],
-        # Dynamic buffer
-        buffer_days: Optional[int] = None,
-        # Forward simulation overrides (when FS projection is available)
-        projection_coverage_pallets: Optional[int] = None,
-        projection_projected_stock_m2: Optional[Decimal] = None,
-        projection_earlier_drafts_consumed_m2: Optional[Decimal] = None,
+        minimum_applied: bool = False,
+        selection_constraint_note: Optional[str] = None,
     ) -> FullCalculationBreakdown:
-        """
-        Build complete calculation breakdown showing all math.
+        """Build complete calculation breakdown from ProductAnalysis. Zero forks."""
+        a = analysis
+        target_days = days_to_cover + a.buffer_days
 
-        This provides transparency into how the final selected_pallets was determined.
-        """
-        # Use dynamic buffer if provided, otherwise fall back to ORDERING_CYCLE_DAYS
-        buffer_days = buffer_days if buffer_days is not None else ORDERING_CYCLE_DAYS
-        target_days = days_to_cover + buffer_days
-
-        # === COVERAGE CALCULATION ===
+        # === COVERAGE ===
         need_for_target = daily_velocity_m2 * Decimal(target_days)
-        trend_adjustment_m2 = need_for_target * (trend_adjustment_pct / Decimal("100"))
-        adjusted_need = need_for_target + trend_adjustment_m2
-
-        # Coverage gap = adjusted_need - warehouse - in_transit - pending_orders
+        trend_adj_m2 = need_for_target * (a.trend_adjustment_pct / Decimal("100"))
+        adjusted_need = need_for_target + trend_adj_m2
         coverage_gap_m2 = max(
             Decimal("0"),
-            adjusted_need - warehouse_m2 - in_transit_m2 - pending_order_m2
+            adjusted_need - a.minus_current - a.minus_incoming - a.pending_order_m2
         )
-        coverage_suggested_pallets = math.ceil(float(coverage_gap_m2 / M2_PER_PALLET)) if coverage_gap_m2 > 0 else 0
-        coverage_suggested_m2 = Decimal(coverage_suggested_pallets) * M2_PER_PALLET
 
-        # When forward simulation projection is available, override the final
-        # suggested pallets/m2 with the FS values (cascade-aware).  Keep all
-        # the intermediate display fields (velocity, target_days, gap, etc.)
-        # computed above so the UI can still show the math.
-        uses_projection = projection_coverage_pallets is not None
-        if uses_projection:
-            coverage_suggested_pallets = projection_coverage_pallets
-            coverage_suggested_m2 = Decimal(coverage_suggested_pallets) * M2_PER_PALLET
+        # FS override: use FS suggested_pallets directly (already cascade-aware)
+        if a.uses_projection:
+            coverage_suggested_pallets = a.final_suggestion_pallets
+        else:
+            coverage_suggested_pallets = math.ceil(float(coverage_gap_m2 / M2_PER_PALLET)) if coverage_gap_m2 > 0 else 0
+        coverage_suggested_m2 = Decimal(coverage_suggested_pallets) * M2_PER_PALLET
 
         coverage = CoverageCalculation(
             target_coverage_days=target_days,
             days_to_warehouse=days_to_cover,
-            buffer_days=buffer_days,
+            buffer_days=a.buffer_days,
             velocity_m2_per_day=daily_velocity_m2,
             velocity_source=velocity_source,
             need_for_target_m2=round(need_for_target, 2),
-            trend_direction=trend_direction,
-            velocity_change_pct=velocity_change_pct,  # Raw: e.g., -52%
-            trend_adjustment_pct=trend_adjustment_pct,  # Capped: e.g., -20%
-            trend_adjustment_m2=round(trend_adjustment_m2, 2),
+            trend_direction=a.trend_direction,
+            velocity_change_pct=velocity_change_pct,
+            trend_adjustment_pct=a.trend_adjustment_pct,
+            trend_adjustment_m2=round(trend_adj_m2, 2),
             adjusted_need_m2=round(adjusted_need, 2),
-            warehouse_m2=warehouse_m2,
-            in_transit_m2=in_transit_m2,
-            pending_order_m2=pending_order_m2,
-            uses_projection=uses_projection,
-            projected_stock_m2=projection_projected_stock_m2,
-            earlier_drafts_consumed_m2=projection_earlier_drafts_consumed_m2,
+            warehouse_m2=a.minus_current,
+            in_transit_m2=a.minus_incoming,
+            pending_order_m2=a.pending_order_m2,
+            uses_projection=a.uses_projection,
+            projected_stock_m2=a.projected_stock_m2,
+            earlier_drafts_consumed_m2=a.earlier_drafts_consumed_m2,
             coverage_gap_m2=round(coverage_gap_m2, 2),
-            coverage_gap_pallets=coverage_gap_pallets,
+            coverage_gap_pallets=max(0, math.ceil(float(coverage_gap_m2 / M2_PER_PALLET))) if coverage_gap_m2 > 0 else 0,
             suggested_pallets=coverage_suggested_pallets,
             suggested_m2=coverage_suggested_m2,
         )
 
-        # === CUSTOMER DEMAND CALCULATION ===
+        # === CUSTOMER DEMAND ===
+        expected_orders_m2 = a.expected_customer_orders_m2
         expected_orders_pallets = math.ceil(float(expected_orders_m2 / M2_PER_PALLET)) if expected_orders_m2 > 0 else 0
-        customer_suggested_pallets = expected_orders_pallets
-
-        # Build customer breakdown for detail view
-        customer_breakdown = []
-        for name in customer_names[:5]:  # Limit to top 5
-            customer_breakdown.append({
-                "name": name,
-                "tier": "?",  # Would need more data
-                "days_overdue": 0,  # Would need more data
-            })
 
         customer_demand = CustomerDemandCalculation(
-            customers_expecting_count=customers_expecting_count,
-            customers_list=customer_names[:5],
+            customers_expecting_count=a.customers_expecting_count,
+            customers_list=a.customer_names[:5],
             expected_orders_m2=expected_orders_m2,
             expected_orders_pallets=expected_orders_pallets,
-            customer_breakdown=customer_breakdown,
-            suggested_pallets=customer_suggested_pallets,
-            customer_demand_score=customer_demand_score,
+            customer_breakdown=[{"name": n, "tier": "?", "days_overdue": 0} for n in a.customer_names[:5]],
+            suggested_pallets=expected_orders_pallets,
+            customer_demand_score=a.customer_demand_score,
         )
 
-        # === SELECTION CALCULATION ===
-        # Combined: higher of coverage or customer demand
-        combined = max(coverage_suggested_pallets, customer_suggested_pallets)
-        if coverage_suggested_pallets > customer_suggested_pallets:
+        # === SELECTION ===
+        combined = max(coverage_suggested_pallets, expected_orders_pallets)
+        if coverage_suggested_pallets > expected_orders_pallets:
             combination_reason = "coverage_driven"
-        elif customer_suggested_pallets > coverage_suggested_pallets:
+        elif expected_orders_pallets > coverage_suggested_pallets:
             combination_reason = "customer_driven"
         else:
             combination_reason = "equal"
 
-        # Minimum container rule (1 container = 14 pallets)
         minimum_container_pallets = PALLETS_PER_CONTAINER
         after_minimum = combined
         if combined > 0 and combined < minimum_container_pallets and minimum_applied:
             after_minimum = minimum_container_pallets
 
-        # SIESA constraint
         siesa_available_pallets = math.floor(float(factory_available_m2 / M2_PER_PALLET))
-        siesa_limited = False
-        final_pallets = after_minimum
+        siesa_limited = after_minimum > siesa_available_pallets > 0
+        if siesa_limited:
+            after_minimum = siesa_available_pallets
 
-        if after_minimum > siesa_available_pallets and siesa_available_pallets > 0:
-            siesa_limited = True
-            final_pallets = siesa_available_pallets
-
-        final_m2 = Decimal(final_pallets) * M2_PER_PALLET
-
-        # Build selection reason
         reason_parts = []
-        if combination_reason == "customer_driven" and customers_expecting_count > 0:
-            reason_parts.append(f"{customers_expecting_count} customers expecting")
+        if combination_reason == "customer_driven" and a.customers_expecting_count > 0:
+            reason_parts.append(f"{a.customers_expecting_count} customers expecting")
         elif combination_reason == "coverage_driven":
             reason_parts.append(f"Coverage gap ({coverage_suggested_pallets}p)")
         else:
-            reason_parts.append(f"Combined need")
-
+            reason_parts.append("Combined need")
         if minimum_applied and combined < minimum_container_pallets:
             reason_parts.append("min container rule")
         if siesa_limited:
             reason_parts.append(f"capped at SIESA ({siesa_available_pallets}p)")
 
-        selection_reason = " + ".join(reason_parts) if reason_parts else "Standard calculation"
-
-        # Constraint notes
         constraint_notes = []
         if selection_constraint_note:
             constraint_notes.append(selection_constraint_note)
         if siesa_limited:
-            constraint_notes.append(f"Limited by SIESA stock: {int(factory_available_m2):,} m²")
+            constraint_notes.append(f"Limited by SIESA stock: {int(factory_available_m2):,} m\u00b2")
         if minimum_applied and combined < minimum_container_pallets:
             constraint_notes.append(f"Minimum 1 container ({minimum_container_pallets}p) applied")
 
         selection = SelectionCalculation(
             coverage_suggested_pallets=coverage_suggested_pallets,
-            customer_suggested_pallets=customer_suggested_pallets,
+            customer_suggested_pallets=expected_orders_pallets,
             combined_pallets=combined,
             combination_reason=combination_reason,
             minimum_container_applied=minimum_applied and combined < minimum_container_pallets,
@@ -1169,22 +1175,19 @@ class OrderBuilderService:
             siesa_limited=siesa_limited,
             final_selected_pallets=final_selected_pallets,
             final_selected_m2=Decimal(final_selected_pallets) * M2_PER_PALLET,
-            selection_reason=selection_reason,
+            selection_reason=" + ".join(reason_parts) if reason_parts else "Standard calculation",
             constraint_notes=constraint_notes,
         )
 
-        # === SUMMARY SENTENCE ===
-        if coverage_suggested_pallets == 0 and customers_expecting_count > 0:
-            summary = f"Selected {final_selected_pallets}p: 0p coverage + {customers_expecting_count} customers expecting"
-            if minimum_applied:
-                summary += " → min container"
-        elif customers_expecting_count == 0 and coverage_suggested_pallets > 0:
+        # Summary sentence
+        if coverage_suggested_pallets == 0 and a.customers_expecting_count > 0:
+            summary = f"Selected {final_selected_pallets}p: 0p coverage + {a.customers_expecting_count} customers expecting"
+        elif a.customers_expecting_count == 0 and coverage_suggested_pallets > 0:
             summary = f"Selected {final_selected_pallets}p: {coverage_suggested_pallets}p coverage gap"
         else:
-            summary = f"Selected {final_selected_pallets}p: {coverage_suggested_pallets}p coverage + {customers_expecting_count} customers"
-
+            summary = f"Selected {final_selected_pallets}p: {coverage_suggested_pallets}p coverage + {a.customers_expecting_count} customers"
         if siesa_limited:
-            summary += f" (capped at SIESA)"
+            summary += " (capped at SIESA)"
 
         return FullCalculationBreakdown(
             coverage=coverage,
@@ -1377,6 +1380,492 @@ class OrderBuilderService:
             would_include_if=None,  # Phase 3
         )
 
+    # ===================
+    # PRODUCT ANALYSIS: ONE BRANCH, ONE PATH
+    # ===================
+
+    def _analyze_from_projection(
+        self,
+        rec,
+        projection: dict,
+        daily_velocity_m2: Decimal,
+        buffer_days: int,
+        pallet_factor: Decimal,
+        factory_availability_map: dict,
+    ) -> ProductAnalysis:
+        """Build ProductAnalysis from Forward Simulation projection.
+
+        FS already computed everything (trend, customer demand, cascade).
+        We just read its values.
+        """
+        # Days of stock at arrival (FS-projected)
+        proj_days = projection.get("days_of_stock_at_arrival")
+        days_of_stock = int(round(proj_days)) if proj_days is not None else None
+        urgency = self._calculate_urgency(days_of_stock)
+
+        # Trend from FS
+        direction = projection.get("trend_direction", "stable")
+        strength = projection.get("trend_strength", "weak")
+
+        # Suggestion from FS
+        final_suggestion_m2 = Decimal(str(projection.get("coverage_gap_m2", 0)))
+        final_suggestion_pallets = projection.get("suggested_pallets", 0)
+
+        # Breakdown display values
+        buffer_days_from_fs = projection.get("buffer_days", buffer_days)
+        trend_adjustment_pct = Decimal(str(projection.get("trend_adjustment_pct", 0)))
+        base_quantity_m2 = daily_velocity_m2 * Decimal(buffer_days_from_fs)
+        trend_adjustment_m2 = base_quantity_m2 * trend_adjustment_pct / Decimal("100")
+
+        # Warehouse-projected for breakdown display
+        supply = projection["supply_breakdown"]
+        factory_supply_m2 = supply["factory_siesa_m2"] + supply["production_pipeline_m2"]
+        warehouse_projected = projection["projected_stock_m2"] - factory_supply_m2
+        minus_current = max(Decimal("0"), warehouse_projected)
+
+        # Customer demand from FS
+        customers_expecting_count = projection.get("customers_expecting_count", 0)
+        expected_customer_orders_m2 = Decimal(str(projection.get("customer_demand_m2", 0)))
+        customer_names = projection.get("customer_names", [])
+
+        # Factory cascade-aware SIESA
+        factory_cascade_m2 = supply["factory_siesa_m2"] + supply["production_pipeline_m2"]
+
+        return ProductAnalysis(
+            uses_projection=True,
+            days_of_stock=days_of_stock,
+            urgency=urgency,
+            trend_direction=direction,
+            trend_strength=strength,
+            base_quantity_m2=base_quantity_m2,
+            trend_adjustment_m2=trend_adjustment_m2,
+            trend_adjustment_pct=trend_adjustment_pct,
+            adjusted_quantity_m2=base_quantity_m2 + trend_adjustment_m2,
+            buffer_days=buffer_days_from_fs,
+            total_coverage_days=buffer_days_from_fs,
+            minus_current=minus_current,
+            minus_incoming=Decimal("0"),
+            pending_order_m2=Decimal("0"),
+            pending_order_pallets=0,
+            pending_order_boat=None,
+            final_suggestion_m2=final_suggestion_m2,
+            final_suggestion_pallets=final_suggestion_pallets,
+            adjusted_coverage_gap=Decimal(str(projection["coverage_gap_m2"])),
+            customer_demand_score=0,  # FS doesn't propagate score
+            customers_expecting_count=customers_expecting_count,
+            expected_customer_orders_m2=expected_customer_orders_m2,
+            customer_names=customer_names,
+            factory_cascade_m2=factory_cascade_m2,
+            projected_stock_m2=Decimal(str(projection["projected_stock_m2"])),
+            earlier_drafts_consumed_m2=Decimal(str(projection["earlier_drafts_consumed_m2"])),
+            lead_time_days_for_breakdown=0,
+            ordering_cycle_days_for_breakdown=buffer_days_from_fs,
+        )
+
+    def _analyze_from_inventory(
+        self,
+        rec,
+        direction: str,
+        strength: str,
+        daily_velocity_m2: Decimal,
+        days_of_stock: Optional[int],
+        days_to_cover: int,
+        buffer_days: int,
+        pallet_factor: Decimal,
+        pending_orders_map: dict,
+        customer_demand_data: dict,
+        factory_availability_map: dict,
+    ) -> ProductAnalysis:
+        """Build ProductAnalysis from current inventory + trend data.
+
+        Fallback path when Forward Simulation is not available.
+        """
+        # Adjust days_of_stock for depletion during transit
+        # Include SIESA so products with large factory stock aren't falsely critical
+        if days_of_stock is not None and daily_velocity_m2 > 0 and days_to_cover > 0:
+            warehouse_m2_val = rec.warehouse_m2 or Decimal("0")
+            in_transit_m2_val = rec.in_transit_m2 or Decimal("0")
+            fallback_siesa = factory_availability_map.get(
+                rec.product_id, {}
+            ).get("factory_available_m2", Decimal("0"))
+            available_m2 = warehouse_m2_val + in_transit_m2_val + fallback_siesa
+            projected_m2 = available_m2 - (daily_velocity_m2 * days_to_cover)
+            if projected_m2 > 0:
+                days_of_stock = int(projected_m2 / daily_velocity_m2)
+            else:
+                days_of_stock = 0
+
+        urgency = self._calculate_urgency(days_of_stock)
+
+        # Quantity calculation
+        total_coverage_days = days_to_cover + buffer_days
+        base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
+        trend_adjustment_m2, trend_adjustment_pct = self._calculate_trend_adjustment(
+            direction, strength, base_quantity_m2
+        )
+        adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
+
+        minus_current = rec.warehouse_m2 or Decimal("0")
+        minus_incoming = rec.in_transit_m2 or Decimal("0")
+
+        # Pending orders
+        pending_info = pending_orders_map.get(rec.sku, {})
+        pending_order_m2 = Decimal(str(pending_info.get("total_m2", 0)))
+        pending_order_pallets = int(pending_info.get("total_pallets", 0))
+        pending_order_boat = pending_info.get("boat_name")
+
+        final_suggestion_m2 = max(
+            Decimal("0"),
+            adjusted_quantity_m2 - minus_current - minus_incoming - pending_order_m2
+        )
+        final_suggestion_pallets = max(0, math.ceil(float(final_suggestion_m2 / pallet_factor)))
+
+        # Customer demand
+        demand_info = customer_demand_data.get(rec.sku, {
+            "score": 0, "customers_count": 0,
+            "expected_m2": Decimal("0"), "customer_names": []
+        })
+        customer_demand_score = demand_info["score"]
+        customers_expecting_count = demand_info["customers_count"]
+        expected_customer_orders_m2 = Decimal(str(demand_info.get("expected_m2", 0)))
+        customer_names = demand_info.get("customer_names", [])
+
+        # Coverage gap (add customer demand)
+        base_coverage_gap = rec.coverage_gap_m2 or Decimal("0")
+        adjusted_coverage_gap = base_coverage_gap + expected_customer_orders_m2
+
+        if expected_customer_orders_m2 > 0:
+            logger.debug(
+                "expected_orders_added_to_gap",
+                sku=rec.sku,
+                base_gap=float(base_coverage_gap),
+                expected_orders=float(expected_customer_orders_m2),
+                adjusted_gap=float(adjusted_coverage_gap),
+            )
+
+        # Factory: raw SIESA (no cascade without FS)
+        factory_cascade_m2 = factory_availability_map.get(
+            rec.product_id, {}
+        ).get("factory_available_m2", Decimal("0"))
+
+        return ProductAnalysis(
+            uses_projection=False,
+            days_of_stock=days_of_stock,
+            urgency=urgency,
+            trend_direction=direction,
+            trend_strength=strength,
+            base_quantity_m2=base_quantity_m2,
+            trend_adjustment_m2=trend_adjustment_m2,
+            trend_adjustment_pct=trend_adjustment_pct,
+            adjusted_quantity_m2=adjusted_quantity_m2,
+            buffer_days=buffer_days,
+            total_coverage_days=total_coverage_days,
+            minus_current=minus_current,
+            minus_incoming=minus_incoming,
+            pending_order_m2=pending_order_m2,
+            pending_order_pallets=pending_order_pallets,
+            pending_order_boat=pending_order_boat,
+            final_suggestion_m2=final_suggestion_m2,
+            final_suggestion_pallets=final_suggestion_pallets,
+            adjusted_coverage_gap=adjusted_coverage_gap,
+            customer_demand_score=customer_demand_score,
+            customers_expecting_count=customers_expecting_count,
+            expected_customer_orders_m2=expected_customer_orders_m2,
+            customer_names=customer_names,
+            factory_cascade_m2=factory_cascade_m2,
+            lead_time_days_for_breakdown=days_to_cover,
+            ordering_cycle_days_for_breakdown=buffer_days,
+        )
+
+    def _build_product_from_analysis(
+        self,
+        rec,
+        analysis: ProductAnalysis,
+        days_to_cover: int,
+        velocity_change_pct: Decimal,
+        daily_velocity_m2: Decimal,
+        velocity_90d_m2: Decimal,
+        velocity_180d_m2: Decimal,
+        velocity_trend_signal: str,
+        velocity_trend_ratio: Decimal,
+        factory_status_map: dict,
+        factory_availability_map: dict,
+        production_schedule_map: dict,
+        committed_map: dict,
+        unfulfilled_map: dict,
+        boat_departure: Optional[date],
+        order_deadline: Optional[date],
+        pallet_factor: Decimal,
+        projection: Optional[dict],
+    ) -> OrderBuilderProduct:
+        """Build OrderBuilderProduct from ProductAnalysis. Zero forks."""
+        a = analysis  # short alias
+
+        # Effective priority: use suggested_pallets to recalculate
+        coverage_gap_pallets = max(0, rec.coverage_gap_pallets or 0)
+        suggested = a.final_suggestion_pallets if daily_velocity_m2 > 0 else coverage_gap_pallets
+
+        original_priority = rec.priority.value
+        if suggested == 0:
+            effective_priority = "WELL_COVERED"
+        elif suggested <= 5 and original_priority == "HIGH_PRIORITY":
+            effective_priority = "CONSIDER"
+        else:
+            effective_priority = original_priority
+
+        # Primary factor
+        primary_factor = self._determine_primary_factor(
+            days_of_stock=a.days_of_stock,
+            trend_pct=velocity_change_pct,
+            velocity=daily_velocity_m2,
+            days_to_boat=days_to_cover,
+        )
+
+        # Gap days
+        gap_days = None
+        if a.days_of_stock is not None:
+            gap_days = Decimal(str(a.days_of_stock)) - Decimal(str(days_to_cover))
+
+        # Exclusion reason
+        exclusion_reason = None
+        if suggested == 0:
+            factor_to_reason = {
+                PrimaryFactor.OVERSTOCKED.value: "OVERSTOCKED",
+                PrimaryFactor.NO_SALES.value: "NO_SALES",
+                PrimaryFactor.DECLINING.value: "DECLINING",
+                PrimaryFactor.NO_DATA.value: "NO_DATA",
+            }
+            exclusion_reason = factor_to_reason.get(primary_factor)
+
+        # Reasoning
+        reasoning = ProductReasoning(
+            primary_factor=primary_factor,
+            stock=StockAnalysis(
+                current_m2=a.minus_current,
+                days_of_stock=Decimal(str(a.days_of_stock)) if a.days_of_stock is not None else None,
+                days_to_boat=days_to_cover,
+                gap_days=gap_days,
+            ),
+            demand=DemandAnalysis(
+                velocity_m2_day=daily_velocity_m2,
+                trend_pct=velocity_change_pct,
+                trend_direction=a.trend_direction,
+                sales_rank=None,
+            ),
+            quantity=QuantityReasoning(
+                target_coverage_days=a.total_coverage_days,
+                m2_needed=round(a.adjusted_quantity_m2, 2),
+                m2_in_transit=a.minus_incoming,
+                m2_in_stock=a.minus_current,
+                m2_to_order=round(a.final_suggestion_m2, 2),
+            ),
+            exclusion_reason=exclusion_reason,
+        )
+
+        # Expected orders note
+        expected_orders_note = None
+        if a.expected_customer_orders_m2 > 0 and a.customers_expecting_count > 0:
+            names_str = ", ".join(a.customer_names[:3])
+            if len(a.customer_names) > 3:
+                names_str += f" +{len(a.customer_names) - 3}"
+            expected_orders_note = (
+                f"Includes {int(a.expected_customer_orders_m2):,} m\u00b2 expected from "
+                f"{a.customers_expecting_count} customer(s): {names_str}"
+            )
+
+        # Factory production status
+        factory_info = factory_status_map.get(rec.product_id)
+        factory_status = "not_scheduled"
+        factory_production_date = None
+        factory_production_m2 = None
+        days_until_factory_ready = None
+        factory_ready_before_boat = None
+        factory_timing_message = None
+
+        if factory_info:
+            factory_status = factory_info.status.value if hasattr(factory_info.status, 'value') else str(factory_info.status)
+            factory_production_date = factory_info.production_date
+            factory_production_m2 = factory_info.production_m2
+            days_until_factory_ready = factory_info.days_until_ready
+            factory_ready_before_boat = factory_info.ready_before_boat
+            factory_timing_message = factory_info.timing_message
+
+        # Factory availability (SIESA raw for display)
+        factory_avail = factory_availability_map.get(rec.product_id, {})
+        factory_available_m2_display = factory_avail.get("factory_available_m2", Decimal("0"))
+        factory_largest_lot_m2 = factory_avail.get("factory_largest_lot_m2")
+        factory_largest_lot_code = factory_avail.get("factory_largest_lot_code")
+        factory_lot_count = factory_avail.get("factory_lot_count", 0)
+
+        # For computation (cascade-aware), use analysis value
+        factory_for_computation = a.factory_cascade_m2
+
+        # Factory fill status (uses cascade-aware factory m2)
+        suggested_m2 = a.final_suggestion_m2
+        if factory_for_computation <= 0:
+            factory_fill_status = "no_stock"
+            factory_fill_message = "No stock at factory"
+        elif suggested_m2 <= 0:
+            factory_fill_status = "available"
+            factory_fill_message = f"{int(factory_for_computation):,} m\u00b2 available at SIESA"
+        elif factory_largest_lot_m2 and suggested_m2 <= factory_largest_lot_m2:
+            factory_fill_status = "single_lot"
+            factory_fill_message = f"Can fill from single lot ({factory_largest_lot_code})"
+        elif suggested_m2 <= factory_for_computation:
+            factory_fill_status = "mixed_lots"
+            largest_str = f"{int(factory_largest_lot_m2):,}" if factory_largest_lot_m2 else "?"
+            factory_fill_message = f"Will need mixed lots (largest: {largest_str} m\u00b2)"
+        else:
+            shortfall = suggested_m2 - factory_for_computation
+            factory_fill_status = "partial_available"
+            factory_fill_message = f"{int(factory_for_computation):,} m\u00b2 available, need {int(shortfall):,} m\u00b2 more"
+
+        # Production schedule
+        prod_schedule = production_schedule_map.get(rec.sku)
+        production_status = "not_scheduled"
+        production_requested_m2 = Decimal("0")
+        production_completed_m2 = Decimal("0")
+        production_can_add_more = False
+        production_estimated_ready = None
+        production_add_more_m2 = Decimal("0")
+        production_add_more_alert = None
+
+        if prod_schedule:
+            production_status = prod_schedule.status.value if hasattr(prod_schedule.status, 'value') else str(prod_schedule.status)
+            production_requested_m2 = prod_schedule.requested_m2 or Decimal("0")
+            production_completed_m2 = prod_schedule.completed_m2 or Decimal("0")
+            production_can_add_more = prod_schedule.can_add_more
+            production_estimated_ready = prod_schedule.estimated_delivery_date
+
+            if production_can_add_more and suggested_m2 > production_requested_m2:
+                gap_m2 = suggested_m2 - production_requested_m2
+                production_add_more_m2 = gap_m2
+                production_add_more_alert = f"Add {int(gap_m2):,} m\u00b2 before production starts!"
+
+        # Availability breakdown
+        availability_breakdown = None
+        if order_deadline:
+            availability_breakdown = self._calculate_availability_breakdown(
+                factory_available_m2=factory_for_computation,
+                production_status=production_status,
+                production_requested_m2=production_requested_m2,
+                production_completed_m2=production_completed_m2,
+                production_estimated_ready=production_estimated_ready,
+                order_deadline=order_deadline,
+                suggested_pallets=suggested,
+            )
+
+        # CalculationBreakdown
+        breakdown = None
+        if daily_velocity_m2 > 0:
+            breakdown = CalculationBreakdown(
+                lead_time_days=a.lead_time_days_for_breakdown,
+                ordering_cycle_days=a.ordering_cycle_days_for_breakdown,
+                daily_velocity_m2=daily_velocity_m2,
+                base_quantity_m2=round(a.base_quantity_m2, 2),
+                trend_adjustment_m2=round(a.trend_adjustment_m2, 2),
+                trend_adjustment_pct=round(a.trend_adjustment_pct, 1),
+                minus_current_stock_m2=a.minus_current,
+                minus_incoming_m2=a.minus_incoming,
+                final_suggestion_m2=round(a.final_suggestion_m2, 2),
+                final_suggestion_pallets=a.final_suggestion_pallets,
+                uses_projection=a.uses_projection,
+                projected_stock_m2=a.projected_stock_m2,
+                earlier_drafts_consumed_m2=a.earlier_drafts_consumed_m2,
+            )
+
+        # Full calculation breakdown
+        full_calculation_breakdown = self._build_full_calculation_breakdown(
+            analysis=a,
+            days_to_cover=days_to_cover,
+            daily_velocity_m2=daily_velocity_m2,
+            velocity_source="90d" if velocity_90d_m2 > 0 else "180d",
+            velocity_change_pct=velocity_change_pct,
+            factory_available_m2=factory_for_computation,
+            final_selected_pallets=suggested,
+        )
+
+        # Weight
+        product_weight_per_m2, _ = get_config_service().get_product_physics(rec.category)
+
+        product = OrderBuilderProduct(
+            product_id=rec.product_id,
+            sku=rec.sku,
+            description=None,
+            weight_per_m2_kg=product_weight_per_m2,
+            priority=effective_priority,
+            action_type=rec.action_type.value,
+            current_stock_m2=rec.warehouse_m2,
+            in_transit_m2=rec.in_transit_m2,
+            pending_order_m2=a.pending_order_m2,
+            pending_order_pallets=a.pending_order_pallets,
+            pending_order_boat=a.pending_order_boat,
+            days_to_cover=days_to_cover,
+            total_demand_m2=rec.total_demand_m2 or Decimal("0"),
+            coverage_gap_m2=a.adjusted_coverage_gap,
+            coverage_gap_pallets=coverage_gap_pallets,
+            suggested_pallets=suggested,
+            confidence=rec.confidence.value,
+            confidence_reason=rec.confidence_reason,
+            unique_customers=rec.unique_customers,
+            top_customer_name=rec.top_customer_name,
+            top_customer_share=rec.top_customer_share,
+            factory_status=factory_status,
+            factory_production_date=factory_production_date,
+            factory_production_m2=factory_production_m2,
+            days_until_factory_ready=days_until_factory_ready,
+            factory_ready_before_boat=factory_ready_before_boat,
+            factory_timing_message=factory_timing_message,
+            factory_available_m2=factory_available_m2_display,
+            factory_largest_lot_m2=factory_largest_lot_m2,
+            factory_largest_lot_code=factory_largest_lot_code,
+            factory_lot_count=factory_lot_count,
+            factory_fill_status=factory_fill_status,
+            factory_fill_message=factory_fill_message,
+            production_status=production_status,
+            production_requested_m2=production_requested_m2,
+            production_completed_m2=production_completed_m2,
+            production_can_add_more=production_can_add_more,
+            production_estimated_ready=production_estimated_ready,
+            production_add_more_m2=production_add_more_m2,
+            production_add_more_alert=production_add_more_alert,
+            urgency=a.urgency,
+            days_of_stock=a.days_of_stock,
+            trend_direction=a.trend_direction,
+            trend_strength=a.trend_strength,
+            velocity_change_pct=velocity_change_pct,
+            daily_velocity_m2=daily_velocity_m2,
+            velocity_90d_m2=velocity_90d_m2,
+            velocity_180d_m2=velocity_180d_m2,
+            velocity_trend_signal=velocity_trend_signal,
+            velocity_trend_ratio=velocity_trend_ratio,
+            calculation_breakdown=breakdown,
+            reasoning=reasoning,
+            customer_demand_score=a.customer_demand_score,
+            customers_expecting_count=a.customers_expecting_count,
+            expected_customer_orders_m2=a.expected_customer_orders_m2,
+            expected_orders_note=expected_orders_note,
+            is_selected=False,
+            selected_pallets=0,
+            availability_breakdown=availability_breakdown,
+            full_calculation_breakdown=full_calculation_breakdown,
+            projected_stock_m2=a.projected_stock_m2,
+            earlier_drafts_consumed_m2=a.earlier_drafts_consumed_m2,
+            uses_forward_simulation=a.uses_projection,
+            committed_orders_m2=float(committed_map.get(rec.product_id, {}).get("total_m2", 0)),
+            committed_orders_customer=committed_map.get(rec.product_id, {}).get("customer"),
+            committed_orders_count=committed_map.get(rec.product_id, {}).get("count", 0),
+            unfulfilled_demand_m2=float(unfulfilled_map.get(rec.product_id, Decimal("0"))),
+            has_unfulfilled_demand=unfulfilled_map.get(rec.product_id, Decimal("0")) > 0,
+            pallet_conversion_factor=pallet_factor,
+        )
+
+        # Score and reasoning display (reads from fully-built product)
+        product.score = self._calculate_priority_score(product)
+        product.reasoning_display = self._generate_product_reasoning_display(product)
+
+        return product
+
     def _group_products_by_priority(
         self,
         recommendations: list,
@@ -1494,471 +1983,46 @@ class OrderBuilderService:
             logger.warning("unfulfilled_demand_lookup_failed", error=str(e))
 
         for rec in recommendations:
-            # Get trend data for this product
+            # Read trend data
             trend = trend_data.get(rec.sku, {})
             direction = trend.get("direction", "stable")
             strength = trend.get("strength", "weak")
             velocity_change_pct = Decimal(str(trend.get("velocity_change_pct", 0)))
             daily_velocity_m2 = Decimal(str(trend.get("daily_velocity_m2", 0)))
             days_of_stock = trend.get("days_of_stock")
-
-            # Dual velocity fields (90-day vs 6-month comparison)
             velocity_90d_m2 = Decimal(str(trend.get("velocity_90d_m2", 0)))
             velocity_180d_m2 = Decimal(str(trend.get("velocity_180d_m2", 0)))
             velocity_trend_signal = trend.get("velocity_trend_signal", "stable")
             velocity_trend_ratio = Decimal(str(trend.get("velocity_trend_ratio", 1.0)))
 
-            # Calculate urgency based on days of stock
-            urgency = self._calculate_urgency(days_of_stock)
+            # Pallet factor
+            _pf = (pallet_factor_map or {}).get(rec.product_id, M2_PER_PALLET) if is_unit_based else M2_PER_PALLET
 
-            # Check for forward simulation projection
+            # === ONE BRANCH: FS or inventory ===
             projection = projection_map.get(rec.product_id) if projection_map else None
 
             if projection is not None:
-                # --- SINGLE SOURCE OF TRUTH: consume FS values directly ---
-                # Forward simulation already applies trend + customer demand +
-                # dynamic buffer.  OB just reads the result.
-                proj_days = projection.get("days_of_stock_at_arrival")
-                if proj_days is not None:
-                    days_of_stock = int(round(proj_days))
-                    urgency = self._calculate_urgency(days_of_stock)
-
-                # Override trend labels with FS values so both views match
-                direction = projection.get("trend_direction", direction)
-                strength = projection.get("trend_strength", strength)
-
-                # FS's coverage_gap_m2 is the ordering suggestion in m²
-                final_suggestion_m2 = projection.get("coverage_gap_m2", Decimal("0"))
-
-                # Trend data from FS (for display in breakdown)
-                trend_adjustment_pct = Decimal(str(projection.get("trend_adjustment_pct", 0)))
-                buffer_days_from_fs = projection.get("buffer_days", buffer_days)
-                base_quantity_m2 = daily_velocity_m2 * Decimal(buffer_days_from_fs)
-                trend_adjustment_m2 = base_quantity_m2 * trend_adjustment_pct / Decimal("100")
-
-                # Warehouse-projected for breakdown display
-                supply = projection["supply_breakdown"]
-                factory_supply_m2 = supply["factory_siesa_m2"] + supply["production_pipeline_m2"]
-                warehouse_projected = projection["projected_stock_m2"] - factory_supply_m2
-                minus_current = max(Decimal("0"), warehouse_projected)
-                minus_incoming = Decimal("0")
-
-                pending_order_m2 = Decimal("0")
-                pending_order_pallets = 0
-                pending_order_boat = None
-
-                # For downstream reasoning display
-                total_coverage_days = buffer_days_from_fs
-                adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
-            else:
-                # Adjust days_of_stock for depletion during transit so urgency
-                # aligns with forward simulation's days_of_stock_at_arrival.
-                # Include SIESA (factory finished goods) so products with large
-                # SIESA stock aren't marked critical just because warehouse is low.
-                if days_of_stock is not None and daily_velocity_m2 > 0 and days_to_cover > 0:
-                    warehouse_m2_val = rec.warehouse_m2 or Decimal("0")
-                    in_transit_m2_val = rec.in_transit_m2 or Decimal("0")
-                    fallback_siesa = factory_availability_map.get(
-                        rec.product_id, {}
-                    ).get("factory_available_m2", Decimal("0"))
-                    available_m2 = warehouse_m2_val + in_transit_m2_val + fallback_siesa
-                    projected_m2 = available_m2 - (daily_velocity_m2 * days_to_cover)
-                    if projected_m2 > 0:
-                        days_of_stock = int(projected_m2 / daily_velocity_m2)
-                    else:
-                        days_of_stock = 0
-                    urgency = self._calculate_urgency(days_of_stock)
-
-                # CURRENT PATH: calculate from today's inventory
-                total_coverage_days = days_to_cover + buffer_days
-                base_quantity_m2 = daily_velocity_m2 * Decimal(total_coverage_days)
-
-                trend_adjustment_m2, trend_adjustment_pct = self._calculate_trend_adjustment(
-                    direction, strength, base_quantity_m2
+                analysis = self._analyze_from_projection(
+                    rec, projection, daily_velocity_m2, buffer_days, _pf,
+                    factory_availability_map,
                 )
-                adjusted_quantity_m2 = base_quantity_m2 + trend_adjustment_m2
-
-                minus_current = rec.warehouse_m2 or Decimal("0")
-                minus_incoming = rec.in_transit_m2 or Decimal("0")
-
-                pending_info = pending_orders_map.get(rec.sku, {})
-                pending_order_m2 = Decimal(str(pending_info.get("total_m2", 0)))
-                pending_order_pallets = int(pending_info.get("total_pallets", 0))
-                pending_order_boat = pending_info.get("boat_name")
-
-                final_suggestion_m2 = max(
-                    Decimal("0"),
-                    adjusted_quantity_m2 - minus_current - minus_incoming - pending_order_m2
+            else:
+                analysis = self._analyze_from_inventory(
+                    rec, direction, strength, daily_velocity_m2, days_of_stock,
+                    days_to_cover, buffer_days, _pf,
+                    pending_orders_map, customer_demand_data, factory_availability_map,
                 )
 
-            # Convert to pallets — use FS's value when projection available
-            _pf = (pallet_factor_map or {}).get(rec.product_id, M2_PER_PALLET) if is_unit_based else M2_PER_PALLET
-            if projection is not None:
-                final_suggestion_pallets = projection.get("suggested_pallets", 0)
-            else:
-                final_suggestion_pallets = max(0, math.ceil(float(final_suggestion_m2 / _pf)))
-
-            # Build calculation breakdown
-            breakdown = CalculationBreakdown(
-                lead_time_days=0 if projection is not None else days_to_cover,
-                ordering_cycle_days=buffer_days_from_fs if projection is not None else buffer_days,
-                daily_velocity_m2=daily_velocity_m2,
-                base_quantity_m2=round(base_quantity_m2, 2),
-                trend_adjustment_m2=round(trend_adjustment_m2, 2),
-                trend_adjustment_pct=round(trend_adjustment_pct, 1),
-                minus_current_stock_m2=minus_current,
-                minus_incoming_m2=minus_incoming,
-                final_suggestion_m2=round(final_suggestion_m2, 2),
-                final_suggestion_pallets=final_suggestion_pallets,
-                # Forward simulation fields
-                uses_projection=projection is not None,
-                projected_stock_m2=projection["projected_stock_m2"] if projection is not None else None,
-                earlier_drafts_consumed_m2=projection["earlier_drafts_consumed_m2"] if projection is not None else None,
+            # === SINGLE PATH: build product from analysis ===
+            product = self._build_product_from_analysis(
+                rec, analysis, days_to_cover,
+                velocity_change_pct, daily_velocity_m2,
+                velocity_90d_m2, velocity_180d_m2,
+                velocity_trend_signal, velocity_trend_ratio,
+                factory_status_map, factory_availability_map,
+                production_schedule_map, committed_map, unfulfilled_map,
+                boat_departure, order_deadline, _pf, projection,
             )
-
-            # Use the calculated suggestion if we have trend data, otherwise fall back to original
-            coverage_gap_pallets = max(0, rec.coverage_gap_pallets or 0)
-            suggested = final_suggestion_pallets if daily_velocity_m2 > 0 else coverage_gap_pallets
-
-            # Recalculate priority based on suggested_pallets (considering full pipeline)
-            # This ensures consistency: if pipeline covers demand, product shouldn't be HIGH_PRIORITY
-            # The stockout_service uses warehouse-only, but Order Builder considers full pipeline
-            original_priority = rec.priority.value
-            if suggested == 0:
-                # Pipeline covers demand → WELL_COVERED (no action needed)
-                effective_priority = "WELL_COVERED"
-            elif suggested <= 5 and original_priority == "HIGH_PRIORITY":
-                # Small gap (1-5 pallets) with HIGH_PRIORITY → downgrade to CONSIDER
-                effective_priority = "CONSIDER"
-            else:
-                # Keep original priority for significant gaps
-                effective_priority = original_priority
-
-            # Determine primary factor for reasoning
-            primary_factor = self._determine_primary_factor(
-                days_of_stock=days_of_stock,
-                trend_pct=velocity_change_pct,
-                velocity=daily_velocity_m2,
-                days_to_boat=days_to_cover
-            )
-
-            # Calculate gap days (negative = stockout before boat)
-            gap_days = None
-            if days_of_stock is not None:
-                gap_days = Decimal(str(days_of_stock)) - Decimal(str(days_to_cover))
-
-            # Determine exclusion reason if suggested is 0
-            exclusion_reason = None
-            if suggested == 0:
-                if primary_factor == PrimaryFactor.OVERSTOCKED.value:
-                    exclusion_reason = "OVERSTOCKED"
-                elif primary_factor == PrimaryFactor.NO_SALES.value:
-                    exclusion_reason = "NO_SALES"
-                elif primary_factor == PrimaryFactor.DECLINING.value:
-                    exclusion_reason = "DECLINING"
-                elif primary_factor == PrimaryFactor.NO_DATA.value:
-                    exclusion_reason = "NO_DATA"
-
-            # Build reasoning object
-            reasoning = ProductReasoning(
-                primary_factor=primary_factor,
-                stock=StockAnalysis(
-                    current_m2=minus_current,
-                    days_of_stock=Decimal(str(days_of_stock)) if days_of_stock is not None else None,
-                    days_to_boat=days_to_cover,
-                    gap_days=gap_days,
-                ),
-                demand=DemandAnalysis(
-                    velocity_m2_day=daily_velocity_m2,
-                    trend_pct=velocity_change_pct,
-                    trend_direction=direction,
-                    sales_rank=None,  # Will be populated later with ranking
-                ),
-                quantity=QuantityReasoning(
-                    target_coverage_days=total_coverage_days,
-                    m2_needed=round(adjusted_quantity_m2, 2),
-                    m2_in_transit=minus_incoming,
-                    m2_in_stock=minus_current,
-                    m2_to_order=round(final_suggestion_m2, 2),
-                ),
-                exclusion_reason=exclusion_reason,
-            )
-
-            # Get customer demand score and expected orders for this product.
-            # When projection is available, FS already baked customer demand
-            # into suggested_pallets — use FS data for display notes.
-            if projection is not None:
-                customer_demand_score = 0  # FS doesn't propagate score (not needed for display)
-                customers_expecting_count = projection.get("customers_expecting_count", 0)
-                expected_customer_orders_m2 = Decimal(str(projection.get("customer_demand_m2", 0)))
-                customer_names = projection.get("customer_names", [])
-            else:
-                demand_info = customer_demand_data.get(rec.sku, {
-                    "score": 0,
-                    "customers_count": 0,
-                    "expected_m2": Decimal("0"),
-                    "customer_names": []
-                })
-                customer_demand_score = demand_info["score"]
-                customers_expecting_count = demand_info["customers_count"]
-                expected_customer_orders_m2 = Decimal(str(demand_info.get("expected_m2", 0)))
-                customer_names = demand_info.get("customer_names", [])
-
-            # Build note for expected orders
-            expected_orders_note = None
-            if expected_customer_orders_m2 > 0 and customers_expecting_count > 0:
-                names_str = ", ".join(customer_names[:3])
-                if len(customer_names) > 3:
-                    names_str += f" +{len(customer_names) - 3}"
-                expected_orders_note = (
-                    f"Includes {int(expected_customer_orders_m2):,} m² expected from "
-                    f"{customers_expecting_count} customer(s): {names_str}"
-                )
-
-            # Get factory production status
-            factory_info = factory_status_map.get(rec.product_id)
-            factory_status = "not_scheduled"
-            factory_production_date = None
-            factory_production_m2 = None
-            days_until_factory_ready = None
-            factory_ready_before_boat = None
-            factory_timing_message = None
-
-            if factory_info:
-                factory_status = factory_info.status.value if hasattr(factory_info.status, 'value') else str(factory_info.status)
-                factory_production_date = factory_info.production_date
-                factory_production_m2 = factory_info.production_m2
-                days_until_factory_ready = factory_info.days_until_ready
-                factory_ready_before_boat = factory_info.ready_before_boat
-                factory_timing_message = factory_info.timing_message
-
-            # Get factory availability (SIESA finished goods)
-            factory_avail = factory_availability_map.get(rec.product_id, {})
-            factory_available_m2 = factory_avail.get("factory_available_m2", Decimal("0"))
-            factory_largest_lot_m2 = factory_avail.get("factory_largest_lot_m2")
-            factory_largest_lot_code = factory_avail.get("factory_largest_lot_code")
-            factory_lot_count = factory_avail.get("factory_lot_count", 0)
-
-            # When forward simulation is active, use cascade-aware SIESA
-            # (what's actually available for THIS boat after earlier boats claimed theirs)
-            if projection is not None:
-                factory_available_m2 = (
-                    projection["supply_breakdown"]["factory_siesa_m2"]
-                    + projection["supply_breakdown"]["production_pipeline_m2"]
-                )
-
-            # Calculate factory fill status based on SIESA availability
-            # Priority: Check if stock exists FIRST, then compare to suggested quantity
-            suggested_m2 = final_suggestion_m2
-            if factory_available_m2 <= 0:
-                # No SIESA stock at all
-                factory_fill_status = "no_stock"
-                factory_fill_message = "No stock at factory"
-            elif suggested_m2 <= 0:
-                # Has stock but nothing suggested (over-stocked)
-                factory_fill_status = "available"
-                factory_fill_message = f"{int(factory_available_m2):,} m² available at SIESA"
-            elif factory_largest_lot_m2 and suggested_m2 <= factory_largest_lot_m2:
-                # Can fill entire suggestion from single lot
-                factory_fill_status = "single_lot"
-                factory_fill_message = f"Can fill from single lot ({factory_largest_lot_code})"
-            elif suggested_m2 <= factory_available_m2:
-                # Can fill entire suggestion but needs mixed lots
-                factory_fill_status = "mixed_lots"
-                largest_str = f"{int(factory_largest_lot_m2):,}" if factory_largest_lot_m2 else "?"
-                factory_fill_message = f"Will need mixed lots (largest: {largest_str} m²)"
-            else:
-                # Has SOME stock but not enough for full suggestion
-                shortfall = suggested_m2 - factory_available_m2
-                factory_fill_status = "partial_available"
-                factory_fill_message = f"{int(factory_available_m2):,} m² available, need {int(shortfall):,} m² more"
-
-            # Get production schedule status (from Programa de Produccion Excel)
-            # This shows what's currently scheduled/in_progress/completed
-            prod_schedule = production_schedule_map.get(rec.sku)
-            production_status = "not_scheduled"
-            production_requested_m2 = Decimal("0")
-            production_completed_m2 = Decimal("0")
-            production_can_add_more = False
-            production_estimated_ready = None
-            production_add_more_m2 = Decimal("0")
-            production_add_more_alert = None
-
-            if prod_schedule:
-                production_status = prod_schedule.status.value if hasattr(prod_schedule.status, 'value') else str(prod_schedule.status)
-                production_requested_m2 = prod_schedule.requested_m2 or Decimal("0")
-                production_completed_m2 = prod_schedule.completed_m2 or Decimal("0")
-                production_can_add_more = prod_schedule.can_add_more
-                production_estimated_ready = prod_schedule.estimated_delivery_date
-
-                # Calculate pre-production alert if:
-                # 1. Status is 'scheduled' (production hasn't started)
-                # 2. Suggested m² is greater than what's already requested
-                if production_can_add_more and suggested_m2 > production_requested_m2:
-                    gap_m2 = suggested_m2 - production_requested_m2
-                    production_add_more_m2 = gap_m2
-                    production_add_more_alert = f"Add {int(gap_m2):,} m² before production starts!"
-
-            # Coverage gap — FS already includes customer demand, don't double-add
-            if projection is not None:
-                adjusted_coverage_gap = projection["coverage_gap_m2"]
-            else:
-                base_coverage_gap = rec.coverage_gap_m2 or Decimal("0")
-                adjusted_coverage_gap = base_coverage_gap + expected_customer_orders_m2
-
-                if expected_customer_orders_m2 > 0:
-                    logger.debug(
-                        "expected_orders_added_to_gap",
-                        sku=rec.sku,
-                        base_gap=float(base_coverage_gap),
-                        expected_orders=float(expected_customer_orders_m2),
-                        adjusted_gap=float(adjusted_coverage_gap),
-                    )
-
-            # Calculate availability breakdown using REAL factory data.
-            # suggested_pallets is already cascade-aware (SIESA conflation fix).
-            # Availability uses real SIESA + real production — what's physically at factory.
-            availability_breakdown = None
-            if order_deadline:
-                availability_breakdown = self._calculate_availability_breakdown(
-                    factory_available_m2=factory_available_m2,
-                    production_status=production_status,
-                    production_requested_m2=production_requested_m2,
-                    production_completed_m2=production_completed_m2,
-                    production_estimated_ready=production_estimated_ready,
-                    order_deadline=order_deadline,
-                    suggested_pallets=suggested,
-                )
-
-            # Build full calculation breakdown (transparency layer)
-            # This shows: Coverage → Customer Demand → Selection logic
-            # NOTE: minimum_applied=False because minimum container rule only applies
-            # to Factory Request section, NOT to Warehouse Order
-            full_calculation_breakdown = self._build_full_calculation_breakdown(
-                # Coverage inputs
-                days_to_cover=days_to_cover,
-                daily_velocity_m2=daily_velocity_m2,
-                velocity_source="90d" if velocity_90d_m2 > 0 else "180d",
-                trend_direction=direction,
-                velocity_change_pct=velocity_change_pct,  # Raw: e.g., -52%
-                trend_adjustment_pct=trend_adjustment_pct,  # Capped: e.g., -20%
-                warehouse_m2=minus_current,
-                in_transit_m2=minus_incoming,
-                pending_order_m2=pending_order_m2,
-                coverage_gap_pallets=coverage_gap_pallets,
-                # Customer demand inputs
-                customers_expecting_count=customers_expecting_count,
-                customer_names=customer_names,
-                expected_orders_m2=expected_customer_orders_m2,
-                customer_demand_score=customer_demand_score,
-                # Factory constraint
-                factory_available_m2=factory_available_m2,
-                # Final selection (will be updated later in _apply_selection)
-                final_selected_pallets=suggested,
-                # IMPORTANT: Minimum container only applies to Factory Request, not Warehouse Order
-                minimum_applied=False,
-                selection_constraint_note=None,
-                # Dynamic buffer based on next boat arrival
-                buffer_days=buffer_days,
-                # Forward simulation overrides
-                projection_coverage_pallets=projection.get("suggested_pallets", 0) if projection is not None else None,
-                projection_projected_stock_m2=Decimal(str(projection.get("projected_stock_m2", 0))) if projection is not None else None,
-                projection_earlier_drafts_consumed_m2=Decimal(str(projection.get("earlier_drafts_consumed_m2", 0))) if projection is not None else None,
-            )
-
-            # Look up per-product weight from product type config
-            product_weight_per_m2, _ = get_config_service().get_product_physics(rec.category)
-
-            product = OrderBuilderProduct(
-                product_id=rec.product_id,
-                sku=rec.sku,
-                description=None,
-                weight_per_m2_kg=product_weight_per_m2,
-                priority=effective_priority,
-                action_type=rec.action_type.value,
-                current_stock_m2=rec.warehouse_m2,
-                in_transit_m2=rec.in_transit_m2,
-                # Pending orders (already ordered, awaiting shipment)
-                pending_order_m2=pending_order_m2,
-                pending_order_pallets=pending_order_pallets,
-                pending_order_boat=pending_order_boat,
-                days_to_cover=days_to_cover,
-                total_demand_m2=rec.total_demand_m2 or Decimal("0"),
-                coverage_gap_m2=adjusted_coverage_gap,  # Now includes expected customer orders
-                coverage_gap_pallets=coverage_gap_pallets,
-                suggested_pallets=suggested,
-                confidence=rec.confidence.value,
-                confidence_reason=rec.confidence_reason,
-                unique_customers=rec.unique_customers,
-                top_customer_name=rec.top_customer_name,
-                top_customer_share=rec.top_customer_share,
-                # Factory production status
-                factory_status=factory_status,
-                factory_production_date=factory_production_date,
-                factory_production_m2=factory_production_m2,
-                days_until_factory_ready=days_until_factory_ready,
-                factory_ready_before_boat=factory_ready_before_boat,
-                factory_timing_message=factory_timing_message,
-                # Factory availability (SIESA finished goods)
-                factory_available_m2=factory_available_m2,
-                factory_largest_lot_m2=factory_largest_lot_m2,
-                factory_largest_lot_code=factory_largest_lot_code,
-                factory_lot_count=factory_lot_count,
-                factory_fill_status=factory_fill_status,
-                factory_fill_message=factory_fill_message,
-                # Production schedule status (from Programa de Produccion Excel)
-                production_status=production_status,
-                production_requested_m2=production_requested_m2,
-                production_completed_m2=production_completed_m2,
-                production_can_add_more=production_can_add_more,
-                production_estimated_ready=production_estimated_ready,
-                production_add_more_m2=production_add_more_m2,
-                production_add_more_alert=production_add_more_alert,
-                # Trend fields
-                urgency=urgency,
-                days_of_stock=days_of_stock,
-                trend_direction=direction,
-                trend_strength=strength,
-                velocity_change_pct=velocity_change_pct,
-                daily_velocity_m2=daily_velocity_m2,
-                # Dual velocity fields (90-day vs 6-month comparison)
-                velocity_90d_m2=velocity_90d_m2,
-                velocity_180d_m2=velocity_180d_m2,
-                velocity_trend_signal=velocity_trend_signal,
-                velocity_trend_ratio=velocity_trend_ratio,
-                calculation_breakdown=breakdown if daily_velocity_m2 > 0 else None,
-                # Reasoning
-                reasoning=reasoning,
-                # Customer demand signal
-                customer_demand_score=customer_demand_score,
-                customers_expecting_count=customers_expecting_count,
-                expected_customer_orders_m2=expected_customer_orders_m2,
-                expected_orders_note=expected_orders_note,
-                # Selection
-                is_selected=False,
-                selected_pallets=0,
-                # Availability breakdown (what's available for this boat)
-                availability_breakdown=availability_breakdown,
-                # Full calculation breakdown (transparency layer)
-                full_calculation_breakdown=full_calculation_breakdown,
-                # Forward simulation (multi-boat awareness)
-                projected_stock_m2=projection["projected_stock_m2"] if projection is not None else None,
-                earlier_drafts_consumed_m2=projection["earlier_drafts_consumed_m2"] if projection is not None else None,
-                uses_forward_simulation=projection is not None,
-                # Committed orders (5e)
-                committed_orders_m2=float(committed_map.get(rec.product_id, {}).get("total_m2", 0)),
-                committed_orders_customer=committed_map.get(rec.product_id, {}).get("customer"),
-                committed_orders_count=committed_map.get(rec.product_id, {}).get("count", 0),
-                # Unfulfilled demand (5f)
-                unfulfilled_demand_m2=float(unfulfilled_map.get(rec.product_id, Decimal("0"))),
-                has_unfulfilled_demand=unfulfilled_map.get(rec.product_id, Decimal("0")) > 0,
-                # Pallet conversion factor (for unit-aware display)
-                pallet_conversion_factor=_pf,
-            )
-
-            # Calculate priority score and display reasoning (Layer 2 & 4)
-            product.score = self._calculate_priority_score(product)
-            product.reasoning_display = self._generate_product_reasoning_display(product)
 
             priority_key = rec.priority.value
             if priority_key in groups:
@@ -1966,28 +2030,17 @@ class OrderBuilderService:
             else:
                 groups["YOUR_CALL"].append(product)
 
-        # Sort each tier by:
-        # 1. Urgency (critical → urgent → soon → ok)
-        # 2. Customer demand score (higher = customers expecting this product)
-        # 3. Days of stock (lower = more urgent)
-        # 4. Velocity (higher = more important for revenue)
+        # Sort each tier by urgency, demand score, days of stock, velocity
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
-
         for priority_key in groups:
             groups[priority_key].sort(
                 key=lambda p: (
                     urgency_order.get(p.urgency, 4),
-                    -p.customer_demand_score,  # Higher score = higher priority
+                    -p.customer_demand_score,
                     p.days_of_stock if p.days_of_stock is not None else 999,
                     -float(p.daily_velocity_m2),
                 )
             )
-
-        logger.debug(
-            "products_sorted_by_urgency_and_demand",
-            high_priority_order=[p.sku for p in groups["HIGH_PRIORITY"][:5]],
-            top_demand_scores=[p.customer_demand_score for p in groups["HIGH_PRIORITY"][:5]],
-        )
 
         return groups
 
@@ -2331,101 +2384,49 @@ class OrderBuilderService:
                 note = f"Includes {int(product.availability_breakdown.production_completing_m2)} m² from production"
             return max_pallets, note
 
-        # First pass: HIGH_PRIORITY (always include if room AND factory has stock)
-        for p in products_by_priority.get("HIGH_PRIORITY", []):
-            max_shippable, constraint_note = get_shippable_pallets(p)
+        # Single selection loop: HIGH_PRIORITY -> CONSIDER -> WELL_COVERED -> YOUR_CALL
+        # Priority order determines who gets room first. Logic is identical per tier.
+        for tier in ["HIGH_PRIORITY", "CONSIDER", "WELL_COVERED", "YOUR_CALL"]:
+            for p in products_by_priority.get(tier, []):
+                # YOUR_CALL: never auto-select
+                if tier == "YOUR_CALL":
+                    all_products.append(p)
+                    continue
 
-            # Can't ship if no factory stock
-            if max_shippable <= 0:
-                p.is_selected = False
-                p.selected_pallets = 0
-                p.selection_constraint_note = constraint_note
-                all_products.append(p)
-                continue
+                max_shippable, constraint_note = get_shippable_pallets(p)
 
-            # Cap suggestion at what factory can ship
-            pallets_needed = min(p.suggested_pallets, max_shippable)
+                # No factory stock: can't ship
+                if max_shippable <= 0:
+                    p.is_selected = False
+                    p.selected_pallets = 0
+                    p.selection_constraint_note = constraint_note
+                    all_products.append(p)
+                    continue
 
-            if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
-                p.is_selected = True
-                p.selected_pallets = pallets_needed
-                total_selected += pallets_needed
-                if pallets_needed < p.suggested_pallets:
-                    p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
-            elif pallets_needed > 0:
-                # Partial fill if there's room
+                # Nothing suggested: don't auto-select
+                if p.suggested_pallets <= 0:
+                    all_products.append(p)
+                    continue
+
+                # How many pallets we want, capped by factory availability
+                pallets_wanted = min(p.suggested_pallets, max_shippable)
                 remaining = max_pallets - total_selected
-                if remaining > 0:
-                    actual_pallets = min(remaining, max_shippable)
-                    p.is_selected = True
-                    p.selected_pallets = actual_pallets
-                    total_selected += actual_pallets
-                    if actual_pallets < p.suggested_pallets:
-                        p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
-            all_products.append(p)
 
-        # Second pass: CONSIDER (include if room available AND factory has stock)
-        for p in products_by_priority.get("CONSIDER", []):
-            max_shippable, constraint_note = get_shippable_pallets(p)
+                if remaining <= 0:
+                    # No room left
+                    all_products.append(p)
+                    continue
 
-            # Can't ship if no factory stock
-            if max_shippable <= 0:
-                p.is_selected = False
-                p.selected_pallets = 0
-                p.selection_constraint_note = constraint_note
-                all_products.append(p)
-                continue
-
-            # Cap suggestion at what factory can ship
-            pallets_needed = min(p.suggested_pallets, max_shippable)
-
-            if pallets_needed > 0 and total_selected + pallets_needed <= max_pallets:
+                # Allocate what fits
+                pallets_to_add = min(pallets_wanted, remaining)
                 p.is_selected = True
-                p.selected_pallets = pallets_needed
-                total_selected += pallets_needed
-                if pallets_needed < p.suggested_pallets:
-                    p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
-            elif pallets_needed > 0:
-                # Partial fill
-                remaining = max_pallets - total_selected
-                if remaining > 0:
-                    actual_pallets = min(remaining, max_shippable)
-                    p.is_selected = True
-                    p.selected_pallets = actual_pallets
-                    total_selected += actual_pallets
-                    if actual_pallets < p.suggested_pallets:
-                        p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
-            all_products.append(p)
+                p.selected_pallets = pallets_to_add
+                total_selected += pallets_to_add
 
-        # Third pass: WELL_COVERED (include if room left AND factory has stock)
-        for p in products_by_priority.get("WELL_COVERED", []):
-            max_shippable, constraint_note = get_shippable_pallets(p)
+                if pallets_to_add < p.suggested_pallets:
+                    p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m\u00b2)"
 
-            # Can't ship if no factory stock
-            if max_shippable <= 0:
-                p.is_selected = False
-                p.selected_pallets = 0
-                p.selection_constraint_note = constraint_note
                 all_products.append(p)
-                continue
-
-            remaining = max_pallets - total_selected
-            if remaining > 0 and p.suggested_pallets > 0:
-                # Add partial to help fill containers - only if product is actually needed
-                # Cap at what factory can actually ship
-                pallets_to_add = min(p.suggested_pallets, remaining, max_shippable)
-                if pallets_to_add > 0:
-                    p.is_selected = True
-                    p.selected_pallets = pallets_to_add
-                    total_selected += pallets_to_add
-                    if pallets_to_add < p.suggested_pallets:
-                        if max_shippable < p.suggested_pallets:
-                            p.selection_constraint_note = f"Capped at available ({int(get_effective_available(p)):,} m²)"
-            # If suggested_pallets=0, product is overstocked - don't auto-select
-            all_products.append(p)
-
-        # YOUR_CALL products - never auto-select
-        all_products.extend(products_by_priority.get("YOUR_CALL", []))
 
         # Track deferred SKUs (products that couldn't fully fit)
         deferred_skus = []
