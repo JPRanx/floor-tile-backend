@@ -1690,9 +1690,8 @@ class OrderBuilderService:
             factory_ready_before_boat = factory_info.ready_before_boat
             factory_timing_message = factory_info.timing_message
 
-        # Factory availability (SIESA raw for display)
+        # Factory availability (cascade-aware for display — matches FS and availability_breakdown)
         factory_avail = factory_availability_map.get(rec.product_id, {})
-        factory_available_m2_display = factory_avail.get("factory_available_m2", Decimal("0"))
         factory_largest_lot_m2 = factory_avail.get("factory_largest_lot_m2")
         factory_largest_lot_code = factory_avail.get("factory_largest_lot_code")
         factory_lot_count = factory_avail.get("factory_lot_count", 0)
@@ -1816,7 +1815,7 @@ class OrderBuilderService:
             days_until_factory_ready=days_until_factory_ready,
             factory_ready_before_boat=factory_ready_before_boat,
             factory_timing_message=factory_timing_message,
-            factory_available_m2=factory_available_m2_display,
+            factory_available_m2=factory_for_computation,
             factory_largest_lot_m2=factory_largest_lot_m2,
             factory_largest_lot_code=factory_largest_lot_code,
             factory_lot_count=factory_lot_count,
