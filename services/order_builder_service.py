@@ -794,6 +794,17 @@ class OrderBuilderService:
             return Urgency.SOON.value
         return Urgency.OK.value
 
+    @staticmethod
+    def _derive_action_type(urgency: str, suggested_pallets: int) -> str:
+        """Derive action_type from urgency and suggestion. No rec dependency."""
+        if suggested_pallets == 0:
+            return "WELL_STOCKED"
+        if urgency in ("critical", "urgent"):
+            return "ORDER_NOW"
+        if urgency == "soon":
+            return "ORDER_SOON"
+        return "REVIEW"
+
     def _get_customer_demand_scores(self) -> dict[str, dict]:
         """
         Calculate customer demand scores and expected orders for products.
@@ -1386,7 +1397,6 @@ class OrderBuilderService:
 
     def _analyze_from_projection(
         self,
-        rec,
         projection: dict,
         daily_velocity_m2: Decimal,
         buffer_days: int,
@@ -1530,8 +1540,8 @@ class OrderBuilderService:
         expected_customer_orders_m2 = Decimal(str(demand_info.get("expected_m2", 0)))
         customer_names = demand_info.get("customer_names", [])
 
-        # Coverage gap (add customer demand)
-        base_coverage_gap = rec.coverage_gap_m2 or Decimal("0")
+        # Coverage gap: OB-computed (not from rec)
+        base_coverage_gap = adjusted_quantity_m2 - minus_current - minus_incoming - pending_order_m2
         adjusted_coverage_gap = base_coverage_gap + expected_customer_orders_m2
 
         if expected_customer_orders_m2 > 0:
@@ -1601,17 +1611,20 @@ class OrderBuilderService:
         """Build OrderBuilderProduct from ProductAnalysis. Zero forks."""
         a = analysis  # short alias
 
-        # Effective priority: use suggested_pallets to recalculate
-        coverage_gap_pallets = max(0, rec.coverage_gap_pallets or 0)
-        suggested = a.final_suggestion_pallets if daily_velocity_m2 > 0 else coverage_gap_pallets
+        # Effective priority: derive entirely from analysis (not rec)
+        suggested = a.final_suggestion_pallets
+        coverage_gap_pallets = max(0, math.ceil(float(a.adjusted_coverage_gap / pallet_factor))) if a.adjusted_coverage_gap > 0 else 0
 
-        original_priority = rec.priority.value
         if suggested == 0:
             effective_priority = "WELL_COVERED"
-        elif suggested <= 5 and original_priority == "HIGH_PRIORITY":
+        elif a.urgency in ("critical", "urgent"):
+            effective_priority = "HIGH_PRIORITY"
+        elif a.urgency == "soon":
             effective_priority = "CONSIDER"
+        elif a.days_of_stock is None:
+            effective_priority = "YOUR_CALL"
         else:
-            effective_priority = original_priority
+            effective_priority = "WELL_COVERED"
 
         # Primary factor
         primary_factor = self._determine_primary_factor(
@@ -1793,14 +1806,14 @@ class OrderBuilderService:
             description=None,
             weight_per_m2_kg=product_weight_per_m2,
             priority=effective_priority,
-            action_type=rec.action_type.value,
+            action_type=self._derive_action_type(a.urgency, suggested),
             current_stock_m2=rec.warehouse_m2,
             in_transit_m2=rec.in_transit_m2,
             pending_order_m2=a.pending_order_m2,
             pending_order_pallets=a.pending_order_pallets,
             pending_order_boat=a.pending_order_boat,
             days_to_cover=days_to_cover,
-            total_demand_m2=rec.total_demand_m2 or Decimal("0"),
+            total_demand_m2=round(a.adjusted_quantity_m2, 2),
             coverage_gap_m2=a.adjusted_coverage_gap,
             coverage_gap_pallets=coverage_gap_pallets,
             suggested_pallets=suggested,
@@ -2002,7 +2015,7 @@ class OrderBuilderService:
 
             if projection is not None:
                 analysis = self._analyze_from_projection(
-                    rec, projection, daily_velocity_m2, buffer_days, _pf,
+                    projection, daily_velocity_m2, buffer_days, _pf,
                     factory_availability_map,
                 )
             else:
@@ -2023,7 +2036,7 @@ class OrderBuilderService:
                 boat_departure, order_deadline, _pf, projection,
             )
 
-            priority_key = rec.priority.value
+            priority_key = product.priority
             if priority_key in groups:
                 groups[priority_key].append(product)
             else:

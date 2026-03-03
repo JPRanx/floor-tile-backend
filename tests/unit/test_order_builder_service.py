@@ -270,15 +270,14 @@ class TestCapacityMinimal:
             _make_trend("HIGH-SKU", velocity_m2_day=10.0, days_of_stock=5)
         ]
 
-        # Factory has 2000 m² (≥ 14 pallets × 134.4 m²/pallet) available to ship
+        # Low factory stock → days_of_stock stays critical → HIGH_PRIORITY
         mock_inventory_service.get_latest.return_value = [
-            _make_inventory_snapshot("product-hp", factory_available_m2=2000.0)
+            _make_inventory_snapshot("product-hp", factory_available_m2=100.0)
         ]
 
         result = order_builder_service.get_order_builder(num_bls=1)
 
-        # Service recalculates effective priority; with 0 warehouse stock and positive
-        # velocity, suggested_pallets > 0 so product stays HIGH_PRIORITY or CONSIDER
+        # Priority derived from urgency: 0 days of stock → critical → HIGH_PRIORITY
         all_products = result.high_priority + result.consider + result.well_covered + result.your_call
         assert len(all_products) == 1, "Expected exactly one product returned"
 
@@ -348,10 +347,10 @@ class TestCapacityStandard:
             _make_trend("CONSIDER-SKU", velocity_m2_day=8.0),
         ]
 
-        # Factory stock for products with 0 warehouse stock so they can be shipped
+        # Factory stock: product-1 low → critical → HP, product-2 moderate → soon → CONSIDER
         mock_inventory_service.get_latest.return_value = [
-            _make_inventory_snapshot("product-1", factory_available_m2=2000.0),
-            _make_inventory_snapshot("product-2", factory_available_m2=2000.0),
+            _make_inventory_snapshot("product-1", factory_available_m2=100.0),
+            _make_inventory_snapshot("product-2", factory_available_m2=600.0),
         ]
 
         result = order_builder_service.get_order_builder(num_bls=1)
