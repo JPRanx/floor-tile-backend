@@ -688,7 +688,7 @@ class OrderBuilderService(
         return OrderBuilderResponse(
             boat=dummy_boat,
             next_boat=None,
-            num_bls=num_bls,
+            num_bls=1,
             recommended_bls=1,
             recommended_bls_reason="Sin barcos programados",
             high_priority=[],

@@ -112,7 +112,6 @@ class StabilityMixin:
 
         for product in unstable_products:
             coverage_days = product.days_of_stock or 0
-            velocity = float(product.daily_velocity_m2) if product.daily_velocity_m2 else 0
             stockout_date = today + timedelta(days=coverage_days) if coverage_days > 0 else today
 
             # Check SIESA availability first (fastest to ship)
