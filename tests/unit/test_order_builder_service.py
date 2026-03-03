@@ -29,7 +29,7 @@ from models.recommendation import RecommendationPriority, ConfidenceLevel
 @pytest.fixture
 def mock_boat_service():
     """Mock BoatScheduleService."""
-    with patch("services.order_builder_service.get_boat_schedule_service") as mock:
+    with patch("services.order_builder.service.get_boat_schedule_service") as mock:
         service = MagicMock()
         service.get_first_boat_after.return_value = None
         service.get_boats_after.return_value = []
@@ -40,7 +40,7 @@ def mock_boat_service():
 @pytest.fixture
 def mock_recommendation_service():
     """Mock RecommendationService."""
-    with patch("services.order_builder_service.get_recommendation_service") as mock:
+    with patch("services.order_builder.service.get_recommendation_service") as mock:
         service = MagicMock()
         mock.return_value = service
         yield service
@@ -49,7 +49,7 @@ def mock_recommendation_service():
 @pytest.fixture
 def mock_inventory_service():
     """Mock InventoryService."""
-    with patch("services.order_builder_service.get_inventory_service") as mock:
+    with patch("services.order_builder.service.get_inventory_service") as mock:
         service = MagicMock()
         mock.return_value = service
         yield service
@@ -58,7 +58,7 @@ def mock_inventory_service():
 @pytest.fixture
 def mock_trend_service():
     """Mock TrendService."""
-    with patch("services.order_builder_service.get_trend_service") as mock:
+    with patch("services.order_builder.service.get_trend_service") as mock:
         service = MagicMock()
         service.get_product_trends.return_value = []
         service.get_customer_trends.return_value = []
@@ -69,7 +69,7 @@ def mock_trend_service():
 @pytest.fixture
 def mock_production_schedule_service():
     """Mock ProductionScheduleService."""
-    with patch("services.order_builder_service.get_production_schedule_service") as mock:
+    with patch("services.order_builder.service.get_production_schedule_service") as mock:
         service = MagicMock()
         service.get_average_production_time.return_value = 7
         service.get_factory_status.return_value = {}
@@ -84,7 +84,7 @@ def mock_production_schedule_service():
 @pytest.fixture
 def mock_warehouse_order_service():
     """Mock WarehouseOrderService."""
-    with patch("services.order_builder_service.get_warehouse_order_service") as mock:
+    with patch("services.order_builder.service.get_warehouse_order_service") as mock:
         service = MagicMock()
         service.get_pending_by_sku_dict.return_value = {}
         mock.return_value = service
@@ -94,7 +94,7 @@ def mock_warehouse_order_service():
 @pytest.fixture
 def mock_config_service():
     """Mock ConfigService. Returns sensible Decimal defaults for all shipping cost fields."""
-    with patch("services.order_builder_service.get_config_service") as mock:
+    with patch("services.order_builder.service.get_config_service") as mock:
         service = MagicMock()
         service.get_decimal.return_value = Decimal("100")
         service.get_product_physics.return_value = (Decimal("25"), Decimal("134.4"))
@@ -113,7 +113,7 @@ def order_builder_service(
     mock_config_service,
 ):
     """Create OrderBuilderService with all dependencies mocked."""
-    with patch("services.order_builder_service.get_customer_pattern_service") as mock_cps:
+    with patch("services.order_builder.service.get_customer_pattern_service") as mock_cps:
         mock_cps.return_value = MagicMock()
         yield OrderBuilderService()
 
@@ -843,7 +843,7 @@ class TestSingleton:
         import services.order_builder_service as module
         module._order_builder_service = None
 
-        with patch("services.order_builder_service.get_customer_pattern_service") as mock_cps:
+        with patch("services.order_builder.service.get_customer_pattern_service") as mock_cps:
             mock_cps.return_value = MagicMock()
             service1 = get_order_builder_service()
             service2 = get_order_builder_service()

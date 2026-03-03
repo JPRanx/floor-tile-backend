@@ -532,6 +532,7 @@ class ForwardSimulationService:
                     "customer_demand_m2": Decimal(str(pd.get("customer_demand_m2", 0))),
                     "customers_expecting_count": pd.get("customers_expecting_count", 0),
                     "customer_names": pd.get("customer_names", []),
+                    "customer_demand_score": pd.get("customer_demand_score", 0),
                     "buffer_days": pd.get("buffer_days", ORDERING_CYCLE_DAYS),
                 }
 
@@ -776,6 +777,7 @@ class ForwardSimulationService:
                 "customer_demand_m2": float(cust_demand_m2.quantize(Decimal("0.01"))),
                 "customers_expecting_count": cust_info.get("customers_count", 0),
                 "customer_names": cust_info.get("customer_names", []),
+                "customer_demand_score": cust_info.get("score", 0),
                 "buffer_days": buffer_days,
             })
 

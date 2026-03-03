@@ -140,6 +140,7 @@ class RecalculateRequest(BaseModel):
     boat_id: Optional[str] = None
     num_bls: int = 1
     excluded_skus: List[str] = []
+    factory_id: Optional[str] = None
 
 
 @router.post("/recalculate", response_model=OrderBuilderResponse)
@@ -178,7 +179,9 @@ def recalculate_order(request: RecalculateRequest) -> OrderBuilderResponse:
     result = service.get_order_builder(
         boat_id=request.boat_id,
         num_bls=request.num_bls,
-        excluded_skus=request.excluded_skus
+        excluded_skus=request.excluded_skus,
+        factory_id=request.factory_id,
+        use_projection=True,
     )
 
     elapsed = time.time() - start_time
