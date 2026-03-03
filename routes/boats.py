@@ -111,11 +111,16 @@ async def get_boat_schedules(
 async def get_available_boats(
     from_date: Optional[date] = Query(None, description="Departures after this date"),
     limit: int = Query(10, ge=1, le=50, description="Maximum results"),
+    include_id: Optional[str] = Query(None, description="Always include this boat ID regardless of filters"),
 ):
     """
     Get available boat schedules for booking.
 
     Returns schedules with status='available' ordered by departure date.
+    When include_id is provided, that boat is always included even if it
+    would normally be filtered out by deadline or draft-status rules.
+    This supports navigation from Planning View where a specific boat
+    must appear in the Order Builder dropdown.
     """
     try:
         service = get_boat_schedule_service()
@@ -130,6 +135,22 @@ async def get_available_boats(
             )
             if ordered_ids:
                 schedules = [s for s in schedules if s.id not in ordered_ids]
+
+        # If include_id was requested and isn't already in the filtered list,
+        # fetch it separately and insert in chronological order.
+        if include_id:
+            already_present = any(s.id == include_id for s in schedules)
+            if not already_present:
+                try:
+                    included_boat = service.get_by_id(include_id)
+                    schedules.append(included_boat)
+                    schedules.sort(key=lambda s: s.departure_date)
+                except Exception:
+                    # Boat doesn't exist or DB error — silently skip
+                    logger.debug(
+                        "include_id_not_found",
+                        include_id=include_id,
+                    )
 
         return schedules
 
