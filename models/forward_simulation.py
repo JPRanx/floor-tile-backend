@@ -58,7 +58,12 @@ class ProductProjection(BaseSchema):
     days_of_stock_at_arrival: float = Field(0, description="Days of stock remaining at arrival")
     urgency: str = Field("ok", description="Urgency level: critical, urgent, soon, ok")
     coverage_gap_m2: float = Field(0, ge=0, description="m2 needed to cover until next order cycle")
-    suggested_pallets: int = Field(0, ge=0, description="Suggested pallets to order")
+    suggested_pallets: int = Field(0, ge=0, description="Suggested pallets to order (demand gap)")
+    shippable_pallets: int = Field(
+        0,
+        ge=0,
+        description="Pallets that can actually ship (min of suggested and factory availability)"
+    )
     supply_breakdown: Optional[SupplySource] = Field(
         None,
         description="Breakdown of supply sources contributing to available stock"

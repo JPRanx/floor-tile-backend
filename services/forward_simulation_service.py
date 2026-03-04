@@ -762,6 +762,14 @@ class ForwardSimulationService:
                 suggestion_m2 = max(Decimal("0"), adjusted_demand - wh_available)
                 suggested_pallets = math.ceil(suggestion_m2 / pallet_divisor) if suggestion_m2 > 0 else 0
 
+            # Shippable pallets: capped at what factory can actually supply
+            factory_total_m2 = siesa_supply + prod_supply
+            if factory_total_m2 > 0:
+                max_from_factory = math.ceil(float(factory_total_m2 / pallet_divisor))
+            else:
+                max_from_factory = 0
+            shippable_pallets = min(suggested_pallets, max_from_factory)
+
             total_pallets += suggested_pallets
 
             # Urgency based on days of stock at arrival
@@ -799,6 +807,7 @@ class ForwardSimulationService:
                 "urgency": urgency,
                 "coverage_gap_m2": float(coverage_gap.quantize(Decimal("0.01"))),
                 "suggested_pallets": suggested_pallets,
+                "shippable_pallets": shippable_pallets,
                 "supply_breakdown": {
                     "warehouse_m2": float(stock.quantize(Decimal("0.01"))),
                     "factory_siesa_m2": float(siesa_supply.quantize(Decimal("0.01"))),
