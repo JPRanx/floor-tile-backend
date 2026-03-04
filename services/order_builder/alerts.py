@@ -111,6 +111,20 @@ class AlertsMixin:
                 message=f"Booking deadline in {boat.days_until_deadline} days!"
             ))
 
+        # 8. Order deadline warning (recommended date to place factory order)
+        if boat.past_order_deadline:
+            alerts.insert(0, OrderBuilderAlert(
+                type=OrderBuilderAlertType.WARNING,
+                icon="⏰",
+                message=f"Past recommended order deadline ({abs(boat.days_until_order_deadline)}d ago). Order soon to catch this boat."
+            ))
+        elif 0 < boat.days_until_order_deadline <= 7:
+            alerts.insert(0, OrderBuilderAlert(
+                type=OrderBuilderAlertType.WARNING,
+                icon="⏰",
+                message=f"Order deadline in {boat.days_until_order_deadline} days!"
+            ))
+
         return alerts
 
     def _generate_summary_reasoning(
