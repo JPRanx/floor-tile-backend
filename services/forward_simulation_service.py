@@ -374,6 +374,17 @@ class ForwardSimulationService:
                     else:
                         proj["review_reason"] = "draft_needs_review"
 
+            # Stale draft detection: flag drafts saved before the latest data upload
+            latest_upload_ts = self._get_latest_data_upload_ts()
+            if latest_upload_ts:
+                for proj in boat_projections:
+                    if proj["draft_status"] == "drafting" and not proj.get("needs_review"):
+                        draft = drafts_map.get(proj["boat_id"])
+                        if draft and draft.get("updated_at"):
+                            if draft["updated_at"] < latest_upload_ts:
+                                proj["needs_review"] = True
+                                proj["review_reason"] = "data_freshness"
+
             # Stability impact: classify products as stabilized, recovering, or blocked
             STABILITY_THRESHOLD = URGENCY_SOON_DAYS  # 30 days
             for i, proj in enumerate(boat_projections):
@@ -473,13 +484,18 @@ class ForwardSimulationService:
 
     def get_projection_for_boat(
         self, factory_id: str, boat_id: str
-    ) -> Optional[dict[str, dict]]:
+    ) -> Optional[dict]:
         """
         Run forward simulation and extract per-product projections for a specific boat.
 
-        Returns a dict keyed by product_id with projected stock, supply breakdown,
-        and earlier-draft consumption data. Returns None if the boat is not found
-        in the simulation horizon or if the simulation fails.
+        Returns a dict with:
+          - "products": dict keyed by product_id with projected stock, supply breakdown,
+            and earlier-draft consumption data.
+          - "stability_impact": the target boat's stability_impact (cascade-aware).
+          - "horizon_stability": all boats' stability data for multi-boat timeline.
+
+        Returns None if the boat is not found in the simulation horizon or if
+        the simulation fails.
         """
         try:
             horizon = self.get_planning_horizon(factory_id)
@@ -505,14 +521,14 @@ class ForwardSimulationService:
                 )
 
             # Build result dict keyed by product_id
-            result: dict[str, dict] = {}
+            products: dict[str, dict] = {}
             for pd in target_proj["product_details"]:
                 pid = pd["product_id"]
                 original_warehouse = first_warehouse_by_pid.get(pid, Decimal("0"))
                 current_warehouse = Decimal(str(pd["supply_breakdown"]["warehouse_m2"]))
                 earlier_consumed = max(Decimal("0"), original_warehouse - current_warehouse)
 
-                result[pid] = {
+                products[pid] = {
                     "projected_stock_m2": Decimal(str(pd["projected_stock_m2"])),
                     "daily_velocity_m2": Decimal(str(pd["daily_velocity_m2"])),
                     "supply_breakdown": {
@@ -536,7 +552,27 @@ class ForwardSimulationService:
                     "buffer_days": pd.get("buffer_days", ORDERING_CYCLE_DAYS),
                 }
 
-            return result
+            # Extract stability data (already computed by get_planning_horizon)
+            stability_impact = target_proj.get("stability_impact")
+
+            # Build horizon stability for multi-boat timeline
+            horizon_stability: list[dict] = []
+            for proj in projections:
+                si = proj.get("stability_impact")
+                if si:
+                    horizon_stability.append({
+                        "boat_name": proj["boat_name"],
+                        "boat_id": proj["boat_id"],
+                        "arrival_date": proj["arrival_date"],
+                        "stability_impact": si,
+                        "product_details": proj["product_details"],
+                    })
+
+            return {
+                "products": products,
+                "stability_impact": stability_impact,
+                "horizon_stability": horizon_stability,
+            }
 
         except Exception as e:
             logger.warning(
@@ -1490,6 +1526,29 @@ class ForwardSimulationService:
         except Exception as e:
             logger.error("fetch_drafts_failed", error=str(e))
             raise DatabaseError("select", str(e))
+
+    def _get_latest_data_upload_ts(self) -> Optional[str]:
+        """
+        Get the most recent upload timestamp across key data sources.
+
+        Returns ISO timestamp string or None if no uploads found.
+        Used for stale draft detection: if data was uploaded AFTER
+        a draft was saved, the draft may need review.
+        """
+        try:
+            result = (
+                self.db.table("upload_history")
+                .select("uploaded_at")
+                .in_("upload_type", ["sales", "inventory", "siesa", "production_schedule"])
+                .order("uploaded_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                return result.data[0]["uploaded_at"]
+            return None
+        except Exception:
+            return None
 
 
 # ----------------------------------------------------------------------

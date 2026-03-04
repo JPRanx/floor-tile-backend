@@ -244,17 +244,20 @@ class OrderBuilderService(
 
         # Step 2d: Forward simulation for multi-boat awareness
         projection_map = None
+        projection_data = None  # Full projection data including stability
         if use_projection and factory_id and boat and boat.boat_id:
             try:
                 from services.forward_simulation_service import get_forward_simulation_service
                 fwd_sim = get_forward_simulation_service()
-                projection_map = fwd_sim.get_projection_for_boat(factory_id, boat.boat_id)
-                if projection_map:
+                projection_data = fwd_sim.get_projection_for_boat(factory_id, boat.boat_id)
+                if projection_data:
+                    projection_map = projection_data["products"]
                     logger.info(
                         "forward_simulation_loaded",
                         factory_id=factory_id,
                         boat_id=boat.boat_id,
                         products_projected=len(projection_map),
+                        has_stability=projection_data.get("stability_impact") is not None,
                     )
             except Exception as e:
                 logger.warning("forward_sim_fallback", error=str(e))
@@ -358,13 +361,16 @@ class OrderBuilderService(
         # Step 10: Calculate "Unable to Ship" alerts
         unable_to_ship = self._calculate_unable_to_ship_alerts(all_products, boat.order_deadline)
 
-        # Step 11: Calculate Stability Forecast
-        available_boats = self.boat_service.get_available(limit=5)
-        stability_forecast = self._calculate_stability_forecast(
-            all_products,
-            boat,
-            available_boats
-        )
+        # Step 11: Stability Forecast — prefer FS (cascade-aware), fallback to OB
+        if projection_data and projection_data.get("stability_impact"):
+            stability_forecast = self._convert_fs_stability(
+                projection_data, all_products, boat,
+            )
+        else:
+            available_boats = self.boat_service.get_available(limit=5)
+            stability_forecast = self._calculate_stability_forecast(
+                all_products, boat, available_boats,
+            )
 
         # Step 12: Get liquidation clearance candidates (deactivated products with factory stock)
         liquidation_clearance = self._get_liquidation_clearance()
