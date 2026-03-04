@@ -39,7 +39,7 @@ async def get_default_planning_horizon(
             raise HTTPException(status_code=404, detail="No active factory found")
 
         service = get_forward_simulation_service()
-        return service.get_planning_horizon(active_factories[0].id, months)
+        return service.get_planning_horizon(active_factories[0]["id"], months)
     except HTTPException:
         raise
     except Exception as e:
