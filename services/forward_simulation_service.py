@@ -280,7 +280,7 @@ class ForwardSimulationService:
             drafts_map = self._get_existing_drafts(factory_id, boats)
 
             # Enriched supply sources
-            production_pipeline = self._get_production_pipeline(products, horizon_end)
+            production_pipeline = self._get_production_pipeline(products, horizon_end, today)
             # Exclude horizon boats — their drafts are already handled via drafts_map cascade
             horizon_boat_ids = {b["id"] for b in boats}
             in_transit_drafts = self._get_in_transit_drafts(factory_id, horizon_boat_ids)
@@ -1306,9 +1306,12 @@ class ForwardSimulationService:
             logger.error("fetch_inventory_failed", error=str(e))
             raise DatabaseError("select", str(e))
 
-    def _get_production_pipeline(self, products: list[dict], horizon_end: date) -> dict[str, list[dict]]:
+    def _get_production_pipeline(self, products: list[dict], horizon_end: date, today: date) -> dict[str, list[dict]]:
         """
         Get production schedule items that could contribute supply within the horizon.
+
+        Excludes stale rows whose estimated_delivery_date is in the past —
+        if that production completed, it already shows up in SIESA snapshots.
 
         Returns:
             Mapping of product_id -> list of production rows
@@ -1326,6 +1329,7 @@ class ForwardSimulationService:
                 .in_("status", ["scheduled", "in_progress"])
                 .not_.is_("product_id", "null")
                 .not_.is_("estimated_delivery_date", "null")
+                .gte("estimated_delivery_date", today.isoformat())
                 .lte("estimated_delivery_date", horizon_end.isoformat())
                 .execute()
             )
