@@ -180,6 +180,17 @@ class ProductResponse(BaseSchema, TimestampMixin):
     fob_cost_usd: Optional[Decimal] = Field(None, description="FOB cost per m² in USD")
     inactive_reason: Optional[InactiveReason] = Field(None, description="Reason for deactivation")
     inactive_date: Optional[date] = Field(None, description="Date when product was marked inactive")
+
+    @field_validator("inactive_reason", mode="before")
+    @classmethod
+    def coerce_inactive_reason(cls, v):
+        """Map unknown DB values to OTHER so reads never fail."""
+        if v is None:
+            return v
+        try:
+            return InactiveReason(v)
+        except ValueError:
+            return InactiveReason.OTHER
     # Unit-based product fields (furniture)
     units_per_pallet: Optional[int] = Field(None, description="Units per pallet (for unit-based products like furniture)")
     weight_kg: Optional[Decimal] = Field(None, description="Weight per unit in kg")
@@ -219,6 +230,17 @@ class LiquidationProductResponse(BaseSchema):
     rotation: Optional[Rotation] = None
     inactive_reason: Optional[InactiveReason] = None
     inactive_date: Optional[date] = None
+
+    @field_validator("inactive_reason", mode="before")
+    @classmethod
+    def coerce_inactive_reason(cls, v):
+        """Map unknown DB values to OTHER so reads never fail."""
+        if v is None:
+            return v
+        try:
+            return InactiveReason(v)
+        except ValueError:
+            return InactiveReason.OTHER
     warehouse_m2: float              # Latest warehouse_qty from inventory_snapshots
     factory_m2: float = 0.0          # Latest factory_available_m2 from inventory_snapshots
     days_since_last_sale: Optional[int] = None  # Today - max(sales.week_start), None if no sales
