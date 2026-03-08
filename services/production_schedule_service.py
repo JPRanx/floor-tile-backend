@@ -1201,11 +1201,17 @@ class ProductionScheduleService:
         total_requested = Decimal("0")
         total_completed = Decimal("0")
 
-        # Get products for matching
+        # Get products for matching (include ALL products, not just active,
+        # so FACTORY_ONLY products in production pipeline can match)
         products_by_sku = {}
         if match_products:
             try:
-                all_products = self.product_service.get_all_active_tiles()
+                all_products_data = self.db.table("products").select("id, sku").execute().data
+                class _ProductRef:
+                    def __init__(self, row):
+                        self.id = row["id"]
+                        self.sku = row.get("sku")
+                all_products = [_ProductRef(row) for row in all_products_data]
                 for p in all_products:
                     # Index by SKU and normalized forms (accent-normalized)
                     sku = getattr(p, 'sku', None)
@@ -1244,13 +1250,18 @@ class ProductionScheduleService:
                     ref_no_accent = normalize_accents(ref_upper)
                     ref_no_bte = ref_upper.replace(' BTE', '').replace('BTE', '').strip()
                     ref_no_bte_no_accent = normalize_accents(ref_no_bte)
+                    # Also strip size suffixes like "51X51"
+                    ref_no_size = ref_no_bte.replace(' 51X51', '').replace('51X51', '').strip()
+                    ref_no_size_no_accent = normalize_accents(ref_no_size)
 
-                    # Try matching in order: exact, no accent, no BTE, no accent + no BTE
+                    # Try matching in order: exact, no accent, no BTE, no size, normalized
                     product = (
                         products_by_sku.get(ref_upper) or
                         products_by_sku.get(ref_no_accent) or
                         products_by_sku.get(ref_no_bte) or
-                        products_by_sku.get(ref_no_bte_no_accent)
+                        products_by_sku.get(ref_no_bte_no_accent) or
+                        products_by_sku.get(ref_no_size) or
+                        products_by_sku.get(ref_no_size_no_accent)
                     )
                     if product:
                         product_id = product.id

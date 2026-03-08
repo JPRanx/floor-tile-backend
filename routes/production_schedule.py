@@ -401,6 +401,57 @@ async def preview_production_upload(
         existing = db.table("production_schedule").select("id", count="exact").execute()
         existing_count = existing.count or 0
 
+        # Match products by referencia → SKU (same logic as import_from_excel)
+        import unicodedata
+
+        def _normalize_accents(text: str) -> str:
+            return ''.join(
+                c for c in unicodedata.normalize('NFD', text)
+                if unicodedata.category(c) != 'Mn'
+            )
+
+        products_by_sku = {}
+        try:
+            # Include ALL products (active + FACTORY_ONLY) for matching
+            all_products = db.table("products").select("id, sku").execute().data
+            class _P:
+                def __init__(self, row):
+                    self.id = row["id"]
+                    self.sku = row.get("sku")
+            all_products = [_P(row) for row in all_products]
+            for p in all_products:
+                sku = getattr(p, 'sku', None)
+                if sku:
+                    sku_upper = sku.upper()
+                    products_by_sku[sku_upper] = p
+                    products_by_sku[_normalize_accents(sku_upper)] = p
+                    no_bte = sku_upper.replace(' BTE', '').replace('BTE', '').strip()
+                    products_by_sku[no_bte] = p
+                    products_by_sku[_normalize_accents(no_bte)] = p
+        except Exception:
+            pass  # If product loading fails, all show as unmatched (safe)
+
+        for r in production_records:
+            if not r.product_id and r.referencia:
+                ref_upper = r.referencia.upper()
+                ref_no_accent = _normalize_accents(ref_upper)
+                ref_no_bte = ref_upper.replace(' BTE', '').replace('BTE', '').strip()
+                ref_no_bte_no_accent = _normalize_accents(ref_no_bte)
+                # Also strip size suffixes like "51X51"
+                ref_no_size = ref_no_bte.replace(' 51X51', '').replace('51X51', '').strip()
+                ref_no_size_no_accent = _normalize_accents(ref_no_size)
+                product = (
+                    products_by_sku.get(ref_upper) or
+                    products_by_sku.get(ref_no_accent) or
+                    products_by_sku.get(ref_no_bte) or
+                    products_by_sku.get(ref_no_bte_no_accent) or
+                    products_by_sku.get(ref_no_size) or
+                    products_by_sku.get(ref_no_size_no_accent)
+                )
+                if product:
+                    r.product_id = product.id
+                    r.sku = getattr(product, 'sku', None)
+
         # Count matched vs unmatched
         matched_count = sum(1 for r in production_records if r.product_id)
         unmatched_count = len(production_records) - matched_count
