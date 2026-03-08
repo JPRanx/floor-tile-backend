@@ -56,6 +56,7 @@ class InactiveReason(str, Enum):
     NO_STOCK = "NO_STOCK"            # No inventory and no plans to reorder
     SEASONAL = "SEASONAL"            # Temporarily unavailable (seasonal)
     REPLACED = "REPLACED"            # Replaced by another product
+    FACTORY_ONLY = "FACTORY_ONLY"    # In production at factory, not yet exported to warehouse
     OTHER = "OTHER"                  # Other reason
 
 
