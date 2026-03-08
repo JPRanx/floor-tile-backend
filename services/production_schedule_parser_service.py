@@ -801,13 +801,16 @@ Return JSON in this exact structure:
             return None
 
     def _parse_decimal(self, value) -> Optional[Decimal]:
-        """Parse decimal from Excel cell."""
+        """Parse decimal from Excel cell, rounding to 2 decimal places."""
         if pd.isna(value):
             return None
         try:
-            return Decimal(str(float(value)))
+            return Decimal(str(value)).quantize(Decimal("0.01"))
         except Exception:
-            return None
+            try:
+                return Decimal(str(float(value))).quantize(Decimal("0.01"))
+            except Exception:
+                return None
 
 
 # Singleton instance
