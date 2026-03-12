@@ -284,6 +284,26 @@ class DraftService:
 
         now = datetime.now(timezone.utc).isoformat()
 
+        # Guard: reject saves for departed/arrived boats
+        try:
+            boat_row = (
+                self.db.table("boat_schedules")
+                .select("status")
+                .eq("id", boat_id)
+                .single()
+                .execute()
+            )
+            boat_status = boat_row.data.get("status") if boat_row.data else None
+            if boat_status in ("departed", "arrived"):
+                raise DatabaseError(
+                    "update",
+                    f"Cannot modify draft for boat with status '{boat_status}'. Boat has already departed."
+                )
+        except DatabaseError:
+            raise
+        except Exception as e:
+            logger.warning("boat_status_check_failed", boat_id=boat_id, error=str(e))
+
         try:
             # Check if draft already exists
             existing = (
