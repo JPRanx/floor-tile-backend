@@ -695,7 +695,7 @@ class OrderBuilderBoat(BaseSchema):
     days_until_departure: int
     days_until_arrival: int = Field(..., description="Days until boat arrives at port")
     days_until_warehouse: int = Field(..., description="Days until product in warehouse (arrival + port + trucking)")
-    order_deadline: date = Field(..., description="Recommended order deadline (30 days before departure)")
+    order_deadline: date = Field(..., description="Recommended order deadline (20 days before departure)")
     days_until_order_deadline: int = Field(..., description="Days until order deadline (can be negative)")
     past_order_deadline: bool = Field(default=False, description="True if past recommended order deadline")
     booking_deadline: date

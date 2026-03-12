@@ -23,7 +23,7 @@ from config.shipping import (
     ORDERING_CYCLE_DAYS,
     SEASONAL_DAMPENING,
 )
-from models.boat_schedule import ORDER_DEADLINE_DAYS
+from models.boat_schedule import ORDER_DEADLINE_DAYS, HARD_DEADLINE_DAYS
 from services.unit_config_service import get_unit_config
 
 logger = structlog.get_logger(__name__)
@@ -857,6 +857,9 @@ class ForwardSimulationService:
         # Unit-based factories (e.g. Muebles) have no SIESA step — skip deadline
         siesa_order_by = None if is_unit_based else departure_date - timedelta(days=ORDER_DEADLINE_DAYS)
 
+        # Hard deadline: factory needs minimum 10 days to pick/pack/truck to port
+        hard_deadline = departure_date - timedelta(days=HARD_DEADLINE_DAYS)
+
         # Sort product details by urgency (critical first)
         urgency_order = {"critical": 0, "urgent": 1, "soon": 2, "ok": 3}
         product_details.sort(key=lambda d: urgency_order.get(d["urgency"], 99))
@@ -904,6 +907,8 @@ class ForwardSimulationService:
             "days_until_siesa_deadline": (siesa_order_by - today).days if siesa_order_by else None,
             "production_request_date": None,
             "days_until_production_deadline": None,
+            "hard_deadline_date": hard_deadline.isoformat(),
+            "days_until_hard_deadline": (hard_deadline - today).days,
             "product_details": product_details,
             "draft_bl_items": draft_bl_items,
             "has_bl_allocation": has_bl_allocation,

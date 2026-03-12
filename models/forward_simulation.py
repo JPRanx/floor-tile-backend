@@ -203,6 +203,14 @@ class BoatProjection(BaseSchema):
         None,
         description="Days from today until production request deadline (negative = overdue)"
     )
+    hard_deadline_date: Optional[str] = Field(
+        None,
+        description="departure - 10d, factory hard stop to pick/pack/truck to port"
+    )
+    days_until_hard_deadline: Optional[int] = Field(
+        None,
+        description="Days until hard deadline (negative = overdue)"
+    )
     product_details: list[ProductProjection] = Field(
         default_factory=list,
         description="Per-product projections sorted by urgency (critical first)"
