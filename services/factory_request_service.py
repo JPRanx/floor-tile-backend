@@ -64,7 +64,7 @@ class FactoryRequestService:
         try:
             result = (
                 self.db.table("products")
-                .select("id, sku, description, units_per_pallet")
+                .select("id, sku, units_per_pallet")
                 .eq("factory_id", factory_id)
                 .eq("active", True)
                 .execute()
@@ -436,11 +436,7 @@ class FactoryRequestService:
             })
 
         # Build cycles from grouped items
-        from services.production_schedule_service import get_production_schedule_service
-        prod_service = get_production_schedule_service()
-        capacity = prod_service.get_production_capacity()
         monthly_limit = Decimal(str(factory.get("monthly_quota_m2", 60000)))
-        current_month = today.strftime("%Y-%m")
 
         cycles = []
         for month_key in sorted(items_by_month.keys()):
@@ -450,11 +446,8 @@ class FactoryRequestService:
             total_m2 = sum(Decimal(str(i["request_m2"])) for i in requestable)
             total_pallets = sum(i["request_pallets"] for i in requestable)
 
-            # Capacity: current month uses real data, future months assume empty
-            if month_key == current_month:
-                used = capacity.already_requested_m2 if hasattr(capacity, "already_requested_m2") else Decimal("0")
-            else:
-                used = Decimal("0")
+            # Capacity: show new request total vs limit (existing get_capacity doesn't filter by month)
+            used = total_m2
 
             remaining = max(Decimal("0"), monthly_limit - used)
             util_pct = round((used / monthly_limit) * 100, 1) if monthly_limit > 0 else Decimal("0")
