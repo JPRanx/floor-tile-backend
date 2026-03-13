@@ -345,6 +345,7 @@ class PlanningHorizonResponse(BaseSchema):
     )
     production_lead_days: int = Field(0, description="Factory production lead time in days")
     transport_to_port_days: int = Field(0, description="Days to transport from factory to port")
+    monthly_quota_m2: Decimal = Field(Decimal("0"), description="Factory monthly production quota in m2")
     factory_order_signal: Optional[FactoryOrderSignal] = Field(
         None, description="Factory-level production order signal"
     )

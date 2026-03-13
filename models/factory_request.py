@@ -31,6 +31,16 @@ class FactoryRequestProduct(BaseSchema):
     trend_adjustment_pct: Decimal
 
 
+class UpcomingBoat(BaseSchema):
+    """Boat in the horizon with factory-production eligibility."""
+    boat_name: str
+    departure_date: str
+    arrival_date: str
+    days_until_departure: int
+    is_estimated: bool
+    can_receive_production: bool
+
+
 class FactoryRequestSummary(BaseSchema):
     total_products: int
     total_pallets: int
@@ -45,8 +55,10 @@ class FactoryRequestHorizonResponse(BaseSchema):
     factory_name: str
     production_lead_days: int
     transport_to_port_days: int
+    monthly_quota_m2: Decimal
     estimated_ready_date: str
     products: list[FactoryRequestProduct]
+    upcoming_boats: list[UpcomingBoat]
     factory_order_signal: Optional[dict] = None
     summary: FactoryRequestSummary
     generated_at: str

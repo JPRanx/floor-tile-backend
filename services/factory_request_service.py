@@ -127,13 +127,28 @@ class FactoryRequestService:
             order_now=order_now,
         )
 
+        # Build upcoming boats with production eligibility
+        upcoming_boats = [
+            {
+                "boat_name": b.get("boat_name", ""),
+                "departure_date": b.get("departure_date", ""),
+                "arrival_date": b.get("arrival_date", ""),
+                "days_until_departure": b.get("days_until_departure", 0),
+                "is_estimated": b.get("is_estimated", False),
+                "can_receive_production": b.get("days_until_departure", 0) > lead_days,
+            }
+            for b in planning.get("projections", [])[:6]
+        ]
+
         return {
             "factory_id": factory_id,
             "factory_name": planning.get("factory_name", ""),
             "production_lead_days": planning.get("production_lead_days", 0),
             "transport_to_port_days": planning.get("transport_to_port_days", 0),
+            "monthly_quota_m2": planning.get("monthly_quota_m2", 0),
             "estimated_ready_date": ready_date.isoformat(),
             "products": products,
+            "upcoming_boats": upcoming_boats,
             "factory_order_signal": planning.get("factory_order_signal"),
             "summary": {
                 "total_products": len(products),

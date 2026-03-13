@@ -464,6 +464,7 @@ class ForwardSimulationService:
                 "projections": boat_projections,
                 "production_lead_days": int(factory.get("production_lead_days", 0)),
                 "transport_to_port_days": int(factory.get("transport_to_port_days", 0)),
+                "monthly_quota_m2": str(factory.get("monthly_quota_m2", 0)),
                 "factory_order_signal": factory_order_signal,
             }
 
