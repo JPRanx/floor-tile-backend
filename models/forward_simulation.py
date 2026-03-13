@@ -7,6 +7,7 @@ levels, urgency breakdowns, and draft status.
 See STANDARDS_VALIDATION.md for patterns.
 """
 
+from decimal import Decimal
 from pydantic import Field
 from typing import Optional
 from enum import Enum
