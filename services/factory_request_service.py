@@ -393,11 +393,13 @@ class FactoryRequestService:
                 estimated_ready = today + timedelta(days=lead_time)
 
             # Target boat for this product
+            target_boat_id: Optional[str] = None
             target_boat_name: Optional[str] = None
             target_boat_departure: Optional[str] = None
             for boat in boats:
                 boat_dep = _parse_date(boat["departure_date"])
                 if boat_dep > estimated_ready:
+                    target_boat_id = boat.get("id")
                     target_boat_name = boat.get("vessel_name", "")
                     target_boat_departure = boat["departure_date"]
                     break
@@ -426,6 +428,7 @@ class FactoryRequestService:
                 "velocity_m2_day": round(daily_vel, 2),
                 "coverage_days": coverage_days_raw,
                 "estimated_ready_date": estimated_ready.isoformat(),
+                "target_boat_id": target_boat_id,
                 "target_boat": target_boat_name,
                 "target_boat_departure": target_boat_departure,
                 "urgency": urgency,

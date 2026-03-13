@@ -19,6 +19,7 @@ class FactoryRequestCycleItem(BaseSchema):
     velocity_m2_day: Decimal
     coverage_days: int
     estimated_ready_date: Optional[str] = None
+    target_boat_id: Optional[str] = None
     target_boat: Optional[str] = None
     target_boat_departure: Optional[str] = None
     urgency: str  # critical, urgent, soon, ok
