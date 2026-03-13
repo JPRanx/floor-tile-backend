@@ -343,6 +343,8 @@ class PlanningHorizonResponse(BaseSchema):
         default_factory=list,
         description="Projected boats in chronological order"
     )
+    production_lead_days: int = Field(0, description="Factory production lead time in days")
+    transport_to_port_days: int = Field(0, description="Days to transport from factory to port")
     factory_order_signal: Optional[FactoryOrderSignal] = Field(
         None, description="Factory-level production order signal"
     )

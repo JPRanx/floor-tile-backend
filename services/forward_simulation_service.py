@@ -462,6 +462,8 @@ class ForwardSimulationService:
                 "horizon_months": months,
                 "generated_at": today.isoformat(),
                 "projections": boat_projections,
+                "production_lead_days": int(factory.get("production_lead_days", 0)),
+                "transport_to_port_days": int(factory.get("transport_to_port_days", 0)),
                 "factory_order_signal": factory_order_signal,
             }
 

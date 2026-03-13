@@ -1,5 +1,8 @@
 """
-Response models for Factory Request Horizon endpoint.
+Response models for Factory Request Builder.
+
+Factory requests are production orders — not boat assignments.
+Products are aggregated across the full FS horizon.
 """
 
 from decimal import Decimal
@@ -8,45 +11,42 @@ from typing import Optional
 from models.base import BaseSchema
 
 
-class FactoryRequestCycleItem(BaseSchema):
+class FactoryRequestProduct(BaseSchema):
+    """A product that needs factory production, aggregated across all boats."""
     product_id: str
     sku: str
-    description: Optional[str] = None
-    gap_m2: Decimal
-    gap_pallets: int
-    request_m2: Decimal
-    request_pallets: int
-    velocity_m2_day: Decimal
-    coverage_days: int
-    estimated_ready_date: Optional[str] = None
-    target_boat_id: Optional[str] = None
-    target_boat: Optional[str] = None
-    target_boat_departure: Optional[str] = None
-    urgency: str  # critical, urgent, soon, ok
-    should_request: bool
-    is_low_volume: bool
-    low_volume_reason: Optional[str] = None
+    total_factory_need_pallets: int
+    total_factory_need_m2: Decimal
+    first_gap_boat: str
+    first_gap_boat_id: str
+    first_gap_departure: str
+    ships_on_boat: Optional[str] = None
+    ships_on_boat_id: Optional[str] = None
+    ships_on_departure: Optional[str] = None
+    estimated_ready_date: str
+    daily_velocity_m2: Decimal
+    days_of_stock_at_first_gap: int
+    urgency: str  # overdue, order_now, upcoming
+    trend_direction: str
+    trend_adjustment_pct: Decimal
 
 
-class FactoryRequestCycle(BaseSchema):
-    month: str                          # "2026-03"
-    month_display: str                  # "Marzo 2026"
-    product_count: int
-    total_m2: Decimal
+class FactoryRequestSummary(BaseSchema):
+    total_products: int
     total_pallets: int
-    capacity_limit_m2: Decimal
-    capacity_used_m2: Decimal
-    capacity_remaining_m2: Decimal
-    utilization_pct: Decimal
-    deadline: Optional[str] = None
-    days_until_deadline: Optional[int] = None
-    signal_type: str
-    target_boats: list[str]
-    items: list[FactoryRequestCycleItem]
+    total_m2: Decimal
+    total_containers: int
+    overdue_count: int
+    order_now_count: int
 
 
 class FactoryRequestHorizonResponse(BaseSchema):
     factory_id: str
     factory_name: str
-    cycles: list[FactoryRequestCycle]
+    production_lead_days: int
+    transport_to_port_days: int
+    estimated_ready_date: str
+    products: list[FactoryRequestProduct]
+    factory_order_signal: Optional[dict] = None
+    summary: FactoryRequestSummary
     generated_at: str
