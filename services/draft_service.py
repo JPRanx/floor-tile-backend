@@ -288,16 +288,24 @@ class DraftService:
         try:
             boat_row = (
                 self.db.table("boat_schedules")
-                .select("status")
+                .select("status, departure_date")
                 .eq("id", boat_id)
                 .single()
                 .execute()
             )
             boat_status = boat_row.data.get("status") if boat_row.data else None
-            if boat_status in ("departed", "arrived"):
+            departure_date_str = boat_row.data.get("departure_date") if boat_row.data else None
+            # Check both status AND departure_date (status may not be updated)
+            is_departed_by_status = boat_status in ("departed", "arrived")
+            is_departed_by_date = False
+            if departure_date_str:
+                from datetime import date
+                dep_date = date.fromisoformat(departure_date_str[:10])
+                is_departed_by_date = dep_date < date.today()
+            if is_departed_by_status or is_departed_by_date:
                 raise DatabaseError(
                     "update",
-                    f"Cannot modify draft for boat with status '{boat_status}'. Boat has already departed."
+                    f"Cannot modify draft — boat has already departed ({departure_date_str}). Read only."
                 )
         except DatabaseError:
             raise

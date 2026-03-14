@@ -18,7 +18,7 @@ from config.shipping import M2_PER_PALLET
 logger = structlog.get_logger()
 
 PALLETS_PER_CONTAINER = 13  # ~13.73 by weight, floor to be safe
-URGENCY_ORDER = {"overdue": 0, "order_now": 1, "upcoming": 2}
+URGENCY_ORDER = {"sin_stock": 0, "critico": 1, "pedir_ahora": 2, "planificar": 3}
 
 
 def _parse_date(d: str) -> date:
@@ -77,15 +77,17 @@ class FactoryRequestService:
             total_pallets = agg["total_need_pallets"]
             total_m2 = Decimal(str(total_pallets)) * M2_PER_PALLET
 
-            # Urgency from when the first gap appears vs lead time
-            first_gap_dep = _parse_date(agg["first_gap_departure"])
-            days_until_gap = (first_gap_dep - today).days
-            if days_until_gap < lead_days:
-                urgency = "overdue"
-            elif days_until_gap < lead_days + 30:
-                urgency = "order_now"
+            # Urgency from stock coverage vs production lead time
+            # (not boat timing — that's a warehouse concern, not a factory concern)
+            stock_days = agg["days_of_stock_at_first_gap"]
+            if stock_days < 0:
+                urgency = "sin_stock"       # Already stocked out — order immediately
+            elif stock_days < lead_days:
+                urgency = "critico"         # Will stock out before production arrives
+            elif stock_days < lead_days + 30:
+                urgency = "pedir_ahora"     # Tight — order now
             else:
-                urgency = "upcoming"
+                urgency = "planificar"      # Comfortable — plan ahead
 
             products.append({
                 "product_id": agg["product_id"],
@@ -115,16 +117,16 @@ class FactoryRequestService:
         # Summary
         total_pallets = sum(p["total_factory_need_pallets"] for p in products)
         total_m2 = sum(p["total_factory_need_m2"] for p in products)
-        overdue = sum(1 for p in products if p["urgency"] == "overdue")
-        order_now = sum(1 for p in products if p["urgency"] == "order_now")
+        sin_stock = sum(1 for p in products if p["urgency"] == "sin_stock")
+        critico = sum(1 for p in products if p["urgency"] == "critico")
 
         logger.info(
             "factory_request_horizon",
             factory_id=factory_id,
             products=len(products),
             total_pallets=total_pallets,
-            overdue=overdue,
-            order_now=order_now,
+            sin_stock=sin_stock,
+            critico=critico,
         )
 
         # Build upcoming boats with production eligibility
@@ -155,8 +157,8 @@ class FactoryRequestService:
                 "total_pallets": total_pallets,
                 "total_m2": round(total_m2, 2),
                 "total_containers": math.ceil(total_pallets / PALLETS_PER_CONTAINER) if total_pallets > 0 else 0,
-                "overdue_count": overdue,
-                "order_now_count": order_now,
+                "sin_stock_count": sin_stock,
+                "critico_count": critico,
             },
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }

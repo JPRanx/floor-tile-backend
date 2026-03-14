@@ -46,8 +46,8 @@ class FactoryRequestSummary(BaseSchema):
     total_pallets: int
     total_m2: Decimal
     total_containers: int
-    overdue_count: int
-    order_now_count: int
+    sin_stock_count: int
+    critico_count: int
 
 
 class FactoryRequestHorizonResponse(BaseSchema):
