@@ -8,6 +8,7 @@ Drafts represent product selections being prepared for a factory order on a spec
 import hashlib
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 import structlog
@@ -392,6 +393,11 @@ class DraftService:
             # Auto-assign BL 1 for unit-based factories (e.g. Muebles — low volume, no container split)
             auto_bl = self._is_unit_based_factory(factory_id)
 
+            # Defense-in-depth: cap quantities at factory available stock
+            warnings = []
+            if items:
+                warnings = self._validate_quantities_vs_factory_stock(factory_id, items)
+
             if items:
                 rows = []
                 for item in items:
@@ -421,8 +427,9 @@ class DraftService:
                             logger.error("draft_items_rollback_failed", draft_id=draft_id)
                     raise DatabaseError("insert", f"Failed to save draft items: {insert_err}")
 
-            # Return full draft with items
+            # Return full draft with items and any validation warnings
             self._attach_items(draft)
+            draft["warnings"] = warnings
 
             # Soft cascade: flag later drafts ONLY if content actually changed
             new_hash = self._compute_items_hash(items)
@@ -456,6 +463,72 @@ class DraftService:
                 error=str(e),
             )
             raise DatabaseError("upsert", str(e))
+
+    def _validate_quantities_vs_factory_stock(
+        self, factory_id: str, items: list[dict]
+    ) -> list[str]:
+        """
+        Cap draft item quantities at factory available stock (defense-in-depth).
+
+        Frontend already validates this, but backend enforces as a safety net.
+        Mutates items in-place if capping is needed.
+
+        Returns:
+            List of warning strings for any capped items
+        """
+        M2_PER_PALLET = Decimal("134.4")
+        warnings: list[str] = []
+
+        try:
+            product_ids = [item["product_id"] for item in items]
+            if not product_ids:
+                return warnings
+
+            # Get latest factory stock per product
+            stock_result = (
+                self.db.table("factory_snapshots")
+                .select("product_id, factory_available_m2, snapshot_date")
+                .in_("product_id", product_ids)
+                .order("snapshot_date", desc=True)
+                .execute()
+            )
+
+            # Keep only latest snapshot per product
+            factory_stock: dict[str, Decimal] = {}
+            for row in stock_result.data or []:
+                pid = row["product_id"]
+                if pid not in factory_stock:
+                    factory_stock[pid] = Decimal(str(row["factory_available_m2"]))
+
+            # Cap items that exceed factory stock
+            for item in items:
+                pid = item["product_id"]
+                available = factory_stock.get(pid, Decimal("0"))
+                max_pallets = int(available / M2_PER_PALLET)
+                selected = item.get("selected_pallets", 0)
+
+                if selected > max_pallets:
+                    logger.warning(
+                        "draft_quantity_capped",
+                        product_id=pid,
+                        requested=selected,
+                        capped_to=max_pallets,
+                        factory_available_m2=str(available),
+                    )
+                    item["selected_pallets"] = max_pallets
+                    warnings.append(
+                        f"{pid}: {selected}p → {max_pallets}p (factory: {available} m²)"
+                    )
+
+        except Exception as e:
+            # Non-fatal — if we can't validate, log and continue
+            logger.warning(
+                "factory_stock_validation_failed",
+                factory_id=factory_id,
+                error=str(e),
+            )
+
+        return warnings
 
     def _is_unit_based_factory(self, factory_id: str) -> bool:
         """Check if factory is unit-based (e.g. Muebles) vs m2-based (floor tiles)."""

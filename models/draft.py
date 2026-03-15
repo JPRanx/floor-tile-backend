@@ -126,3 +126,4 @@ class DraftResponse(BaseSchema, TimestampMixin):
     last_edited_at: Optional[str] = Field(None, description="Last time the draft was edited")
     ordered_at: Optional[str] = Field(None, description="When the draft was marked as ordered")
     items: list[DraftItemResponse] = Field(..., description="Product selections in this draft")
+    warnings: list[str] = Field(default_factory=list, description="Validation warnings (e.g. quantity capped at factory stock)")
