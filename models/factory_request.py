@@ -26,9 +26,10 @@ class FactoryRequestProduct(BaseSchema):
     estimated_ready_date: str
     daily_velocity_m2: Decimal
     days_of_stock_at_first_gap: int
-    urgency: str  # overdue, order_now, upcoming
+    urgency: str  # sin_stock, critico, pedir_ahora, planificar
     trend_direction: str
     trend_adjustment_pct: Decimal
+    act_by_date: Optional[str] = None  # deadline to place factory order
 
 
 class UpcomingBoat(BaseSchema):

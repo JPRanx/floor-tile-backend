@@ -89,6 +89,12 @@ class FactoryRequestService:
             else:
                 urgency = "planificar"      # Comfortable — plan ahead
 
+            # act_by_date = first gap departure minus lead time
+            # If you order by this date, production arrives before the gap
+            first_gap_dep = _parse_date(agg["first_gap_departure"])
+            act_by = first_gap_dep - timedelta(days=lead_days)
+            act_by_str = act_by.isoformat() if act_by >= today else None  # past = overdue, show null
+
             products.append({
                 "product_id": agg["product_id"],
                 "sku": agg["sku"],
@@ -106,6 +112,7 @@ class FactoryRequestService:
                 "urgency": urgency,
                 "trend_direction": agg["trend_direction"],
                 "trend_adjustment_pct": agg["trend_adjustment_pct"],
+                "act_by_date": act_by_str,
             })
 
         # Sort by urgency, then by days_of_stock ascending (worst first)
