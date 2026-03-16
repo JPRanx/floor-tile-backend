@@ -176,6 +176,37 @@ async def upload_production_schedule(
 # QUERY ROUTES
 # ===================
 
+@router.get("/current")
+async def get_current_schedule():
+    """
+    Get all current production schedule items (no date filter).
+    Used by intelligence briefing to cross-reference against gap analysis.
+    """
+    try:
+        from config import get_supabase_client
+        db = get_supabase_client()
+        result = (
+            db.table("production_schedule")
+            .select("referencia, product_id, status, requested_m2, scheduled_start_date, products(sku)")
+            .order("scheduled_start_date")
+            .execute()
+        )
+        items = []
+        for row in result.data:
+            sku = row.get("products", {}).get("sku") if row.get("products") else None
+            items.append({
+                "referencia": row.get("referencia"),
+                "sku": sku,
+                "product_id": row.get("product_id"),
+                "status": row.get("status", "scheduled"),
+                "requested_m2": row.get("requested_m2"),
+                "scheduled_start_date": row.get("scheduled_start_date"),
+            })
+        return {"data": items, "total": len(items)}
+    except Exception as e:
+        return handle_error(e)
+
+
 @router.get("/upcoming", response_model=UpcomingProductionResponse)
 async def get_upcoming_production(
     days_ahead: int = Query(30, ge=1, le=90, description="Days to look ahead"),
