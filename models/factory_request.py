@@ -51,6 +51,31 @@ class FactoryRequestSummary(BaseSchema):
     critico_count: int
 
 
+class InProductionItem(BaseSchema):
+    """Product tracked in CI's production schedule."""
+    product_id: str
+    sku: str
+    production_status: str  # scheduled, in_progress, completed
+    requested_m2: Decimal
+    completed_m2: Decimal = Decimal("0")
+    scheduled_date: Optional[str] = None
+    target_boat: Optional[str] = None
+    target_boat_departure: Optional[str] = None
+    daily_velocity_m2: Optional[Decimal] = None
+    days_of_stock_at_first_gap: Optional[int] = None
+    urgency: Optional[str] = None
+    piggyback_m2: Optional[Decimal] = None
+
+
+class BoatProductionGroup(BaseSchema):
+    """Products grouped by target boat."""
+    boat_name: str
+    departure_date: str
+    arrival_date: str
+    products: list[dict] = []
+    total_m2: Decimal = Decimal("0")
+
+
 class FactoryRequestHorizonResponse(BaseSchema):
     factory_id: str
     factory_name: str
@@ -59,6 +84,8 @@ class FactoryRequestHorizonResponse(BaseSchema):
     monthly_quota_m2: Decimal
     estimated_ready_date: str
     products: list[FactoryRequestProduct]
+    in_production: list[InProductionItem] = []
+    by_boat: list[BoatProductionGroup] = []
     upcoming_boats: list[UpcomingBoat]
     factory_order_signal: Optional[dict] = None
     summary: FactoryRequestSummary

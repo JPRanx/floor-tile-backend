@@ -807,16 +807,8 @@ def generate_report(request: GenerateReportRequest) -> StreamingResponse:
                 add_item.suggested_additional_m2 = Decimal(str(item.pallets)) * M2_PER_PALLET_FACTORY
                 selected_add.append(add_item)
 
-    # Match factory request items
+    # Section 3 (Factory Request) moved to Factory Request Builder — always empty
     selected_factory: List[FactoryRequestItem] = []
-    if order_data.factory_request_summary:
-        items_by_id = {i.product_id: i for i in order_data.factory_request_summary.items}
-        for item in request.factory_request_items:
-            if item.product_id in items_by_id:
-                factory_item = items_by_id[item.product_id]
-                factory_item.request_pallets = item.pallets
-                factory_item.request_m2 = Decimal(str(item.pallets)) * M2_PER_PALLET_FACTORY
-                selected_factory.append(factory_item)
 
     # Generate report
     export_service = get_export_service()

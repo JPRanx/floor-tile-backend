@@ -348,8 +348,8 @@ class OrderBuilderService(
         well_covered = sort_by_selection_then_sku(well_covered)
         your_call = sort_by_selection_then_sku(your_call)
 
-        # Step 8: Calculate three-section summaries
-        warehouse_summary, add_to_production_summary, factory_request_summary = \
+        # Step 8: Calculate two-section summaries (Section 3 moved to Factory Request Builder)
+        warehouse_summary, add_to_production_summary = \
             self._calculate_section_summaries(all_products, boat, num_bls)
 
         # Step 9: Calculate recommended BL count (based on true need) and available BLs
@@ -427,10 +427,10 @@ class OrderBuilderService(
             well_covered=well_covered,
             your_call=your_call,
             summary=summary,
-            # Three-section summaries
+            # Two-section summaries (Section 3 moved to Factory Request Builder)
             warehouse_order_summary=warehouse_summary,
             add_to_production_summary=add_to_production_summary,
-            factory_request_summary=factory_request_summary,
+            factory_request_summary=None,
             constraint_analysis=constraint_analysis,
             summary_reasoning=summary_reasoning,
             # Unable to ship alerts

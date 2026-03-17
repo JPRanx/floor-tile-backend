@@ -1138,8 +1138,9 @@ class OrderBuilderResponse(BaseSchema):
     add_to_production_summary: Optional[AddToProductionSummary] = Field(
         None, description="Section 2: Add to scheduled production (fast)"
     )
+    # Deprecated: Section 3 moved to Factory Request Builder
     factory_request_summary: Optional[FactoryRequestSummary] = Field(
-        None, description="Section 3: New factory requests (future)"
+        None, description="Deprecated: Always None. Section 3 moved to Factory Request Builder."
     )
 
     # Constraint analysis (explains capacity limits)
