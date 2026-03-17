@@ -17,6 +17,7 @@ class DraftStatus(str, Enum):
     ACTION_NEEDED = "action_needed"
     ORDERED = "ordered"
     CONFIRMED = "confirmed"
+    SKIPPED = "skipped"
 
 
 class DraftItemCreate(BaseSchema):
