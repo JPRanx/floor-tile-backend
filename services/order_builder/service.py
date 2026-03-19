@@ -158,9 +158,15 @@ class OrderBuilderService(
                 max_containers=5,
             )
 
+        # Pre-fetch metrics once — shared by RecommendationService, FS, and TrendService
+        from services.metrics_service import get_metrics_service
+        prefetched_metrics = get_metrics_service().get_all_product_metrics()
+
         # Step 2: Get recommendations (has coverage gap, confidence, priority)
         t1 = time.time()
-        recommendations = self.recommendation_service.get_recommendations(factory_id=factory_id)
+        recommendations = self.recommendation_service.get_recommendations(
+            factory_id=factory_id, prefetched_metrics=prefetched_metrics
+        )
         timings["2_recommendations"] = round(time.time() - t1, 2)
 
         # Step 2a: Filter out excluded SKUs (for recalculate)
@@ -233,7 +239,7 @@ class OrderBuilderService(
 
         # Step 2b: Get trend data for products
         t2 = time.time()
-        trend_data = self._get_product_trends()
+        trend_data = self._get_product_trends(prefetched_metrics)
         timings["3_trends"] = round(time.time() - t2, 2)
 
         # Step 2c: Calculate dynamic coverage buffer based on next boat arrival
@@ -246,7 +252,7 @@ class OrderBuilderService(
             try:
                 from services.forward_simulation_service import get_forward_simulation_service
                 fwd_sim = get_forward_simulation_service()
-                projection_data = fwd_sim.get_projection_for_boat(factory_id, boat.boat_id)
+                projection_data = fwd_sim.get_projection_for_boat(factory_id, boat.boat_id, prefetched_metrics=prefetched_metrics)
                 if projection_data:
                     projection_map = projection_data["products"]
                     logger.info(

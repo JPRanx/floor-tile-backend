@@ -236,6 +236,7 @@ class TrendService:
         comparison_period_days: int = 90,
         sort_by: str = "velocity",
         limit: int = 50,
+        prefetched_metrics=None,
     ) -> List[ProductTrend]:
         """
         Calculate trends for all products.
@@ -274,10 +275,10 @@ class TrendService:
 
         # Get days_of_stock from MetricsService (single source of truth)
         # This ensures Dashboard, Order Builder, and Intelligence all show the same value
-        # Forward period_days to ensure consistent velocity calculation
-        metrics_service = get_metrics_service()
-        all_metrics = metrics_service.get_all_product_metrics(period_days=period_days)
-        metrics_by_product = {m.product_id: m for m in all_metrics}
+        if prefetched_metrics is None:
+            metrics_service = get_metrics_service()
+            prefetched_metrics = metrics_service.get_all_product_metrics(period_days=period_days)
+        metrics_by_product = {m.product_id: m for m in prefetched_metrics}
 
         # Also get inventory for current_stock_m2 display
         inventory_by_product: Dict[str, Decimal] = {}

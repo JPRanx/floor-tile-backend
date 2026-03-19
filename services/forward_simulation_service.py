@@ -59,7 +59,7 @@ class ForwardSimulationService:
     # Demand intelligence (trend + customer demand)
     # ------------------------------------------------------------------
 
-    def _get_trend_factors(self, products: list[dict]) -> dict[str, dict]:
+    def _get_trend_factors(self, products: list[dict], prefetched_metrics=None) -> dict[str, dict]:
         """Fetch trend direction/strength/factor per product_id.
 
         Delegates to shared demand_intelligence module for consistent
@@ -71,7 +71,7 @@ class ForwardSimulationService:
         from services.trend_service import get_trend_service
         trend_service = get_trend_service()
 
-        shared = compute_trend_factors(trend_service, products)
+        shared = compute_trend_factors(trend_service, products, prefetched_metrics)
 
         # Filter to product_id keys only (shared module keys by both SKU and pid)
         pid_set = {p["id"] for p in products}
@@ -107,7 +107,7 @@ class ForwardSimulationService:
     # Public API
     # ------------------------------------------------------------------
 
-    def get_planning_horizon(self, factory_id: str, months: int = 3) -> dict:
+    def get_planning_horizon(self, factory_id: str, months: int = 3, prefetched_metrics=None) -> dict:
         """
         Project orders for upcoming boats for a specific factory.
 
@@ -136,7 +136,7 @@ class ForwardSimulationService:
             boats = _merge_with_phantom_boats(real_boats, routes, today, horizon_end)
             products = self._get_active_products(factory_id)
             inventory_map = self._get_latest_inventory(products)
-            velocity_map = self._get_daily_velocities(products)
+            velocity_map = self._get_daily_velocities(products, prefetched_metrics)
             drafts_map = self._get_existing_drafts(factory_id, boats)
 
             # Enriched supply sources
@@ -146,7 +146,7 @@ class ForwardSimulationService:
             in_transit_drafts = self._get_in_transit_drafts(factory_id, horizon_boat_ids)
 
             # Demand intelligence (trend + customer demand)
-            trend_map = self._get_trend_factors(products)
+            trend_map = self._get_trend_factors(products, prefetched_metrics)
             customer_demand_map = self._get_customer_demand(products)
 
             # Build running stock tracker — warehouse only (no lump-sum in_transit)
@@ -346,7 +346,7 @@ class ForwardSimulationService:
             raise DatabaseError("select", str(e))
 
     def get_projection_for_boat(
-        self, factory_id: str, boat_id: str
+        self, factory_id: str, boat_id: str, prefetched_metrics=None
     ) -> Optional[dict]:
         """
         Run forward simulation and extract per-product projections for a specific boat.
@@ -361,7 +361,7 @@ class ForwardSimulationService:
         the simulation fails.
         """
         try:
-            horizon = self.get_planning_horizon(factory_id)
+            horizon = self.get_planning_horizon(factory_id, prefetched_metrics=prefetched_metrics)
             projections = horizon.get("projections", [])
             if not projections:
                 return None
@@ -1298,14 +1298,15 @@ class ForwardSimulationService:
             logger.error("fetch_in_transit_drafts_failed", error=str(e))
             return {}  # Non-fatal
 
-    def _get_daily_velocities(self, products: list[dict]) -> dict[str, Decimal]:
+    def _get_daily_velocities(self, products: list[dict], prefetched_metrics=None) -> dict[str, Decimal]:
         """Get daily velocity per product from MetricsService (90d, single source of truth)."""
         if not products:
             return {}
 
-        from services.metrics_service import get_metrics_service
-        metrics = get_metrics_service().get_all_product_metrics()
-        velocity_map = {m.product_id: m.coverage.velocity_m2_day for m in metrics}
+        if prefetched_metrics is None:
+            from services.metrics_service import get_metrics_service
+            prefetched_metrics = get_metrics_service().get_all_product_metrics()
+        velocity_map = {m.product_id: m.coverage.velocity_m2_day for m in prefetched_metrics}
         logger.debug("velocities_from_metrics", products_with_velocity=len(velocity_map))
         return velocity_map
 

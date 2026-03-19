@@ -13,7 +13,7 @@ logger = structlog.get_logger(__name__)
 class AnalysisMixin:
     """Product analysis: builds ProductAnalysis from FS projection data."""
 
-    def _get_product_trends(self) -> dict[str, dict]:
+    def _get_product_trends(self, prefetched_metrics=None) -> dict[str, dict]:
         """Fetch trend data via shared demand_intelligence module.
 
         Returns dict keyed by SKU with trend metrics including:
@@ -23,7 +23,7 @@ class AnalysisMixin:
         """
         # Delegate to shared module — pass empty products list
         # so results are keyed by SKU (not product_id)
-        return compute_trend_factors(self.trend_service, [])
+        return compute_trend_factors(self.trend_service, [], prefetched_metrics)
 
     @staticmethod
     def _derive_action_type(urgency: str, suggested_pallets: int) -> str:

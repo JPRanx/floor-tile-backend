@@ -69,7 +69,7 @@ class RecommendationService:
         self.low_volume_min_records = settings.low_volume_min_records  # 2 records minimum
 
     def allocate_warehouse_slots(
-        self, factory_id: Optional[str] = None
+        self, factory_id: Optional[str] = None, prefetched_metrics=None
     ) -> tuple[list[ProductAllocation], Decimal]:
         """
         Calculate target warehouse allocation for each product.
@@ -124,10 +124,11 @@ class RecommendationService:
         )
 
         # Get 90d velocity from MetricsService (same source as FS and everywhere else)
-        metrics_service = get_metrics_service()
-        all_metrics = metrics_service.get_all_product_metrics()
+        if prefetched_metrics is None:
+            metrics_service = get_metrics_service()
+            prefetched_metrics = metrics_service.get_all_product_metrics()
         metrics_velocity_map = {
-            m.product_id: m.coverage.velocity_m2_day for m in all_metrics
+            m.product_id: m.coverage.velocity_m2_day for m in prefetched_metrics
         }
 
         # Pre-fetch unfulfilled demand for all products (one query)
@@ -256,7 +257,7 @@ class RecommendationService:
         return allocations, scale_factor
 
     def get_recommendations(
-        self, factory_id: Optional[str] = None
+        self, factory_id: Optional[str] = None, prefetched_metrics=None
     ) -> OrderRecommendations:
         """
         Generate order recommendations for all products.
@@ -282,7 +283,7 @@ class RecommendationService:
             is_unit_based = bool(unit_cfg and not unit_cfg["is_m2_based"])
 
         # Step 1: Get allocations
-        allocations, scale_factor = self.allocate_warehouse_slots(factory_id=factory_id)
+        allocations, scale_factor = self.allocate_warehouse_slots(factory_id=factory_id, prefetched_metrics=prefetched_metrics)
         allocation_map = {a.product_id: a for a in allocations}
 
         # Build per-product pallet factor for unit-based factories

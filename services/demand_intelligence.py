@@ -68,7 +68,7 @@ def classify_urgency(days_of_stock: Optional[int]) -> str:
     return "ok"
 
 
-def compute_trend_factors(trend_service, products: list[dict]) -> dict[str, dict]:
+def compute_trend_factors(trend_service, products: list[dict], prefetched_metrics=None) -> dict[str, dict]:
     """Compute trend direction/strength/factor per product.
 
     Uses dual-velocity comparison (90d vs 180d) with seasonal dampening.
@@ -85,13 +85,17 @@ def compute_trend_factors(trend_service, products: list[dict]) -> dict[str, dict
         trend_service: TrendService instance
         products: List of product dicts with "id" and "sku" keys.
                   If empty, returns keyed by SKU only (for OB compatibility).
+        prefetched_metrics: Optional pre-fetched MetricsService results.
+                           Avoids redundant DB queries when called from OB.
     """
     try:
         trends_90d = trend_service.get_product_trends(
             period_days=90, comparison_period_days=90, limit=200,
+            prefetched_metrics=prefetched_metrics,
         )
         trends_180d = trend_service.get_product_trends(
             period_days=180, comparison_period_days=180, limit=200,
+            prefetched_metrics=prefetched_metrics,
         )
 
         velocity_180d_by_sku = {
