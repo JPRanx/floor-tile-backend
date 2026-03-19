@@ -1499,8 +1499,23 @@ async def parse_in_transit(
         products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
 
         # Parse the dispatch file
-        from parsers.dispatch_parser import parse_dispatch_excel
+        from parsers.dispatch_parser import parse_dispatch_excel, normalize_unmatched_sku
         parse_result = parse_dispatch_excel(content, products, [])
+
+        # Auto-create unmatched products (if CI is shipping them, they're real)
+        if parse_result.unmatched_skus:
+            from models.product import ProductCreate, Category
+            new_products = [
+                ProductCreate(sku=normalize_unmatched_sku(raw), category=Category.MADERAS)
+                for raw in parse_result.unmatched_skus
+            ]
+            created, _ = product_service.bulk_upsert(new_products)
+            if created > 0:
+                logger.info("dispatch_auto_created_products", count=created,
+                            skus=[p.sku for p in new_products])
+                # Re-parse with expanded product list so new products get matched
+                products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+                parse_result = parse_dispatch_excel(content, products, [])
 
         # Get candidate boats: future boats with optional draft info
         db = get_supabase_client()
@@ -1648,8 +1663,23 @@ async def upload_in_transit(
         products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
 
         # Parse the dispatch file
-        from parsers.dispatch_parser import parse_dispatch_excel
+        from parsers.dispatch_parser import parse_dispatch_excel, normalize_unmatched_sku
         parse_result = parse_dispatch_excel(content, products, excluded)
+
+        # Auto-create unmatched products (if CI is shipping them, they're real)
+        if parse_result.unmatched_skus:
+            from models.product import ProductCreate, Category
+            new_products = [
+                ProductCreate(sku=normalize_unmatched_sku(raw), category=Category.MADERAS)
+                for raw in parse_result.unmatched_skus
+            ]
+            created, _ = product_service.bulk_upsert(new_products)
+            if created > 0:
+                logger.info("dispatch_auto_created_products", count=created,
+                            skus=[p.sku for p in new_products])
+                # Re-parse with expanded product list
+                products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+                parse_result = parse_dispatch_excel(content, products, excluded)
 
         # Get database client
         db = get_supabase_client()

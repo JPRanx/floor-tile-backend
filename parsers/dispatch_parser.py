@@ -53,6 +53,21 @@ def _normalize_dispatch_sku(raw: str) -> str:
     return sku.strip()
 
 
+def normalize_unmatched_sku(raw: str) -> str:
+    """Convert a raw dispatch SKU into a clean product SKU for auto-creation.
+
+    Strips dimension suffixes (51X51, 51X51-1) and format codes like (T),
+    preserving the product name as it should appear in the products table.
+    """
+    sku = raw.strip().upper()
+    # Remove dimension suffix like "51X51" or "51X51-1"
+    sku = re.sub(r'\s+51X51(-\d+)?$', '', sku)
+    sku = re.sub(r'\s*\(T\)(\s*[\d,X\-]+)?$', '', sku)
+    # Fix encoding issues
+    sku = sku.replace("\ufffd", "").replace("Ã", "A")
+    return sku.strip()
+
+
 def _build_sku_mapping(products: list) -> dict[str, tuple[str, str]]:
     """Build normalized SKU -> (product_id, sku) mapping with variants."""
     mapping: dict[str, tuple[str, str]] = {}
