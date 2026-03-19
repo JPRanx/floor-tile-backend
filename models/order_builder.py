@@ -474,7 +474,7 @@ class OrderBuilderProduct(BaseSchema):
     pending_order_pallets: int = Field(default=0, description="Pallets already ordered")
     pending_order_boat: Optional[str] = Field(default=None, description="Which boat the pending order is on")
 
-    # Forward simulation fields (populated when use_projection=True)
+    # Forward simulation fields
     projected_stock_m2: Optional[Decimal] = Field(
         None,
         description="Projected stock at this boat's arrival, accounting for earlier boats' drafts",

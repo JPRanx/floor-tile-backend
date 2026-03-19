@@ -398,7 +398,7 @@ class TrendService:
         sort_keys = {
             "velocity": lambda t: t.velocity_change_pct,
             "revenue": lambda t: t.total_revenue_usd,
-            "volume": lambda t: t.daily_velocity_m2,
+            "volume": lambda t: t.current_velocity_m2_day,
         }
         sort_key = sort_keys.get(sort_by, sort_keys["velocity"])
         trends.sort(key=sort_key, reverse=True)

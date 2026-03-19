@@ -21,17 +21,17 @@ from config.shipping import (
     M2_PER_PALLET,
     WAREHOUSE_BUFFER_DAYS,
     ORDERING_CYCLE_DAYS,
-    SEASONAL_DAMPENING,
 )
 from models.boat_schedule import ORDER_DEADLINE_DAYS, HARD_DEADLINE_DAYS
 from services.unit_config_service import get_unit_config
+from services.demand_intelligence import (
+    classify_urgency as _classify_urgency,
+    compute_trend_factors,
+    compute_customer_demand,
+    URGENCY_SOON_DAYS,
+)
 
 logger = structlog.get_logger(__name__)
-
-# Urgency thresholds in days of stock at arrival
-URGENCY_CRITICAL_DAYS = 7
-URGENCY_URGENT_DAYS = 14
-URGENCY_SOON_DAYS = 30
 
 # Confidence bands by days out from today
 CONFIDENCE_BANDS = [
@@ -41,29 +41,6 @@ CONFIDENCE_BANDS = [
     (90, "low", 30, 49),
 ]
 CONFIDENCE_DEFAULT = ("very_low", 10, 29)
-
-VELOCITY_LOOKBACK_DAYS = 90
-
-# Trend thresholds (mirrored from OB for coherence)
-_GROWING_THRESHOLD = Decimal("1.20")
-_DECLINING_THRESHOLD = Decimal("0.80")
-
-
-def _calculate_trend_factor(direction: str, strength: str) -> Decimal:
-    """Return a multiplier for trend-adjusted demand.
-
-    Same percentages as OB's ``_calculate_trend_adjustment``:
-    up/strong → 1.20, up/moderate → 1.10, up/weak → 1.05,
-    down/strong → 0.80, down/moderate → 0.90, down/weak → 0.95,
-    stable → 1.0.
-    """
-    if direction == "up":
-        return {"strong": Decimal("1.20"), "moderate": Decimal("1.10"),
-                "weak": Decimal("1.05")}.get(strength, Decimal("1.0"))
-    if direction == "down":
-        return {"strong": Decimal("0.80"), "moderate": Decimal("0.90"),
-                "weak": Decimal("0.95")}.get(strength, Decimal("1.0"))
-    return Decimal("1.0")
 
 
 class ForwardSimulationService:
@@ -83,165 +60,48 @@ class ForwardSimulationService:
     # ------------------------------------------------------------------
 
     def _get_trend_factors(self, products: list[dict]) -> dict[str, dict]:
-        """Fetch trend direction/strength per product_id.
+        """Fetch trend direction/strength/factor per product_id.
 
-        Replicates OB's dual-velocity comparison (90d vs 180d) with seasonal
-        dampening so both views use the same trend classification.
+        Delegates to shared demand_intelligence module for consistent
+        dual-velocity comparison (90d vs 180d) with seasonal dampening.
 
         Returns ``{product_id: {"direction": str, "strength": str,
         "factor": Decimal}}`` where factor is the multiplier (1.0 = stable).
         """
-        try:
-            from services.trend_service import get_trend_service
-            trend_service = get_trend_service()
+        from services.trend_service import get_trend_service
+        trend_service = get_trend_service()
 
-            trends_90d = trend_service.get_product_trends(
-                period_days=90, comparison_period_days=90, limit=200,
-            )
-            trends_180d = trend_service.get_product_trends(
-                period_days=180, comparison_period_days=180, limit=200,
-            )
+        shared = compute_trend_factors(trend_service, products)
 
-            # Build lookups keyed by SKU
-            velocity_180d_by_sku = {
-                t.sku: t.current_velocity_m2_day for t in trends_180d
+        # Filter to product_id keys only (shared module keys by both SKU and pid)
+        pid_set = {p["id"] for p in products}
+        return {
+            pid: {
+                "direction": v["dampened_direction"],
+                "strength": v["strength"],
+                "factor": v["factor"],
             }
-
-            # SKU → product_id mapping
-            sku_to_pid = {p["sku"]: p["id"] for p in products}
-
-            current_month = date.today().month
-            seasonal_factor = SEASONAL_DAMPENING.get(current_month, 1.0)
-
-            result: dict[str, dict] = {}
-            for t in trends_90d:
-                pid = sku_to_pid.get(t.sku)
-                if not pid:
-                    continue
-
-                velocity_90d = t.current_velocity_m2_day
-                velocity_180d = velocity_180d_by_sku.get(t.sku, Decimal("0"))
-
-                # Dual-velocity comparison with seasonal dampening
-                if velocity_180d > 0:
-                    trend_ratio_raw = velocity_90d / velocity_180d
-                    trend_ratio = Decimal("1.0") + (
-                        trend_ratio_raw - Decimal("1.0")
-                    ) * Decimal(str(seasonal_factor))
-                else:
-                    trend_ratio = Decimal("1.0")
-
-                # Direction from 90d trend object
-                direction = (
-                    t.direction.value
-                    if hasattr(t.direction, "value")
-                    else str(t.direction)
-                )
-                strength = (
-                    t.strength.value
-                    if hasattr(t.strength, "value")
-                    else str(t.strength)
-                )
-
-                # Override direction if dampened ratio disagrees
-                if trend_ratio >= _GROWING_THRESHOLD:
-                    direction = "up"
-                elif trend_ratio <= _DECLINING_THRESHOLD:
-                    direction = "down"
-                else:
-                    direction = "stable"
-
-                factor = _calculate_trend_factor(direction, strength)
-
-                result[pid] = {
-                    "direction": direction,
-                    "strength": strength,
-                    "factor": factor,
-                }
-
-            return result
-
-        except Exception as e:
-            logger.warning("fs_trend_fetch_failed", error=str(e))
-            return {}
+            for pid, v in shared.items()
+            if pid in pid_set
+        }
 
     def _get_customer_demand(self, products: list[dict]) -> dict[str, dict]:
         """Fetch customer demand scores per product_id.
 
-        Replicates OB's customer demand scoring so both views use the same
-        expected-m² values.
+        Delegates to shared demand_intelligence module for consistent
+        scoring with OB.
 
         Returns ``{product_id: {"expected_m2": Decimal, "score": int,
         "customers_count": int, "customer_names": list[str]}}``.
         """
-        try:
-            from services.trend_service import get_trend_service
-            trend_service = get_trend_service()
+        from services.trend_service import get_trend_service
+        trend_service = get_trend_service()
 
-            customer_trends = trend_service.get_customer_trends(
-                period_days=90, comparison_period_days=90, limit=100,
-            )
+        shared = compute_customer_demand(trend_service, products)
 
-            sku_to_pid = {p["sku"]: p["id"] for p in products}
-            tier_weights = {"A": 100, "B": 50, "C": 25}
-
-            sku_demand: dict[str, dict] = {}
-
-            for customer in customer_trends:
-                if not customer.avg_days_between_orders or customer.order_count < 2:
-                    continue
-                if customer.days_overdue < -14:
-                    continue
-
-                days_overdue = customer.days_overdue
-                if days_overdue <= 14:
-                    overdue_mult = 1.0
-                elif days_overdue <= 30:
-                    overdue_mult = 1.5
-                elif days_overdue <= 60:
-                    overdue_mult = 2.0
-                else:
-                    overdue_mult = 2.5
-
-                tier = (
-                    customer.tier.value
-                    if hasattr(customer.tier, "value")
-                    else str(customer.tier)
-                )
-                customer_score = int(tier_weights.get(tier, 25) * overdue_mult)
-
-                for prod in customer.top_products[:5]:
-                    sku = prod.sku
-                    if sku not in sku_demand:
-                        sku_demand[sku] = {
-                            "score": 0,
-                            "customers": set(),
-                            "expected_m2": Decimal("0"),
-                        }
-                    sku_demand[sku]["score"] += customer_score
-                    sku_demand[sku]["customers"].add(customer.customer_normalized)
-                    if customer.order_count > 0 and prod.total_m2:
-                        avg_m2 = Decimal(str(prod.total_m2)) / customer.order_count
-                        sku_demand[sku]["expected_m2"] += avg_m2
-
-            # Convert to product_id keys
-            result: dict[str, dict] = {}
-            for sku, data in sku_demand.items():
-                pid = sku_to_pid.get(sku)
-                if not pid:
-                    continue
-                result[pid] = {
-                    "expected_m2": round(data["expected_m2"], 2),
-                    "score": data["score"],
-                    "customers_count": len(data["customers"]),
-                    "customer_names": list(data["customers"])[:5],
-                }
-
-            return result
-
-        except Exception as e:
-            logger.warning("fs_customer_demand_failed", error=str(e))
-            return {}
+        # Filter to product_id keys only
+        pid_set = {p["id"] for p in products}
+        return {pid: v for pid, v in shared.items() if pid in pid_set}
 
     # ------------------------------------------------------------------
     # Public API
@@ -276,7 +136,7 @@ class ForwardSimulationService:
             boats = _merge_with_phantom_boats(real_boats, routes, today, horizon_end)
             products = self._get_active_products(factory_id)
             inventory_map = self._get_latest_inventory(products)
-            velocity_map = self._get_daily_velocities(products, today)
+            velocity_map = self._get_daily_velocities(products)
             drafts_map = self._get_existing_drafts(factory_id, boats)
 
             # Enriched supply sources
@@ -1438,46 +1298,16 @@ class ForwardSimulationService:
             logger.error("fetch_in_transit_drafts_failed", error=str(e))
             return {}  # Non-fatal
 
-    def _get_daily_velocities(
-        self, products: list[dict], today: date
-    ) -> dict[str, Decimal]:
-        """
-        Compute daily sales velocity per product over the last 90 days.
-
-        Returns:
-            Mapping of product_id -> Decimal m2 per day
-        """
+    def _get_daily_velocities(self, products: list[dict]) -> dict[str, Decimal]:
+        """Get daily velocity per product from MetricsService (90d, single source of truth)."""
         if not products:
             return {}
 
-        ninety_days_ago = (today - timedelta(days=VELOCITY_LOOKBACK_DAYS)).isoformat()
-        logger.debug("computing_velocities", since=ninety_days_ago)
-
-        try:
-            result = (
-                self.db.table("sales")
-                .select("product_id, quantity_m2")
-                .gte("week_start", ninety_days_ago)
-                .execute()
-            )
-
-            # Group by product_id, sum quantity_m2
-            totals: dict[str, Decimal] = defaultdict(Decimal)
-            for row in result.data:
-                totals[row["product_id"]] += Decimal(str(row["quantity_m2"]))
-
-            # Convert to daily velocity
-            lookback = Decimal(str(VELOCITY_LOOKBACK_DAYS))
-            velocity_map: dict[str, Decimal] = {}
-            for pid, total_m2 in totals.items():
-                velocity_map[pid] = (total_m2 / lookback).quantize(Decimal("0.01"))
-
-            logger.debug("velocities_computed", products_with_sales=len(velocity_map))
-            return velocity_map
-
-        except Exception as e:
-            logger.error("fetch_sales_failed", error=str(e))
-            raise DatabaseError("select", str(e))
+        from services.metrics_service import get_metrics_service
+        metrics = get_metrics_service().get_all_product_metrics()
+        velocity_map = {m.product_id: m.coverage.velocity_m2_day for m in metrics}
+        logger.debug("velocities_from_metrics", products_with_velocity=len(velocity_map))
+        return velocity_map
 
     def _get_shipping_routes(self, origin_port: str) -> list[dict]:
         """Fetch active shipping routes for the given origin port."""
@@ -1650,17 +1480,6 @@ def _merge_with_phantom_boats(
 def _parse_date(value: str) -> date:
     """Parse an ISO date string to a date object."""
     return date.fromisoformat(value)
-
-
-def _classify_urgency(days_of_stock: float) -> str:
-    """Classify urgency based on projected days of stock at arrival."""
-    if days_of_stock < URGENCY_CRITICAL_DAYS:
-        return "critical"
-    if days_of_stock < URGENCY_URGENT_DAYS:
-        return "urgent"
-    if days_of_stock < URGENCY_SOON_DAYS:
-        return "soon"
-    return "ok"
 
 
 def _compute_confidence(days_out: int) -> tuple[str, int]:

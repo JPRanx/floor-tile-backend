@@ -18,6 +18,7 @@ from services.product_service import get_product_service
 from services.inventory_service import get_inventory_service
 from services.sales_service import get_sales_service
 from services.stockout_service import get_stockout_service, StockoutStatus
+from services.metrics_service import get_metrics_service
 from models.recommendation import (
     ProductAllocation,
     ProductRecommendation,
@@ -117,10 +118,17 @@ class RecommendationService:
             products = self.product_service.get_all_active_tiles()
             is_unit_based = False
 
-        # Get recent sales for ALL products in ONE query (was N queries!)
+        # Get recent sales for std_dev calculation (safety stock)
         sales_by_product = self.sales_service.get_recent_sales_all(
             weeks=self.sales_weeks
         )
+
+        # Get 90d velocity from MetricsService (same source as FS and everywhere else)
+        metrics_service = get_metrics_service()
+        all_metrics = metrics_service.get_all_product_metrics()
+        metrics_velocity_map = {
+            m.product_id: m.coverage.velocity_m2_day for m in all_metrics
+        }
 
         # Pre-fetch unfulfilled demand for all products (one query)
         unfulfilled_totals = self._get_unfulfilled_demand_all(lookback_days=90)
@@ -132,12 +140,14 @@ class RecommendationService:
         lead_time_sqrt = Decimal(str(sqrt(self.lead_time)))
 
         for product in products:
-            # Get pre-fetched sales history for this product
+            # Get pre-fetched sales history for this product (for std_dev only)
             sales_history = sales_by_product.get(product.id, [])
-
             weeks_of_data = len(sales_history)
 
-            if weeks_of_data == 0:
+            # Velocity from MetricsService (90d, same as FS)
+            daily_velocity = metrics_velocity_map.get(product.id, Decimal("0"))
+
+            if weeks_of_data == 0 and daily_velocity == 0:
                 # No sales data — skip allocation
                 allocations.append(ProductAllocation(
                     product_id=product.id,
@@ -155,21 +165,18 @@ class RecommendationService:
                 ))
                 continue
 
-            # Calculate weekly velocity and std_dev
-            # For unit-based products, quantity_m2 actually holds unit counts
-            weekly_sales = [Decimal(str(s.quantity_m2)) for s in sales_history]
-            total_sales = sum(weekly_sales)
-            weekly_velocity = total_sales / weeks_of_data
-            daily_velocity = weekly_velocity / 7
-
             # Adjust velocity with unfulfilled demand signal
             daily_velocity = self._adjust_velocity_with_unfulfilled(
                 product.id, daily_velocity, unfulfilled_totals
             )
 
-            # Standard deviation of weekly sales
+            # Weekly velocity for display (derived from daily, not independently computed)
+            weekly_velocity = daily_velocity * 7
+
+            # Standard deviation of weekly sales (from actual weekly data, not MetricsService)
+            weekly_sales = [Decimal(str(s.quantity_m2)) for s in sales_history]
             if weeks_of_data > 1:
-                mean = weekly_velocity
+                mean = sum(weekly_sales) / weeks_of_data
                 variance = sum((x - mean) ** 2 for x in weekly_sales) / weeks_of_data
                 std_dev = Decimal(str(sqrt(float(variance))))
             else:

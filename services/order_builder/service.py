@@ -23,7 +23,6 @@ from services.boat_schedule_service import get_boat_schedule_service
 from services.recommendation_service import get_recommendation_service
 from services.inventory_service import get_inventory_service
 from services.trend_service import get_trend_service
-from services.customer_pattern_service import get_customer_pattern_service
 from services.production_schedule_service import get_production_schedule_service
 from services.warehouse_order_service import get_warehouse_order_service
 from models.order_builder import (
@@ -87,7 +86,6 @@ class OrderBuilderService(
         self.recommendation_service = get_recommendation_service()
         self.inventory_service = get_inventory_service()
         self.trend_service = get_trend_service()
-        self.customer_pattern_service = get_customer_pattern_service()
         self.production_schedule_service = get_production_schedule_service()
         self.warehouse_order_service = get_warehouse_order_service()
 
@@ -97,7 +95,6 @@ class OrderBuilderService(
         num_bls: int = 1,
         excluded_skus: Optional[list[str]] = None,
         factory_id: Optional[str] = None,
-        use_projection: bool = False,
     ) -> OrderBuilderResponse:
         """
         Get complete Order Builder data.
@@ -245,7 +242,7 @@ class OrderBuilderService(
         # Step 2d: Forward simulation for multi-boat awareness
         projection_map = None
         projection_data = None  # Full projection data including stability
-        if use_projection and factory_id and boat and boat.boat_id:
+        if factory_id and boat and boat.boat_id:
             try:
                 from services.forward_simulation_service import get_forward_simulation_service
                 fwd_sim = get_forward_simulation_service()
@@ -361,15 +358,11 @@ class OrderBuilderService(
         # Step 10: Calculate "Unable to Ship" alerts
         unable_to_ship = self._calculate_unable_to_ship_alerts(all_products, boat.order_deadline)
 
-        # Step 11: Stability Forecast — prefer FS (cascade-aware), fallback to OB
+        # Step 11: Stability Forecast (from FS cascade-aware data)
+        stability_forecast = None
         if projection_data and projection_data.get("stability_impact"):
             stability_forecast = self._convert_fs_stability(
                 projection_data, all_products, boat,
-            )
-        else:
-            available_boats = self.boat_service.get_available(limit=5)
-            stability_forecast = self._calculate_stability_forecast(
-                all_products, boat, available_boats,
             )
 
         # Step 12: Get liquidation clearance candidates (deactivated products with factory stock)
@@ -489,9 +482,6 @@ class OrderBuilderService(
         # Falls back to ORDERING_CYCLE_DAYS (30 days) if not provided
         buffer_days = coverage_buffer_days if coverage_buffer_days is not None else ORDERING_CYCLE_DAYS
 
-        # Get customer demand scores for priority ranking
-        customer_demand_data = self._get_customer_demand_scores()
-
         # Get factory production status for all products
         factory_status_map = {}
         if boat_departure:
@@ -603,20 +593,21 @@ class OrderBuilderService(
             # Pallet factor
             _pf = (pallet_factor_map or {}).get(product_rec.product_id, M2_PER_PALLET) if is_unit_based else M2_PER_PALLET
 
-            # === ONE BRANCH: FS or inventory ===
+            # === FS projection required — skip products without projection ===
             projection = projection_map.get(product_rec.product_id) if projection_map else None
 
-            if projection is not None:
-                analysis = self._analyze_from_projection(
-                    projection, daily_velocity_m2, buffer_days, _pf,
-                    factory_availability_map, pending_orders_map, product_rec.sku,
+            if projection is None:
+                logger.debug(
+                    "skipping_product_no_projection",
+                    sku=product_rec.sku,
+                    product_id=product_rec.product_id,
                 )
-            else:
-                analysis = self._analyze_from_inventory(
-                    product_rec, direction, strength, daily_velocity_m2, days_of_stock,
-                    days_to_cover, buffer_days, _pf,
-                    pending_orders_map, customer_demand_data, factory_availability_map,
-                )
+                continue
+
+            analysis = self._analyze_from_projection(
+                projection, daily_velocity_m2, buffer_days, _pf,
+                factory_availability_map, pending_orders_map, product_rec.sku,
+            )
 
             # === SINGLE PATH: build product from analysis ===
             product = self._build_product_from_analysis(

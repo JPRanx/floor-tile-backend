@@ -98,10 +98,6 @@ def get_order_builder(
         None,
         description="Factory UUID. If provided, filters products/boats to this factory. Default: all products."
     ),
-    use_projection: bool = Query(
-        True,
-        description="Use forward simulation for multi-boat awareness. Disable with ?use_projection=false if issues arise.",
-    ),
 ) -> OrderBuilderResponse:
     """
     Get Order Builder data.
@@ -128,7 +124,7 @@ def get_order_builder(
     )
 
     service = get_order_builder_service()
-    result = service.get_order_builder(boat_id=boat_id, num_bls=num_bls, factory_id=factory_id, use_projection=use_projection)
+    result = service.get_order_builder(boat_id=boat_id, num_bls=num_bls, factory_id=factory_id)
 
     elapsed = time.time() - start_time
     logger.info("order_builder_complete", elapsed_seconds=round(elapsed, 2))
@@ -181,7 +177,6 @@ def recalculate_order(request: RecalculateRequest) -> OrderBuilderResponse:
         num_bls=request.num_bls,
         excluded_skus=request.excluded_skus,
         factory_id=request.factory_id,
-        use_projection=True,
     )
 
     elapsed = time.time() - start_time
