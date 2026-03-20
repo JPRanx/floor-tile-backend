@@ -286,6 +286,28 @@ class BoatProjection(BaseSchema):
     )
 
 
+class CompletedBoatItem(BaseSchema):
+    """A product on a completed (ordered/confirmed) boat — direct from draft record."""
+    product_id: str = Field(..., description="Product UUID")
+    sku: str = Field("", description="Product SKU")
+    selected_pallets: int = Field(0, ge=0, description="Pallets ordered")
+    bl_number: Optional[int] = Field(None, description="BL assignment if allocated")
+
+
+class CompletedBoat(BaseSchema):
+    """Historical record for an ordered/confirmed boat. Not a projection — a fact."""
+    boat_id: str = Field(..., description="Boat UUID")
+    boat_name: str = Field("", description="Vessel name")
+    departure_date: str = Field(..., description="Departure date (ISO)")
+    arrival_date: str = Field(..., description="Arrival date (ISO)")
+    days_until_departure: int = Field(..., description="Days from today until departure")
+    carrier: Optional[str] = Field(None, description="Carrier name")
+    draft_status: str = Field(..., description="ordered or confirmed")
+    draft_id: str = Field(..., description="Draft UUID")
+    items: list[CompletedBoatItem] = Field(default_factory=list, description="Products ordered")
+    has_bl_allocation: bool = Field(False, description="True if BL numbers assigned")
+
+
 class FactoryOrderSignal(BaseSchema):
     """Factory-level signal for when to place the next production order."""
     next_order_date: Optional[str] = Field(
@@ -342,7 +364,11 @@ class PlanningHorizonResponse(BaseSchema):
     )
     projections: list[BoatProjection] = Field(
         default_factory=list,
-        description="Projected boats in chronological order"
+        description="Projected boats in chronological order (action-needed only)"
+    )
+    completed: list[CompletedBoat] = Field(
+        default_factory=list,
+        description="Ordered/confirmed boats — historical records, not projections"
     )
     production_lead_days: int = Field(0, description="Factory production lead time in days")
     transport_to_port_days: int = Field(0, description="Days to transport from factory to port")
