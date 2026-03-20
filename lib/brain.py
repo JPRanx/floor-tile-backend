@@ -42,6 +42,7 @@ def compute_horizon(
     products: list[dict],
     boats: list[dict],
     inventory: dict[str, Decimal],
+    in_transit: dict[str, Decimal] | None = None,  # Reserved — not used yet
     velocities: dict[str, Decimal],
     factory_stock: dict[str, Decimal],
     drafts: list[dict],
@@ -475,19 +476,33 @@ def compute_horizon(
         if unmet_m2 - already_scheduled <= 0:
             continue
 
-        # Stockout date: when warehouse hits 0 at current velocity
-        wh = inventory.get(pid, Decimal(0))
+        # Stockout date: when total available stock (warehouse + arriving) hits 0
+        # Uses running_stock so in-transit goods push the date out correctly.
+        # Temporary gaps (warehouse empty but ship arriving) are accepted.
+        total_available = running_stock.get(pid, Decimal(0))
         vel = velocities.get(pid, Decimal(0))
         if vel > 0:
-            days_to_stockout = int(wh / vel)
+            days_to_stockout = int(total_available / vel)
             stockout_date = str(today + timedelta(days=days_to_stockout))
         else:
+            days_to_stockout = 999
             stockout_date = None
+
+        # Urgency based on REAL stockout (including in-transit), not warehouse-only.
+        # This prevents false alarms for products covered by arriving ships.
+        if days_to_stockout <= 7:
+            real_urgency = "critical"
+        elif days_to_stockout <= 21:
+            real_urgency = "urgent"
+        elif days_to_stockout <= 45:
+            real_urgency = "soon"
+        else:
+            real_urgency = "ok"
 
         production_requests.append({
             "product_id": pid,
             "sku": product_map[pid].get("sku", ""),
-            "urgency": gap_info["urgency"],
+            "urgency": real_urgency,
             "is_piggyback": already_scheduled > 0,
             "scheduled_m2": float(already_scheduled),
             "additional_m2": float(unmet_m2 - already_scheduled),

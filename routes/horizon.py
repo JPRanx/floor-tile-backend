@@ -111,6 +111,26 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     else:
         freshness["factory_snapshot_date"] = None
 
+    # 4b. Transit snapshots (latest per product — stock on the way)
+    latest_tr = db.table("transit_snapshots").select(
+        "snapshot_date"
+    ).order("snapshot_date", desc=True).limit(1).execute()
+
+    in_transit: dict[str, Decimal] = {}
+    if latest_tr.data:
+        tr_date = latest_tr.data[0]["snapshot_date"]
+        transit_res = db.table("transit_snapshots").select(
+            "product_id, in_transit_qty"
+        ).eq("snapshot_date", tr_date).execute()
+        for row in transit_res.data:
+            pid = row["product_id"]
+            qty = Decimal(str(row.get("in_transit_qty") or 0))
+            if qty > 0:
+                in_transit[pid] = qty
+        freshness["transit_snapshot_date"] = tr_date
+    else:
+        freshness["transit_snapshot_date"] = None
+
     # 5. Sales → velocity (90-day simple average)
     sales_start = (today - timedelta(days=90)).isoformat()
     sales_res = db.table("sales").select(
@@ -188,6 +208,7 @@ def _query_inputs(factory_id: str, today: date) -> dict:
         "products": products,
         "boats": boats,
         "inventory": inventory,
+        "in_transit": in_transit,
         "velocities": velocities,
         "factory_stock": factory_stock,
         "drafts": drafts,

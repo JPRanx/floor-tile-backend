@@ -6,6 +6,7 @@ in-transit inventory quantities by product.
 """
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from decimal import Decimal
 from io import BytesIO
 from typing import Optional
@@ -27,9 +28,26 @@ class InTransitProduct:
 
 
 @dataclass
+class DispatchOrderItem:
+    """One product line within a dispatch order."""
+    product_id: str
+    sku: str
+    m2: float
+
+
+@dataclass
+class DispatchOrder:
+    """A single order (factura) from the dispatch file with ETD."""
+    factura: str
+    etd: date | None
+    items: list[DispatchOrderItem] = field(default_factory=list)
+
+
+@dataclass
 class DispatchParseResult:
     """Result of parsing a dispatch Excel file."""
     products: list[InTransitProduct] = field(default_factory=list)
+    orders: list[DispatchOrder] = field(default_factory=list)
     total_m2: float = 0.0
     rows_processed: int = 0
     rows_filtered: int = 0
@@ -124,20 +142,30 @@ def parse_dispatch_excel(
 
     result.rows_processed = len(df)
 
-    # Fill forward order numbers so each row knows its order
-    # Column name: "Factura" (may vary)
+    # Find key columns
     factura_col = None
+    etd_col = None
+    sku_col = None
+    qty_col = None
     for col in df.columns:
-        if "factura" in str(col).lower():
+        col_str = str(col).lower().strip()
+        if "factura" in col_str:
             factura_col = col
-            break
+        elif "etd" in col_str or ("tentativa" in col_str and factura_col and not etd_col):
+            etd_col = col
+        elif "nombre" in col_str and "referencia" in col_str:
+            sku_col = col
+        elif "cantidad" in col_str and "mt" in col_str:
+            qty_col = col
 
     if factura_col is None:
         logger.warning("dispatch_no_factura_column", columns=raw_columns)
-        # Try first column as fallback
         factura_col = df.columns[0]
 
+    # Forward-fill factura and ETD so each row inherits its order's values
     df[factura_col] = df[factura_col].ffill()
+    if etd_col is not None:
+        df[etd_col] = df[etd_col].ffill()
 
     # Filter out received orders
     if received_orders:
@@ -145,16 +173,6 @@ def parse_dispatch_excel(
         mask = df[factura_col].astype(str).str.contains(pattern, case=False, na=False)
         result.rows_filtered = int(mask.sum())
         df = df[~mask]
-
-    # Find SKU and quantity columns
-    sku_col = None
-    qty_col = None
-    for col in df.columns:
-        col_str = str(col).lower().strip()
-        if "nombre" in col_str and "referencia" in col_str:
-            sku_col = col
-        elif "cantidad" in col_str and "mt" in col_str:
-            qty_col = col
 
     if sku_col is None or qty_col is None:
         logger.error(
@@ -168,17 +186,16 @@ def parse_dispatch_excel(
             "Need 'Nombre de Referencias' and 'Cantidad de Mts'."
         )
 
-    # Aggregate by product
+    # Parse rows — aggregate by product AND group by order
     totals: dict[str, float] = {}  # product_id -> total_m2
     pid_to_sku: dict[str, str] = {}
     seen_unmatched: set[str] = set()
+    orders_map: dict[str, DispatchOrder] = {}  # factura -> DispatchOrder
 
     for _, row in df.iterrows():
         raw_sku = str(row[sku_col]) if pd.notna(row.get(sku_col)) else ""
         if not raw_sku or raw_sku == "nan":
             continue
-
-        # Skip TOTAL rows
         if "TOTAL" in raw_sku.upper():
             continue
 
@@ -187,23 +204,31 @@ def parse_dispatch_excel(
             cantidad = float(cantidad)
         except (ValueError, TypeError):
             continue
-
         if cantidad <= 0:
             continue
 
         normalized = _normalize_dispatch_sku(raw_sku)
         match = sku_map.get(normalized)
 
-        if match:
-            pid, sku = match
-            totals[pid] = totals.get(pid, 0.0) + cantidad
-            pid_to_sku[pid] = sku
-        else:
+        if not match:
             if raw_sku not in seen_unmatched:
                 seen_unmatched.add(raw_sku)
                 result.unmatched_skus.append(raw_sku.strip()[:60])
+            continue
 
-    # Build result
+        pid, sku = match
+        totals[pid] = totals.get(pid, 0.0) + cantidad
+        pid_to_sku[pid] = sku
+
+        # Group by order
+        factura_val = str(row[factura_col]).strip() if pd.notna(row.get(factura_col)) else ""
+        if factura_val and factura_val not in orders_map:
+            etd_val = _parse_date(row.get(etd_col)) if etd_col else None
+            orders_map[factura_val] = DispatchOrder(factura=factura_val, etd=etd_val)
+        if factura_val:
+            orders_map[factura_val].items.append(DispatchOrderItem(product_id=pid, sku=sku, m2=cantidad))
+
+    # Build aggregated products
     total_m2 = 0.0
     for pid, m2 in sorted(totals.items(), key=lambda x: x[1], reverse=True):
         result.products.append(InTransitProduct(
@@ -214,10 +239,12 @@ def parse_dispatch_excel(
         total_m2 += m2
 
     result.total_m2 = round(total_m2, 2)
+    result.orders = list(orders_map.values())
 
     logger.info(
         "dispatch_parsed",
         products=len(result.products),
+        orders=len(result.orders),
         total_m2=result.total_m2,
         rows_processed=result.rows_processed,
         rows_filtered=result.rows_filtered,
