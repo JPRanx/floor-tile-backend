@@ -176,54 +176,9 @@ class ForwardSimulationService:
                 draft = drafts_map.get(boat_id)
                 draft_status = draft.get("status", "") if draft else ""
 
-                # Committed drafts (ordered/confirmed) are history, not projections.
-                # Deduct their quantities from running stock for cascade, then record as-is.
-                if draft_status in ("ordered", "confirmed") and draft.get("items"):
-                    departure_date = _parse_date(boat["departure_date"])
-                    is_unit_based = unit_config is not None and not unit_config.get("is_m2_based", True)
-
-                    items: list[dict] = []
-                    has_bl = False
-                    for item in draft["items"]:
-                        pid = item["product_id"]
-                        pallets = item["selected_pallets"]
-                        prod = products_by_id.get(pid, {})
-
-                        # Per-product pallet divisor
-                        product_units = prod.get("units_per_pallet")
-                        if is_unit_based and product_units and product_units > 0:
-                            pallet_m2 = Decimal(str(product_units))
-                        else:
-                            pallet_m2 = M2_PER_PALLET
-
-                        # Cascade: deduct from running stock so later boats see reduced inventory
-                        if pallets > 0:
-                            filled_qty = Decimal(pallets) * pallet_m2
-                            current_stock[pid] = current_stock.get(pid, Decimal("0")) + filled_qty
-
-                        items.append({
-                            "product_id": pid,
-                            "sku": prod.get("sku", ""),
-                            "selected_pallets": pallets,
-                            "bl_number": item.get("bl_number"),
-                        })
-                        if item.get("bl_number") is not None:
-                            has_bl = True
-
-                    completed_boats.append({
-                        "boat_id": boat_id,
-                        "boat_name": boat.get("vessel_name", ""),
-                        "departure_date": boat["departure_date"],
-                        "arrival_date": boat["arrival_date"],
-                        "days_until_departure": (departure_date - today).days,
-                        "carrier": boat.get("shipping_line"),
-                        "draft_status": draft_status,
-                        "draft_id": draft["id"],
-                        "items": [it for it in items if it["selected_pallets"] > 0],
-                        "has_bl_allocation": has_bl,
-                    })
-                    continue
-
+                # All boats run through _simulate_boat for correct cascade
+                # (supply event consumption, stock tracking). Committed drafts
+                # are then separated into completed[] with just their draft record.
                 next_boat = boats[i + 1] if i + 1 < len(boats) else None
                 projection = self._simulate_boat(
                     boat=boat,
@@ -243,7 +198,37 @@ class ForwardSimulationService:
                     trend_map=trend_map,
                     customer_demand_map=customer_demand_map,
                 )
-                boat_projections.append(projection)
+
+                # Committed drafts → completed record (not a projection)
+                if draft_status in ("ordered", "confirmed") and draft.get("items"):
+                    items: list[dict] = []
+                    has_bl = False
+                    for item in draft["items"]:
+                        if item["selected_pallets"] > 0:
+                            prod = products_by_id.get(item["product_id"], {})
+                            items.append({
+                                "product_id": item["product_id"],
+                                "sku": prod.get("sku", ""),
+                                "selected_pallets": item["selected_pallets"],
+                                "bl_number": item.get("bl_number"),
+                            })
+                        if item.get("bl_number") is not None:
+                            has_bl = True
+
+                    completed_boats.append({
+                        "boat_id": boat_id,
+                        "boat_name": boat.get("vessel_name", ""),
+                        "departure_date": boat["departure_date"],
+                        "arrival_date": boat["arrival_date"],
+                        "days_until_departure": projection["days_until_departure"],
+                        "carrier": projection["carrier"],
+                        "draft_status": draft_status,
+                        "draft_id": draft["id"],
+                        "items": items,
+                        "has_bl_allocation": has_bl,
+                    })
+                else:
+                    boat_projections.append(projection)
 
             # Post-processing: compute draft lock, review flags, and dependency context
             for i, proj in enumerate(boat_projections):
