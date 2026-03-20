@@ -143,7 +143,7 @@ class ForwardSimulationService:
             production_pipeline = self._get_production_pipeline(products, horizon_end, today)
             # Exclude horizon boats — their drafts are already handled via drafts_map cascade
             horizon_boat_ids = {b["id"] for b in boats}
-            in_transit_drafts = self._get_in_transit_drafts(factory_id, horizon_boat_ids)
+            in_transit_drafts = self._get_in_transit_supply(factory_id, horizon_boat_ids)
 
             # Demand intelligence (trend + customer demand)
             trend_map = self._get_trend_factors(products, prefetched_metrics)
@@ -165,6 +165,18 @@ class ForwardSimulationService:
             # Track one-time supply consumption across boats
             factory_siesa_consumed: set[str] = set()
             production_consumed: set[str] = set()
+
+            # Pre-fetch shipment_items for receipt display (per-boat dispatch reality)
+            shipment_by_boat: dict[str, list[dict]] = defaultdict(list)
+            try:
+                all_boat_ids = [b["id"] for b in boats]
+                ship_result = self.db.table("shipment_items") \
+                    .select("boat_id, product_id, shipped_m2, shipped_pallets") \
+                    .in_("boat_id", all_boat_ids).execute()
+                for row in (ship_result.data or []):
+                    shipment_by_boat[row["boat_id"]].append(row)
+            except Exception:
+                pass  # Fall back to draft_items if shipment_items doesn't exist yet
 
             # Simulate each boat in departure order
             boat_projections: list[dict] = []
@@ -201,19 +213,33 @@ class ForwardSimulationService:
 
                 # Committed drafts → completed record (not a projection)
                 if draft_status in ("ordered", "confirmed") and draft.get("items"):
+                    shipments = shipment_by_boat.get(boat_id, [])
                     items: list[dict] = []
                     has_bl = False
-                    for item in draft["items"]:
-                        if item["selected_pallets"] > 0:
-                            prod = products_by_id.get(item["product_id"], {})
+
+                    if shipments:
+                        # Prefer dispatch reality (shipment_items)
+                        for s in shipments:
+                            prod = products_by_id.get(s["product_id"], {})
                             items.append({
-                                "product_id": item["product_id"],
+                                "product_id": s["product_id"],
                                 "sku": prod.get("sku", ""),
-                                "selected_pallets": item["selected_pallets"],
-                                "bl_number": item.get("bl_number"),
+                                "selected_pallets": s["shipped_pallets"],
+                                "bl_number": None,
                             })
-                        if item.get("bl_number") is not None:
-                            has_bl = True
+                    else:
+                        # Fall back to draft_items
+                        for item in draft["items"]:
+                            if item["selected_pallets"] > 0:
+                                prod = products_by_id.get(item["product_id"], {})
+                                items.append({
+                                    "product_id": item["product_id"],
+                                    "sku": prod.get("sku", ""),
+                                    "selected_pallets": item["selected_pallets"],
+                                    "bl_number": item.get("bl_number"),
+                                })
+                            if item.get("bl_number") is not None:
+                                has_bl = True
 
                     completed_boats.append({
                         "boat_id": boat_id,
@@ -225,7 +251,7 @@ class ForwardSimulationService:
                         "draft_status": draft_status,
                         "draft_id": draft["id"],
                         "items": items,
-                        "has_bl_allocation": has_bl,
+                        "has_bl_allocation": has_bl or len(shipments) > 0,
                     })
                 else:
                     boat_projections.append(projection)
@@ -1257,24 +1283,19 @@ class ForwardSimulationService:
             logger.error("fetch_production_pipeline_failed", error=str(e))
             return {}  # Non-fatal: fall back to no production data
 
-    def _get_in_transit_drafts(
+    def _get_in_transit_supply(
         self, factory_id: str, exclude_boat_ids: Optional[set[str]] = None
     ) -> dict[str, list[dict]]:
         """
-        Get per-product in-transit quantities from ordered/confirmed drafts.
+        Get per-product in-transit quantities as dated supply events.
 
-        These are goods on the water whose per-boat breakdown we know
-        because the draft tells us what was ordered on each boat.
-
-        Args:
-            factory_id: Factory UUID
-            exclude_boat_ids: Boat IDs to exclude (horizon boats whose drafts
-                are already handled via the running stock cascade in _simulate_boat)
+        Prefers shipment_items (dispatch reality) over draft_items (plan).
+        Falls back to draft_items for boats without dispatch data.
 
         Returns:
             Mapping of product_id -> list of {arrival_date, pallets_m2}
         """
-        logger.debug("fetching_in_transit_drafts", factory_id=factory_id)
+        logger.debug("fetching_in_transit_supply", factory_id=factory_id)
 
         try:
             # Get all ordered/confirmed drafts for this factory
@@ -1289,14 +1310,15 @@ class ForwardSimulationService:
             if not drafts_result.data:
                 return {}
 
-            # Filter out horizon boats whose drafts are handled via running stock cascade
+            # Filter out horizon boats (handled via running stock cascade)
             _exclude = exclude_boat_ids or set()
             filtered_drafts = [d for d in drafts_result.data if d["boat_id"] not in _exclude]
             if not filtered_drafts:
                 return {}
 
-            # Get boat arrival dates
             boat_ids = [d["boat_id"] for d in filtered_drafts]
+
+            # Get boat arrival dates
             boats_result = (
                 self.db.table("boat_schedules")
                 .select("id, arrival_date")
@@ -1305,38 +1327,66 @@ class ForwardSimulationService:
             )
             arrival_by_boat = {b["id"]: b["arrival_date"] for b in boats_result.data}
 
-            # Get draft items
-            draft_ids = [d["id"] for d in filtered_drafts]
-            items_result = (
-                self.db.table("draft_items")
-                .select("draft_id, product_id, selected_pallets")
-                .in_("draft_id", draft_ids)
+            # Try shipment_items first (dispatch reality)
+            shipment_result = (
+                self.db.table("shipment_items")
+                .select("boat_id, product_id, shipped_m2")
+                .in_("boat_id", boat_ids)
                 .execute()
             )
 
-            # Map draft_id -> boat_id
-            draft_to_boat = {d["id"]: d["boat_id"] for d in filtered_drafts}
-
-            # Build per-product in-transit list
+            # Track which boats have shipment data
+            boats_with_shipments: set[str] = set()
             in_transit: dict[str, list[dict]] = defaultdict(list)
-            for item in items_result.data:
-                boat_id = draft_to_boat.get(item["draft_id"])
-                if not boat_id:
-                    continue
-                arrival = arrival_by_boat.get(boat_id)
+
+            for item in (shipment_result.data or []):
+                bid = item["boat_id"]
+                arrival = arrival_by_boat.get(bid)
                 if not arrival:
                     continue
-                pallets_m2 = Decimal(str(item["selected_pallets"])) * M2_PER_PALLET
-                in_transit[item["product_id"]].append({
-                    "arrival_date": arrival,
-                    "pallets_m2": pallets_m2,
-                })
+                boats_with_shipments.add(bid)
+                m2 = Decimal(str(item["shipped_m2"]))
+                if m2 > 0:
+                    in_transit[item["product_id"]].append({
+                        "arrival_date": arrival,
+                        "pallets_m2": m2,
+                    })
 
-            logger.debug("in_transit_drafts_loaded", products=len(in_transit))
+            # Fall back to draft_items for boats without shipment data
+            fallback_drafts = [d for d in filtered_drafts if d["boat_id"] not in boats_with_shipments]
+            if fallback_drafts:
+                draft_ids = [d["id"] for d in fallback_drafts]
+                items_result = (
+                    self.db.table("draft_items")
+                    .select("draft_id, product_id, selected_pallets")
+                    .in_("draft_id", draft_ids)
+                    .execute()
+                )
+                draft_to_boat = {d["id"]: d["boat_id"] for d in fallback_drafts}
+
+                for item in (items_result.data or []):
+                    bid = draft_to_boat.get(item["draft_id"])
+                    if not bid:
+                        continue
+                    arrival = arrival_by_boat.get(bid)
+                    if not arrival:
+                        continue
+                    pallets_m2 = Decimal(str(item["selected_pallets"])) * M2_PER_PALLET
+                    in_transit[item["product_id"]].append({
+                        "arrival_date": arrival,
+                        "pallets_m2": pallets_m2,
+                    })
+
+            logger.debug(
+                "in_transit_supply_loaded",
+                products=len(in_transit),
+                from_shipments=len(boats_with_shipments),
+                from_drafts=len(fallback_drafts),
+            )
             return dict(in_transit)
 
         except Exception as e:
-            logger.error("fetch_in_transit_drafts_failed", error=str(e))
+            logger.error("fetch_in_transit_supply_failed", error=str(e))
             return {}  # Non-fatal
 
     def _get_daily_velocities(self, products: list[dict], prefetched_metrics=None) -> dict[str, Decimal]:

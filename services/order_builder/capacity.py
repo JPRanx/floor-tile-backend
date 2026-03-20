@@ -48,7 +48,7 @@ class CapacityMixin:
         depletion_m2 = total_daily_m2 * days
 
         # Earlier boats' deliveries: ordered/confirmed drafts arriving
-        # before this boat departs (same query pattern as FS._get_in_transit_drafts)
+        # before this boat departs (same query pattern as FS._get_in_transit_supply)
         earlier_m2 = Decimal("0")
         try:
             db = self.inventory_service.db

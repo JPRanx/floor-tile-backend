@@ -13,6 +13,7 @@ from decimal import Decimal
 from io import BytesIO
 from collections import defaultdict
 import hashlib
+import math
 import structlog
 
 from models.inventory import (
@@ -1712,6 +1713,20 @@ async def upload_in_transit(
             }, on_conflict="product_id,snapshot_date").execute()
             updated_count += 1
             details.append({"sku": product.sku, "in_transit_m2": product.in_transit_m2})
+
+        # Save per-boat shipment records when boat_id is provided.
+        # This is the source of truth for "what actually shipped on this boat."
+        if boat_id:
+            for product in parse_result.products:
+                pallets = math.ceil(product.in_transit_m2 / float(M2_PER_PALLET)) if product.in_transit_m2 > 0 else 0
+                db.table("shipment_items").upsert({
+                    "boat_id": boat_id,
+                    "product_id": product.product_id,
+                    "shipped_m2": product.in_transit_m2,
+                    "shipped_pallets": pallets,
+                    "snapshot_date": snapshot_date.isoformat(),
+                }, on_conflict="boat_id,product_id").execute()
+            logger.info("shipment_items_saved", boat_id=boat_id, products=len(parse_result.products))
 
         logger.info(
             "in_transit_upload_complete",
