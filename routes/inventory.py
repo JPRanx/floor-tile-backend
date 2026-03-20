@@ -394,6 +394,24 @@ async def confirm_inventory_upload(preview_id: str, request: Optional[InventoryC
             created, updated = product_service.bulk_upsert(products_to_upsert)
             logger.info("products_auto_created", created=created, updated=updated)
 
+        # Zero-fill missing active products so brain sees complete snapshot
+        if snapshots_to_create:
+            snapshot_date = snapshots_to_create[0].snapshot_date
+            uploaded_product_ids = {s.product_id for s in snapshots_to_create}
+            products_all, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+            missing_products = [p for p in products_all if p.id not in uploaded_product_ids]
+            if missing_products:
+                for p in missing_products:
+                    snapshots_to_create.append(
+                        InventorySnapshotCreate(
+                            product_id=p.id,
+                            warehouse_qty=0,
+                            in_transit_qty=0,
+                            snapshot_date=snapshot_date,
+                        )
+                    )
+                logger.info("inventory_confirm_filled_missing", filled_count=len(missing_products))
+
         # Upsert to warehouse_snapshots (each upload only touches its own table)
         if snapshots_to_create:
             db = get_supabase_client()
