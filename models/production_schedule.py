@@ -355,6 +355,11 @@ class ProductionScheduleCreate(BaseSchema):
     Used when importing data from Programa de Produccion Excel files.
     """
 
+    orden_produccion: Optional[str] = Field(
+        None,
+        max_length=50,
+        description="Factory production order / lot number (e.g., P1-00026). Natural key."
+    )
     factory_item_code: Optional[str] = Field(
         None,
         max_length=50,
@@ -428,6 +433,7 @@ class ProductionScheduleDBResponse(BaseSchema, TimestampMixin):
     """
 
     id: str = Field(..., description="Record UUID")
+    orden_produccion: Optional[str] = None
     factory_item_code: Optional[str] = None
     referencia: str
     sku: Optional[str] = None

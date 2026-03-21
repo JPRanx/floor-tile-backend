@@ -1198,6 +1198,7 @@ class ConfirmOrderRequest(BaseSchema):
     boat_id: str = Field(..., description="Boat schedule UUID")
     boat_name: str = Field(..., description="Boat name for notes")
     boat_departure: date = Field(..., description="Boat departure date")
+    factory_id: Optional[str] = Field(None, description="Factory UUID — used for brain-based validation")
     products: list[ConfirmOrderProductItem] = Field(
         ...,
         min_length=1,

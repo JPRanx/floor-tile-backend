@@ -1114,8 +1114,9 @@ class ProductionScheduleService:
         """
         Import parsed Excel records to database.
 
-        IMPORTANT: Same SKU can appear multiple times in Excel (different production runs).
-        This method SUMS requested_m2 and completed_m2 for records with same referencia+plant.
+        One row in the factory file = one row in the database.
+        orden_produccion (e.g. P1-00026) is the natural key / lot number.
+        No aggregation — multiple runs of the same product are separate lots.
 
         Args:
             records: List of ProductionScheduleCreate from parse_production_excel()
@@ -1139,51 +1140,6 @@ class ProductionScheduleService:
         filename = records[0].source_file or ""
         source_month = records[0].source_month or ""
 
-        # =====================================================
-        # STEP 1: Aggregate records by (referencia, plant)
-        # Same SKU in same plant should be SUMMED, not overwritten
-        # =====================================================
-        aggregated: dict[tuple, dict] = {}
-        status_priority = {
-            ProductionStatus.COMPLETED: 3,
-            ProductionStatus.IN_PROGRESS: 2,
-            ProductionStatus.SCHEDULED: 1,
-        }
-
-        for record in records:
-            key = (record.referencia, record.plant)
-
-            if key not in aggregated:
-                # First occurrence - initialize
-                aggregated[key] = {
-                    "record": record,
-                    "requested_m2": record.requested_m2,
-                    "completed_m2": record.completed_m2,
-                    "status": record.status,
-                    "row_count": 1,
-                }
-            else:
-                # Same SKU+plant - SUM the values
-                agg = aggregated[key]
-                agg["requested_m2"] += record.requested_m2
-                agg["completed_m2"] += record.completed_m2
-                agg["row_count"] += 1
-
-                # Keep the more significant status (completed > in_progress > scheduled)
-                if status_priority.get(record.status, 0) > status_priority.get(agg["status"], 0):
-                    agg["status"] = record.status
-
-                # Keep dates from completed row if available
-                if record.status == ProductionStatus.COMPLETED:
-                    agg["record"] = record
-
-        logger.info(
-            "records_aggregated",
-            raw_count=len(records),
-            aggregated_count=len(aggregated),
-            duplicates_merged=len(records) - len(aggregated)
-        )
-
         # Track results
         inserted = 0
         updated = 0
@@ -1192,7 +1148,6 @@ class ProductionScheduleService:
         unmatched_refs = set()
         warnings = []
 
-        # Status counts (from aggregated data)
         status_counts = {
             ProductionStatus.COMPLETED: 0,
             ProductionStatus.IN_PROGRESS: 0,
@@ -1201,8 +1156,7 @@ class ProductionScheduleService:
         total_requested = Decimal("0")
         total_completed = Decimal("0")
 
-        # Get products for matching (include ALL products, not just active,
-        # so FACTORY_ONLY products in production pipeline can match)
+        # Build product lookup for SKU matching
         products_by_sku = {}
         if match_products:
             try:
@@ -1213,16 +1167,12 @@ class ProductionScheduleService:
                         self.sku = row.get("sku")
                 all_products = [_ProductRef(row) for row in all_products_data]
                 for p in all_products:
-                    # Index by SKU and normalized forms (accent-normalized)
                     sku = getattr(p, 'sku', None)
                     if sku:
                         sku_upper = sku.upper()
                         sku_no_accent = normalize_accents(sku_upper)
-                        # Index by original SKU
                         products_by_sku[sku_upper] = p
-                        # Index by accent-normalized SKU
                         products_by_sku[sku_no_accent] = p
-                        # Also index without BTE suffix
                         no_bte = sku_upper.replace(' BTE', '').replace('BTE', '').strip()
                         no_bte_no_accent = normalize_accents(no_bte)
                         products_by_sku[no_bte] = p
@@ -1230,18 +1180,19 @@ class ProductionScheduleService:
             except Exception as e:
                 warnings.append(f"Could not load products for matching: {e}")
 
-        # =====================================================
-        # STEP 2: Process aggregated records
-        # =====================================================
-        for (referencia, plant), agg in aggregated.items():
-            record = agg["record"]
-            # Use AGGREGATED values (summed from all rows with same SKU+plant)
-            agg_requested = agg["requested_m2"]
-            agg_completed = agg["completed_m2"]
-            agg_status = agg["status"]
+        # Process each record individually — one lot per row, no aggregation.
+        for record in records:
+            referencia = record.referencia
+            plant = record.plant
+
+            # Skip records without orden_produccion — can't upsert without a key
+            if not record.orden_produccion:
+                skipped += 1
+                warnings.append(f"Skipped {referencia}: no orden_produccion")
+                continue
 
             try:
-                # Attempt to match product
+                # Match product
                 product_id = None
                 sku = None
 
@@ -1250,11 +1201,9 @@ class ProductionScheduleService:
                     ref_no_accent = normalize_accents(ref_upper)
                     ref_no_bte = ref_upper.replace(' BTE', '').replace('BTE', '').strip()
                     ref_no_bte_no_accent = normalize_accents(ref_no_bte)
-                    # Also strip size suffixes like "51X51"
                     ref_no_size = ref_no_bte.replace(' 51X51', '').replace('51X51', '').strip()
                     ref_no_size_no_accent = normalize_accents(ref_no_size)
 
-                    # Try matching in order: exact, no accent, no BTE, no size, normalized
                     product = (
                         products_by_sku.get(ref_upper) or
                         products_by_sku.get(ref_no_accent) or
@@ -1270,16 +1219,16 @@ class ProductionScheduleService:
                     else:
                         unmatched_refs.add(referencia)
 
-                # Build upsert data with AGGREGATED values
                 upsert_data = {
+                    "orden_produccion": record.orden_produccion,
                     "factory_item_code": record.factory_item_code,
                     "referencia": referencia,
                     "sku": sku,
                     "product_id": product_id,
                     "plant": plant,
-                    "requested_m2": float(agg_requested),  # SUMMED value
-                    "completed_m2": float(agg_completed),  # SUMMED value
-                    "status": agg_status.value,            # Most significant status
+                    "requested_m2": float(record.requested_m2),
+                    "completed_m2": float(record.completed_m2),
+                    "status": record.status.value,
                     "scheduled_start_date": record.scheduled_start_date.isoformat() if record.scheduled_start_date else None,
                     "scheduled_end_date": record.scheduled_end_date.isoformat() if record.scheduled_end_date else None,
                     "estimated_delivery_date": record.estimated_delivery_date.isoformat() if record.estimated_delivery_date else None,
@@ -1288,39 +1237,28 @@ class ProductionScheduleService:
                     "source_row": record.source_row,
                 }
 
-                # Upsert (use referencia + plant + source_month as unique key)
+                # orden_produccion is the natural key (lot number) — one row per production order
                 result = self.db.table(self.table).upsert(
                     upsert_data,
-                    on_conflict="referencia,plant,source_month"
+                    on_conflict="orden_produccion"
                 ).execute()
 
                 if result.data:
-                    inserted += 1  # Could be insert or update
+                    inserted += 1
 
-                # Update totals with AGGREGATED values
-                status_counts[agg_status] += 1
-                total_requested += agg_requested
-                total_completed += agg_completed
-
-                # Log if rows were merged
-                if agg["row_count"] > 1:
-                    logger.info(
-                        "sku_rows_merged",
-                        referencia=referencia,
-                        plant=plant,
-                        row_count=agg["row_count"],
-                        total_requested=float(agg_requested),
-                        total_completed=float(agg_completed)
-                    )
+                status_counts[record.status] += 1
+                total_requested += record.requested_m2
+                total_completed += record.completed_m2
 
             except Exception as e:
                 logger.warning(
                     "import_record_failed",
                     referencia=referencia,
+                    orden_produccion=record.orden_produccion,
                     error=str(e)
                 )
                 skipped += 1
-                warnings.append(f"Failed to import {referencia}: {e}")
+                warnings.append(f"Failed to import {referencia} ({record.orden_produccion}): {e}")
 
         logger.info(
             "excel_import_complete",

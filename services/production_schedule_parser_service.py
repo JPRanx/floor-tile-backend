@@ -547,6 +547,7 @@ Return JSON in this exact structure:
                 single_config = {
                     'referencia_col': 'Referencia',
                     'items_col': 'ITEMS',
+                    'orden_produccion_col': 'Orden de producción',
                     'fecha_inicio_col': 'Fecha Inicio',
                     'fecha_fin_col': 'Fecha Fin',
                     'formato_col': 'Formato',
@@ -586,6 +587,7 @@ Return JSON in this exact structure:
                         'plant': 1,
                         'referencia_col': 'Referencia',
                         'items_col': 'ITEMS',
+                        'orden_produccion_col': 'Orden de producción',
                         'fecha_inicio_col': 'Fecha Inicio',
                         'fecha_fin_col': 'Fecha Fin',
                         'formato_col': 'Formato',
@@ -603,6 +605,7 @@ Return JSON in this exact structure:
                         'plant': 2,
                         'referencia_col': 'Referencia.1',
                         'items_col': 'ITEMS.1',
+                        'orden_produccion_col': 'Orden de producción.1',
                         'fecha_inicio_col': 'Fecha Inicio.1',
                         'fecha_fin_col': 'Fecha Fin.1',
                         'formato_col': 'Formato',  # Shared column
@@ -698,6 +701,14 @@ Return JSON in this exact structure:
         else:
             factory_code = str(int(factory_code))
 
+        # Get orden de producción (lot number, e.g. P1-00026)
+        orden_produccion_col = config.get('orden_produccion_col')
+        orden_produccion = None
+        if orden_produccion_col:
+            raw_op = row.get(orden_produccion_col)
+            if pd.notna(raw_op) and str(raw_op).strip():
+                orden_produccion = str(raw_op).strip()
+
         # Get dates
         fecha_inicio = self._parse_excel_date(row.get(config['fecha_inicio_col']))
         fecha_fin = self._parse_excel_date(row.get(config['fecha_fin_col']))
@@ -726,16 +737,11 @@ Return JSON in this exact structure:
         m2_primera_programa = self._parse_decimal(row.get(config['m2_primera_programa_col']))
         m2_primera_real = self._parse_decimal(row.get(config['m2_primera_real_col']))
 
-        # Get Real totals for fallback
-        m2_totales_real_col = config.get('m2_totales_real_col')
-        m2_totales_real = self._parse_decimal(row.get(m2_totales_real_col)) if m2_totales_real_col else None
-
-        # Fallback: if m2 Primera exportacion is empty, use m2 Totales Netos
-        # (some files don't fill Primera until export allocation is decided)
-        if not m2_primera_programa and m2_totales_programa:
-            m2_primera_programa = m2_totales_programa
-        if not m2_primera_real and m2_totales_real:
-            m2_primera_real = m2_totales_real
+        # Skip rows with no export m² — not Ashley's production.
+        # The factory makes tiles for multiple customers; only rows with
+        # m2 Primera exportacion values are destined for Guatemala.
+        if not m2_primera_programa and not m2_primera_real:
+            return line_items, production_records
 
         # Create ParsedProductionSchedule line item (for Claude format compatibility)
         if factory_code and fecha_inicio:
@@ -770,6 +776,7 @@ Return JSON in this exact structure:
         # Create ProductionScheduleCreate record
         plant_str = f"plant_{plant}"
         production_record = ProductionScheduleCreate(
+            orden_produccion=orden_produccion,
             factory_item_code=factory_code,
             referencia=referencia,
             plant=plant_str,

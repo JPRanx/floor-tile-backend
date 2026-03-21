@@ -231,6 +231,8 @@ def compute_horizon(
                 days_to_next_resupply = max(1, (arr - today).days + 30)
 
             # No velocity = no consumption = no gap. Show product but don't restock.
+            factory_max_pallets = int(factory_m2 / M2_PER_PALLET)
+
             if velocity <= 0:
                 stock_at_next_resupply = stock
                 coverage_gap = Decimal(0)
@@ -242,7 +244,7 @@ def compute_horizon(
                 suggested_pallets = int(
                     (coverage_gap / M2_PER_PALLET).to_integral_value(rounding=ROUND_UP)
                 ) if coverage_gap > 0 else 0
-                can_ship = min(suggested_pallets, int(factory_m2 / M2_PER_PALLET))
+                can_ship = min(suggested_pallets, factory_max_pallets)
 
             # ── Urgency (days of stock from today) ────────────────────
             if velocity > 0:
@@ -299,6 +301,7 @@ def compute_horizon(
                 "can_ship_pallets": can_ship,
                 "allocated_pallets": allocated_pallets,
                 "factory_available_m2": float(factory_m2),
+                "factory_max_pallets": factory_max_pallets,
                 "is_draft_committed": pid in boat_drafts,
             })
 
@@ -334,20 +337,24 @@ def compute_horizon(
                 urgency_counts[p["urgency"]] += 1
 
         # ── Skip-boat check ───────────────────────────────────────────
-        # If boat doesn't justify shipping, zero it out.
-        # Running stock stays unchanged — nothing ships on a skipped boat.
-        skip = False
-        skip_reason = None
+        # Two separate concepts:
+        # 1. skip_recommended: math says this boat isn't worth shipping (advisory)
+        # 2. skip (actual): only skip cascade if no draft AND math says skip
         has_draft = boat["id"] in drafts_by_boat
-        is_locked = boat["_state"] == "ORDERED" or has_draft  # Ashley touched it — never skip
+        is_locked = boat["_state"] == "ORDERED" or has_draft
 
-        if not is_locked and boat_total_pallets < MIN_BOAT_PALLETS:
-            skip = True
+        # Always compute the recommendation based on math
+        skip_recommended = boat_total_pallets < MIN_BOAT_PALLETS
+        skip_reason = None
+        if skip_recommended:
             skip_reason = (
-                f"Only {int(boat_total_pallets)} pallets "
-                f"({int(boat_total_pallets / PALLETS_PER_CONTAINER)} containers). "
-                f"Minimum is {MIN_BOAT_PALLETS} pallets ({MIN_BLS_PER_BOAT} containers)."
+                f"Solo {int(boat_total_pallets)} pallets "
+                f"({int(boat_total_pallets / PALLETS_PER_CONTAINER)} contenedores). "
+                f"Minimo es {MIN_BOAT_PALLETS} pallets ({MIN_BLS_PER_BOAT} contenedores)."
             )
+
+        # Only actually skip cascade if Ashley hasn't touched it
+        skip = skip_recommended and not is_locked
 
         # ── Apply cascade (only if boat is NOT skipped) ───────────────
         if not skip:
@@ -393,7 +400,7 @@ def compute_horizon(
             "total_containers": int(boat_total_pallets / PALLETS_PER_CONTAINER),
             "total_m2": float(Decimal(int(boat_total_pallets)) * M2_PER_PALLET),
             "urgency_breakdown": urgency_counts,
-            "skip_recommended": skip,
+            "skip_recommended": skip_recommended,
             "skip_reason": skip_reason,
             "product_count": len([p for p in boat_products if p["suggested_pallets"] > 0]),
             "products": boat_products,
@@ -401,7 +408,7 @@ def compute_horizon(
 
         projections.append(projection)
 
-        if skip:
+        if skip_recommended:
             skip_recommendations.append({
                 "boat_id": boat["id"],
                 "boat_name": boat.get("name", ""),

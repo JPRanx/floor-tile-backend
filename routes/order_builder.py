@@ -43,6 +43,9 @@ from services.trend_service import get_trend_service
 from services.bl_allocation_service import get_bl_allocation_service
 from exceptions import FactoryOrderPVExistsError, DatabaseError
 from config.shipping import M2_PER_PALLET
+from config import get_supabase_client
+from lib.brain import compute_horizon
+from routes.horizon import _query_inputs
 from collections import defaultdict
 
 logger = structlog.get_logger(__name__)
@@ -234,6 +237,48 @@ def confirm_order(request: ConfirmOrderRequest) -> ConfirmOrderResponse:
             pv_number=pv_number,
             daily_count=daily_count
         )
+
+    # Hard validation: use the brain's cascaded factory_available_m2.
+    # This accounts for earlier boats consuming factory stock — single source of truth.
+    if request.factory_id:
+        try:
+            inputs = _query_inputs(request.factory_id, date.today())
+            freshness = inputs.pop("_freshness")
+            horizon = compute_horizon(**inputs, today=date.today())
+
+            # Find this boat's products in the brain output
+            brain_products: dict[str, dict] = {}
+            for proj in horizon["projections"]:
+                if proj["boat_id"] == request.boat_id:
+                    for bp in proj["products"]:
+                        brain_products[bp["product_id"]] = bp
+                    break
+
+            if brain_products:
+                violations = []
+                for product in request.products:
+                    bp = brain_products.get(product.product_id)
+                    if not bp:
+                        continue
+                    cascaded_avail = Decimal(str(bp["factory_available_m2"]))
+                    max_pallets = int(cascaded_avail / M2_PER_PALLET_FACTORY)
+                    if product.pallets > max_pallets:
+                        violations.append(
+                            f"{product.sku}: {product.pallets}p pedidos, "
+                            f"disponible {max_pallets}p ({cascaded_avail} m²)"
+                        )
+
+                if violations:
+                    logger.warning("confirm_blocked_over_allocation", violations=violations)
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Productos exceden stock de fabrica: {'; '.join(violations)}"
+                    )
+        except HTTPException:
+            raise  # Re-raise validation errors
+        except Exception as e:
+            # Brain validation failed — log but don't block the order
+            logger.warning("brain_validation_failed", error=str(e))
 
     # Convert Order Builder products to factory_order_items
     # Pallets → m² conversion: pallets × 134.4

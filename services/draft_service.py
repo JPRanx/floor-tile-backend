@@ -393,10 +393,9 @@ class DraftService:
             # Auto-assign BL 1 for unit-based factories (e.g. Muebles — low volume, no container split)
             auto_bl = self._is_unit_based_factory(factory_id)
 
-            # Defense-in-depth: cap quantities at factory available stock
+            # NOTE: No server-side capping on save. Drafts are sacred — save
+            # exactly what Ashley typed. Validation happens at Confirm time.
             warnings = []
-            if items:
-                warnings = self._validate_quantities_vs_factory_stock(factory_id, items)
 
             if items:
                 rows = []
@@ -430,6 +429,7 @@ class DraftService:
             # Return full draft with items and any validation warnings
             self._attach_items(draft)
             draft["warnings"] = warnings
+
 
             # Soft cascade: flag later drafts ONLY if content actually changed
             new_hash = self._compute_items_hash(items)
