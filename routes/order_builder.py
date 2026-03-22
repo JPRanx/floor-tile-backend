@@ -2,15 +2,14 @@
 Order Builder API routes.
 
 GET /api/order-builder — Get Order Builder data for the hero feature.
-POST /api/order-builder/confirm — Confirm order and create factory_order.
 POST /api/order-builder/export — Export order to factory Excel format.
 """
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Optional, List
 from decimal import Decimal
 import time
-from fastapi import APIRouter, Query, HTTPException, status
+from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import structlog
@@ -20,8 +19,6 @@ from models.order_builder import (
     OrderBuilderProduct,
     AddToProductionItem,
     FactoryRequestItem,
-    ConfirmOrderRequest,
-    ConfirmOrderResponse,
     DemandForecastResponse,
     CustomerDue,
     CustomerProduct,
@@ -34,18 +31,14 @@ from models.bl_allocation import (
     BLAllocationResponse,
     BLAllocationReport,
 )
-from models.factory_order import FactoryOrderCreate, FactoryOrderItemCreate
 from services.order_builder_service import get_order_builder_service
 from services.export_service import get_export_service, MONTHS_ES
-from services.factory_order_service import get_factory_order_service
 from services.customer_pattern_service import get_customer_pattern_service
 from services.trend_service import get_trend_service
 from services.bl_allocation_service import get_bl_allocation_service
-from exceptions import FactoryOrderPVExistsError, DatabaseError
+from exceptions import DatabaseError
 from config.shipping import M2_PER_PALLET
 from config import get_supabase_client
-from lib.brain import compute_horizon
-from routes.horizon import _query_inputs
 from collections import defaultdict
 
 logger = structlog.get_logger(__name__)
@@ -189,164 +182,6 @@ def recalculate_order(request: RecalculateRequest) -> OrderBuilderResponse:
         excluded_count=len(request.excluded_skus)
     )
     return result
-
-
-@router.post("/confirm", response_model=ConfirmOrderResponse, status_code=status.HTTP_201_CREATED)
-def confirm_order(request: ConfirmOrderRequest) -> ConfirmOrderResponse:
-    """
-    Confirm order and create factory_order record.
-
-    This creates a persistent factory_order that can be:
-    - Tracked through production (PENDING → CONFIRMED → READY → SHIPPED)
-    - Linked to shipments later
-    - Referenced by PV number
-
-    Request body:
-    {
-        "boat_id": "uuid",
-        "boat_name": "MSC Mediterranean",
-        "boat_departure": "2026-02-15",
-        "products": [
-            {"product_id": "uuid", "sku": "ALMENDRO BEIGE BTE", "pallets": 14},
-            {"product_id": "uuid", "sku": "CEIBA GRIS CLARO BTE", "pallets": 7}
-        ],
-        "pv_number": "PV-20260108-001",  // Optional - auto-generated if not provided
-        "notes": "Urgent order for February shipment"
-    }
-
-    Returns: Created factory_order with PV number and details
-    """
-    logger.info(
-        "confirm_order_request",
-        boat_id=request.boat_id,
-        product_count=len(request.products),
-        pv_number=request.pv_number
-    )
-
-    factory_order_service = get_factory_order_service()
-
-    # Auto-generate PV number if not provided
-    pv_number = request.pv_number
-    if not pv_number:
-        today = date.today()
-        daily_count = factory_order_service.count_by_date(today)
-        pv_number = f"PV-{today.strftime('%Y%m%d')}-{daily_count + 1:03d}"
-
-        logger.info(
-            "pv_number_generated",
-            pv_number=pv_number,
-            daily_count=daily_count
-        )
-
-    # Hard validation: use the brain's cascaded factory_available_m2.
-    # This accounts for earlier boats consuming factory stock — single source of truth.
-    if request.factory_id:
-        try:
-            inputs = _query_inputs(request.factory_id, date.today())
-            freshness = inputs.pop("_freshness")
-            horizon = compute_horizon(**inputs, today=date.today())
-
-            # Find this boat's products in the brain output
-            brain_products: dict[str, dict] = {}
-            for proj in horizon["projections"]:
-                if proj["boat_id"] == request.boat_id:
-                    for bp in proj["products"]:
-                        brain_products[bp["product_id"]] = bp
-                    break
-
-            if brain_products:
-                violations = []
-                for product in request.products:
-                    bp = brain_products.get(product.product_id)
-                    if not bp:
-                        continue
-                    cascaded_avail = Decimal(str(bp["factory_available_m2"]))
-                    max_pallets = int(cascaded_avail / M2_PER_PALLET_FACTORY)
-                    if product.pallets > max_pallets:
-                        violations.append(
-                            f"{product.sku}: {product.pallets}p pedidos, "
-                            f"disponible {max_pallets}p ({cascaded_avail} m²)"
-                        )
-
-                if violations:
-                    logger.warning("confirm_blocked_over_allocation", violations=violations)
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Productos exceden stock de fabrica: {'; '.join(violations)}"
-                    )
-        except HTTPException:
-            raise  # Re-raise validation errors
-        except Exception as e:
-            # Brain validation failed — log but don't block the order
-            logger.warning("brain_validation_failed", error=str(e))
-
-    # Convert Order Builder products to factory_order_items
-    # Pallets → m² conversion: pallets × 134.4
-    items = []
-    total_pallets = 0
-
-    for product in request.products:
-        quantity_m2 = Decimal(product.pallets) * M2_PER_PALLET_FACTORY
-        total_pallets += product.pallets
-
-        # Estimated ready date: ~30 days before boat departure
-        estimated_ready = request.boat_departure - timedelta(days=30)
-
-        items.append(FactoryOrderItemCreate(
-            product_id=product.product_id,
-            quantity_ordered=quantity_m2,
-            estimated_ready_date=estimated_ready
-        ))
-
-    # Build notes with boat reference
-    notes_parts = []
-    if request.notes:
-        notes_parts.append(request.notes)
-    notes_parts.append(f"Created from Order Builder for boat {request.boat_name} departing {request.boat_departure.strftime('%Y-%m-%d')}")
-    combined_notes = " | ".join(notes_parts)
-
-    # Create factory order
-    factory_order_data = FactoryOrderCreate(
-        pv_number=pv_number,
-        order_date=date.today(),
-        items=items,
-        notes=combined_notes
-    )
-
-    try:
-        factory_order = factory_order_service.create(factory_order_data)
-
-        logger.info(
-            "factory_order_confirmed",
-            factory_order_id=factory_order.id,
-            pv_number=factory_order.pv_number,
-            items_count=len(items),
-            total_m2=float(factory_order.total_m2)
-        )
-
-        return ConfirmOrderResponse(
-            factory_order_id=factory_order.id,
-            pv_number=factory_order.pv_number,
-            status=factory_order.status.value,
-            order_date=factory_order.order_date,
-            items_count=factory_order.item_count,
-            total_m2=factory_order.total_m2,
-            total_pallets=total_pallets,
-            created_at=factory_order.created_at.isoformat()
-        )
-
-    except FactoryOrderPVExistsError as e:
-        logger.warning("pv_number_exists", pv_number=pv_number)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"PV number {pv_number} already exists. Please use a different PV number."
-        )
-    except DatabaseError as e:
-        logger.error("confirm_order_failed", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create factory order. Please try again."
-        )
 
 
 @router.post("/export")
