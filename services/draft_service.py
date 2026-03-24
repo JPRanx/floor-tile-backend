@@ -352,6 +352,7 @@ class DraftService:
                 result = (
                     self.db.table(self.drafts_table)
                     .update({
+                        "status": "drafting",
                         "notes": notes,
                         "last_edited_at": now,
                         "updated_at": now,
