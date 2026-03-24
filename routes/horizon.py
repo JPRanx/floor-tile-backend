@@ -40,10 +40,12 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     ]
     freshness["products"] = len(products)
 
-    # 2. Boat schedules — only boats that haven't departed yet
+    # 2. Boat schedules — only boats that haven't departed yet and aren't ignored
     boats_res = db.table("boat_schedules").select(
-        "id, vessel_name, departure_date, arrival_date, carrier"
-    ).gte("departure_date", today.isoformat()).order("departure_date").execute()
+        "id, vessel_name, departure_date, arrival_date, carrier, status"
+    ).gte("departure_date", today.isoformat()).neq(
+        "status", "ignored"
+    ).order("departure_date").execute()
 
     # Also fetch boats with shipment_items (anchor candidates, may have departed)
     shipment_boat_ids_res = db.table("shipment_items").select("boat_id").execute()
@@ -337,3 +339,27 @@ async def get_horizon_detail(factory_id: str, boat_id: str):
         "data_as_of": result["data_as_of"],
         "_debug": boat_debug,
     }
+
+
+@router.patch("/boats/{boat_id}/ignore")
+async def ignore_boat(boat_id: str):
+    """Mark a boat as ignored. Brain will skip it and cascade products to next boats."""
+    db = get_supabase_client()
+    result = db.table("boat_schedules").update(
+        {"status": "ignored"}
+    ).eq("id", boat_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Boat not found")
+    return {"success": True, "boat_id": boat_id, "status": "ignored"}
+
+
+@router.patch("/boats/{boat_id}/restore")
+async def restore_boat(boat_id: str):
+    """Restore an ignored boat back to available."""
+    db = get_supabase_client()
+    result = db.table("boat_schedules").update(
+        {"status": "available"}
+    ).eq("id", boat_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Boat not found")
+    return {"success": True, "boat_id": boat_id, "status": "available"}
