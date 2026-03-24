@@ -159,31 +159,52 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
         extracted_products = extract_products_from_excel(BytesIO(content))
 
         # Determine which products will be auto-created
-        products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+        # Get ALL products (including inactive) to distinguish "new" from "deactivated"
+        active_products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+        all_products, _ = product_service.get_all(page=1, page_size=1000, active_only=False)
 
         # Build lookup: owner_code -> product
         known_owner_codes = {
             p.owner_code: p
-            for p in products
+            for p in active_products
             if p.owner_code is not None
         }
 
-        # Build lookup: normalized SKU name -> product
+        # Build lookup: normalized SKU name -> product (active only for main lookup)
         known_sku_names = {
             _normalize_sku_name(p.sku): p
-            for p in products
+            for p in active_products
             if p.sku
         }
 
+        # Build deactivated lookup to catch "exists but inactive"
+        deactivated_sku_names = {
+            _normalize_sku_name(p.sku): p
+            for p in all_products
+            if p.sku and not p.active
+        }
+
+        # Summary row names to skip — not real products
+        _SKIP_SKUS = {"TOTALES", "TOTAL", "SUBTOTAL", "GRAN TOTAL"}
+
         # Determine which products would be auto-created
         auto_created_skus = []
+        deactivated_skus = []
         products_to_upsert = []
         for p in extracted_products:
-            # Check if product already exists
+            # Skip summary rows
+            if p.sku.strip().upper() in _SKIP_SKUS:
+                continue
+
             normalized_sku = _normalize_sku_name(p.sku)
             exists = normalized_sku in known_sku_names
 
             if not exists:
+                # Check if it's a deactivated product — don't auto-create, just warn
+                if normalized_sku in deactivated_sku_names:
+                    deactivated_skus.append(p.sku)
+                    continue
+
                 auto_created_skus.append(p.sku)
                 try:
                     products_to_upsert.append(ProductCreate(
@@ -325,6 +346,7 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
             zero_filled_products=zero_filled_skus[:20],  # Limit to 20
             warnings=(
                 ([f"Este archivo ya fue subido el {inv_duplicate['uploaded_at'][:10]} ({inv_duplicate['filename']})"] if inv_duplicate else [])
+                + ([f"Productos desactivados ignorados: {', '.join(deactivated_skus)}"] if deactivated_skus else [])
                 + unmatched_warnings
             ),
             rows=all_rows,
