@@ -160,20 +160,20 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
 
         # Determine which products will be auto-created
         # Get ALL products (including inactive) to distinguish "new" from "deactivated"
-        active_products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+        products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
         all_products, _ = product_service.get_all(page=1, page_size=1000, active_only=False)
 
         # Build lookup: owner_code -> product
         known_owner_codes = {
             p.owner_code: p
-            for p in active_products
+            for p in products
             if p.owner_code is not None
         }
 
         # Build lookup: normalized SKU name -> product (active only for main lookup)
         known_sku_names = {
             _normalize_sku_name(p.sku): p
-            for p in active_products
+            for p in products
             if p.sku
         }
 
