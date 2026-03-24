@@ -589,6 +589,19 @@ def _parse_sales_sheet(
     required = ["sku", "cantidad_m2", "fecha"]
     missing = [col for col in required if col not in df.columns]
 
+    # If columns missing, row 0 might be a title row (REPORTE VENTAS PERPETUO layout).
+    # Retry with header=1 to skip the title.
+    if missing:
+        logger.info("sales_retrying_header1", sheet=sheet_name, missing=missing)
+        try:
+            df = excel.parse(sheet_name, header=1)
+            df.columns = [_normalize_column(col) for col in df.columns]
+            raw_columns = [str(c) for c in df.columns]
+            normalized_columns = df.columns.tolist()
+            missing = [col for col in required if col not in df.columns]
+        except Exception:
+            pass  # Fall through to the error below
+
     if missing:
         logger.error(
             "sales_missing_columns",

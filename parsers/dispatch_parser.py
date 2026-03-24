@@ -19,6 +19,26 @@ import pandas as pd
 logger = structlog.get_logger(__name__)
 
 
+def _parse_date(value) -> Optional[date]:
+    """Parse various date formats to date object (DD/MM/YYYY Latin American standard)."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    raw = str(value).strip()
+    if not raw:
+        return None
+    # Try DD/MM/YYYY
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 @dataclass
 class InTransitProduct:
     """Aggregated in-transit quantity for one product."""
@@ -130,12 +150,28 @@ def parse_dispatch_excel(
     # Build SKU lookup
     sku_map = _build_sku_mapping(products)
 
-    # Read Excel: sheet 0, header at row 2
-    try:
-        df = pd.read_excel(BytesIO(file_content), sheet_name=0, header=2)
-    except Exception as e:
-        logger.error("dispatch_excel_read_failed", error=str(e))
-        raise ValueError(f"Failed to read dispatch Excel: {e}")
+    # Read Excel: try header rows 2, 1, 0 — Ashley's format may vary
+    df = None
+    for header_row in (2, 1, 0):
+        try:
+            candidate = pd.read_excel(BytesIO(file_content), sheet_name=0, header=header_row)
+            cols_lower = [str(c).lower() for c in candidate.columns]
+            # Check if we found real column names (not data values)
+            has_ref = any("referencia" in c for c in cols_lower)
+            has_mt = any("mt" in c and "cantidad" in c for c in cols_lower)
+            if has_ref and has_mt:
+                df = candidate
+                logger.info("dispatch_header_detected", header_row=header_row)
+                break
+        except Exception:
+            continue
+
+    if df is None:
+        try:
+            df = pd.read_excel(BytesIO(file_content), sheet_name=0, header=2)
+        except Exception as e:
+            logger.error("dispatch_excel_read_failed", error=str(e))
+            raise ValueError(f"Failed to read dispatch Excel: {e}")
 
     raw_columns = [str(c) for c in df.columns]
     logger.info("dispatch_columns_detected", raw_columns=raw_columns[:15])
@@ -149,7 +185,7 @@ def parse_dispatch_excel(
     qty_col = None
     for col in df.columns:
         col_str = str(col).lower().strip()
-        if "factura" in col_str:
+        if "factura" in col_str or "orden" in col_str:
             factura_col = col
         elif "etd" in col_str or ("tentativa" in col_str and factura_col and not etd_col):
             etd_col = col
