@@ -180,11 +180,11 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     ]
     freshness["production_records"] = len(production_schedule)
 
-    # 8. Drafts — only 'drafting' status (Ashley's active WIP from new UI).
+    # 8. Drafts — active drafts (drafting + action_needed).
     #    Old garbage drafts were neutralized (status → confirmed).
     drafts_res = db.table("boat_factory_drafts").select(
         "id, boat_id, factory_id, status"
-    ).eq("status", "drafting").eq("factory_id", factory_id).execute()
+    ).in_("status", ["drafting", "action_needed"]).eq("factory_id", factory_id).execute()
 
     drafts: list[dict] = []
     draft_ids = [d["id"] for d in drafts_res.data]
