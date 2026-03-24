@@ -865,6 +865,8 @@ class BoatScheduleService:
             "carrier": "TIBA",
             "status": status,
         }
+        if record.booking_number:
+            update_data["booking_number"] = record.booking_number
 
         self.db.table(self.table).update(update_data).eq("id", boat_id).execute()
 
@@ -978,6 +980,8 @@ class BoatScheduleService:
             "source_file": source_file,
             "carrier": "TIBA",
         }
+        if record.booking_number:
+            insert_data["booking_number"] = record.booking_number
 
         self.db.table(self.table).insert(insert_data).execute()
 

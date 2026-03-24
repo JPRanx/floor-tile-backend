@@ -36,6 +36,7 @@ class BoatScheduleRecord:
     origin_port: str = "Castellon"
     destination_port: str = "Puerto Quetzal"
     route_type: Optional[str] = None  # 'direct' or 'with_stops'
+    booking_number: Optional[str] = None  # From "# Booking" column
 
 
 @dataclass
@@ -398,6 +399,7 @@ def _parse_booking_sheet(
             vessel_name = _get_string_value(row, col_mapping["vessel"])
             shipping_line = _get_string_value(row, col_mapping["shipping_line"])
             route = _get_string_value(row, col_mapping["route"])
+            booking_number = _get_string_value(row, col_mapping["booking_number"])
 
             # Map route to route_type
             route_type = _parse_route_type(route)
@@ -412,6 +414,7 @@ def _parse_booking_sheet(
                 origin_port=result.origin_port or "Castellon",
                 destination_port="Puerto Quetzal",
                 route_type=route_type,
+                booking_number=booking_number,
             ))
 
 
@@ -480,6 +483,7 @@ def _get_column_mapping(columns: list[str]) -> dict:
         "vessel": None,
         "shipping_line": None,
         "route": None,
+        "booking_number": None,
     }
 
     for col in columns:
@@ -496,6 +500,8 @@ def _get_column_mapping(columns: list[str]) -> dict:
             mapping["shipping_line"] = col
         elif "ruta" in col_lower or "route" in col_lower:
             mapping["route"] = col
+        elif "booking" in col_lower:
+            mapping["booking_number"] = col
 
     return mapping
 

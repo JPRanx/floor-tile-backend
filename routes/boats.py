@@ -317,6 +317,7 @@ async def preview_boat_upload(file: UploadFile = File(...)):
                 "carrier": "TIBA",
                 "shipping_line": r.shipping_line if hasattr(r, 'shipping_line') else None,
                 "route_type": r.route_type if hasattr(r, 'route_type') else None,
+                "booking_number": r.booking_number if hasattr(r, 'booking_number') else None,
             }
             for r in sorted_schedules  # Use sorted order to match preview row_index
         ]
@@ -433,6 +434,7 @@ async def confirm_boat_upload(preview_id: str, request: Optional[BoatConfirmRequ
                 origin_port=sched_dict.get("origin_port", "Cartagena"),
                 destination_port=sched_dict.get("destination_port", "Puerto Quetzal"),
                 route_type=sched_dict.get("route_type"),
+                booking_number=sched_dict.get("booking_number"),
             ))
 
         result = service.import_from_records(records, filename)

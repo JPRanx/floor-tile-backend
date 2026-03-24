@@ -1732,9 +1732,49 @@ async def upload_in_transit(
             updated_count += 1
             details.append({"sku": product.sku, "in_transit_m2": product.in_transit_m2})
 
-        # Save per-boat shipment records when boat_id is provided.
-        # This is the source of truth for "what actually shipped on this boat."
-        if boat_id:
+        # Auto-match dispatch orders to boats via booking_number.
+        # Each DispatchOrder has a booking_number from the dispatch file.
+        # boat_schedules has booking_number from the TIBA Tabla de Booking.
+        # Match them to auto-write shipment_items per boat.
+        booking_matches = 0
+        if parse_result.orders:
+            # Build booking_number → boat_id lookup
+            booking_numbers = [o.booking_number for o in parse_result.orders if o.booking_number]
+            boat_lookup: dict[str, str] = {}
+            if booking_numbers:
+                boats_result = db.table("boat_schedules").select("id,booking_number").in_(
+                    "booking_number", booking_numbers
+                ).execute()
+                for boat in boats_result.data:
+                    if boat.get("booking_number"):
+                        boat_lookup[boat["booking_number"].strip()] = boat["id"]
+
+            for order in parse_result.orders:
+                matched_boat_id = None
+                if order.booking_number and order.booking_number.strip() in boat_lookup:
+                    matched_boat_id = boat_lookup[order.booking_number.strip()]
+                elif boat_id:
+                    matched_boat_id = boat_id  # Fallback to manually provided boat_id
+
+                if matched_boat_id:
+                    for item in order.items:
+                        pallets = math.ceil(item.m2 / float(M2_PER_PALLET)) if item.m2 > 0 else 0
+                        db.table("shipment_items").upsert({
+                            "boat_id": matched_boat_id,
+                            "product_id": item.product_id,
+                            "shipped_m2": item.m2,
+                            "shipped_pallets": pallets,
+                            "snapshot_date": snapshot_date.isoformat(),
+                        }, on_conflict="boat_id,product_id").execute()
+                    booking_matches += 1
+
+            logger.info("shipment_items_auto_matched",
+                        orders=len(parse_result.orders),
+                        matched=booking_matches,
+                        boats_found=len(boat_lookup))
+
+        # Fallback: if no orders parsed but boat_id provided, use aggregate totals
+        if booking_matches == 0 and boat_id:
             for product in parse_result.products:
                 pallets = math.ceil(product.in_transit_m2 / float(M2_PER_PALLET)) if product.in_transit_m2 > 0 else 0
                 db.table("shipment_items").upsert({
@@ -1744,7 +1784,7 @@ async def upload_in_transit(
                     "shipped_pallets": pallets,
                     "snapshot_date": snapshot_date.isoformat(),
                 }, on_conflict="boat_id,product_id").execute()
-            logger.info("shipment_items_saved", boat_id=boat_id, products=len(parse_result.products))
+            logger.info("shipment_items_saved_fallback", boat_id=boat_id, products=len(parse_result.products))
 
         logger.info(
             "in_transit_upload_complete",

@@ -57,9 +57,10 @@ class DispatchOrderItem:
 
 @dataclass
 class DispatchOrder:
-    """A single order (factura) from the dispatch file with ETD."""
+    """A single order (factura) from the dispatch file with ETD and booking."""
     factura: str
     etd: date | None
+    booking_number: str | None = None
     items: list[DispatchOrderItem] = field(default_factory=list)
 
 
@@ -183,6 +184,7 @@ def parse_dispatch_excel(
     etd_col = None
     sku_col = None
     qty_col = None
+    booking_col = None
     for col in df.columns:
         col_str = str(col).lower().strip()
         if "factura" in col_str or "orden" in col_str:
@@ -193,15 +195,19 @@ def parse_dispatch_excel(
             sku_col = col
         elif "cantidad" in col_str and "mt" in col_str:
             qty_col = col
+        elif "booking" in col_str:
+            booking_col = col
 
     if factura_col is None:
         logger.warning("dispatch_no_factura_column", columns=raw_columns)
         factura_col = df.columns[0]
 
-    # Forward-fill factura and ETD so each row inherits its order's values
+    # Forward-fill factura, ETD, and booking so each row inherits its order's values
     df[factura_col] = df[factura_col].ffill()
     if etd_col is not None:
         df[etd_col] = df[etd_col].ffill()
+    if booking_col is not None:
+        df[booking_col] = df[booking_col].ffill()
 
     # Filter out received orders
     if received_orders:
@@ -260,7 +266,8 @@ def parse_dispatch_excel(
         factura_val = str(row[factura_col]).strip() if pd.notna(row.get(factura_col)) else ""
         if factura_val and factura_val not in orders_map:
             etd_val = _parse_date(row.get(etd_col)) if etd_col else None
-            orders_map[factura_val] = DispatchOrder(factura=factura_val, etd=etd_val)
+            booking_val = str(row[booking_col]).strip() if booking_col and pd.notna(row.get(booking_col)) else None
+            orders_map[factura_val] = DispatchOrder(factura=factura_val, etd=etd_val, booking_number=booking_val)
         if factura_val:
             orders_map[factura_val].items.append(DispatchOrderItem(product_id=pid, sku=sku, m2=cantidad))
 
