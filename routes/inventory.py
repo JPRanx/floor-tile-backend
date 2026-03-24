@@ -1543,32 +1543,47 @@ async def parse_in_transit(
         from parsers.dispatch_parser import parse_dispatch_excel, normalize_unmatched_sku
         parse_result = parse_dispatch_excel(content, products, [])
 
-        # Auto-create unmatched products (if CI is shipping them, they're real)
+        # Auto-create unmatched products — skip furniture (MUEBLE DE BAÑO)
+        SKIP_PREFIXES = ("MUEBLE DE BA",)  # catches BAÑO and BANO (accent-stripped)
         if parse_result.unmatched_skus:
             from models.product import ProductCreate, Category
-            new_products = [
-                ProductCreate(sku=normalize_unmatched_sku(raw), category=Category.MADERAS)
-                for raw in parse_result.unmatched_skus
+            tile_skus = [
+                raw for raw in parse_result.unmatched_skus
+                if not any(normalize_unmatched_sku(raw).startswith(p) for p in SKIP_PREFIXES)
             ]
-            created, _ = product_service.bulk_upsert(new_products)
-            if created > 0:
-                logger.info("dispatch_auto_created_products", count=created,
-                            skus=[p.sku for p in new_products])
-                # Re-parse with expanded product list so new products get matched
-                products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
-                parse_result = parse_dispatch_excel(content, products, [])
+            if tile_skus:
+                new_products = [
+                    ProductCreate(sku=normalize_unmatched_sku(raw), category=Category.MADERAS)
+                    for raw in tile_skus
+                ]
+                created, _ = product_service.bulk_upsert(new_products)
+                if created > 0:
+                    logger.info("dispatch_auto_created_products", count=created,
+                                skus=[p.sku for p in new_products])
+                    # Re-parse with expanded product list so new products get matched
+                    products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+                    parse_result = parse_dispatch_excel(content, products, [])
 
         # Auto-match dispatch orders to boats via booking_number
         db = get_supabase_client()
 
+        def _extract_booking_code(raw: str) -> str:
+            """Extract BGA code from dispatch booking like 'CMA BGA0514776' -> 'BGA0514776'."""
+            for part in raw.strip().split():
+                if part.startswith("BGA"):
+                    return part
+            return raw.strip()
+
         booking_matches = []
         if parse_result.orders:
-            booking_numbers = [o.booking_number for o in parse_result.orders if o.booking_number]
+            # Extract normalized booking codes for DB lookup
+            raw_bookings = [o.booking_number for o in parse_result.orders if o.booking_number]
+            normalized_codes = list({_extract_booking_code(b) for b in raw_bookings})
             boat_lookup: dict[str, dict] = {}
-            if booking_numbers:
+            if normalized_codes:
                 boats_result = db.table("boat_schedules").select(
                     "id, vessel_name, departure_date, booking_number"
-                ).in_("booking_number", booking_numbers).execute()
+                ).in_("booking_number", normalized_codes).execute()
                 for boat in (boats_result.data or []):
                     bn = boat.get("booking_number", "")
                     if bn:
@@ -1577,7 +1592,8 @@ async def parse_in_transit(
             for order in parse_result.orders:
                 boat = None
                 if order.booking_number:
-                    boat = boat_lookup.get(order.booking_number.strip())
+                    code = _extract_booking_code(order.booking_number)
+                    boat = boat_lookup.get(code)
                 order_m2 = sum(item.m2 for item in order.items)
                 booking_matches.append(BookingMatch(
                     factura=order.factura,
@@ -1671,20 +1687,26 @@ async def upload_in_transit(
         from parsers.dispatch_parser import parse_dispatch_excel, normalize_unmatched_sku
         parse_result = parse_dispatch_excel(content, products, excluded)
 
-        # Auto-create unmatched products (if CI is shipping them, they're real)
+        # Auto-create unmatched products — skip furniture (MUEBLE DE BAÑO)
+        SKIP_PREFIXES = ("MUEBLE DE BA",)
         if parse_result.unmatched_skus:
             from models.product import ProductCreate, Category
-            new_products = [
-                ProductCreate(sku=normalize_unmatched_sku(raw), category=Category.MADERAS)
-                for raw in parse_result.unmatched_skus
+            tile_skus = [
+                raw for raw in parse_result.unmatched_skus
+                if not any(normalize_unmatched_sku(raw).startswith(p) for p in SKIP_PREFIXES)
             ]
-            created, _ = product_service.bulk_upsert(new_products)
-            if created > 0:
-                logger.info("dispatch_auto_created_products", count=created,
-                            skus=[p.sku for p in new_products])
-                # Re-parse with expanded product list
-                products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
-                parse_result = parse_dispatch_excel(content, products, excluded)
+            if tile_skus:
+                new_products = [
+                    ProductCreate(sku=normalize_unmatched_sku(raw), category=Category.MADERAS)
+                    for raw in tile_skus
+                ]
+                created, _ = product_service.bulk_upsert(new_products)
+                if created > 0:
+                    logger.info("dispatch_auto_created_products", count=created,
+                                skus=[p.sku for p in new_products])
+                    # Re-parse with expanded product list
+                    products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
+                    parse_result = parse_dispatch_excel(content, products, excluded)
 
         # Get database client
         db = get_supabase_client()
@@ -1719,17 +1741,21 @@ async def upload_in_transit(
             details.append({"sku": product.sku, "in_transit_m2": product.in_transit_m2})
 
         # Auto-match dispatch orders to boats via booking_number.
-        # Each DispatchOrder has a booking_number from the dispatch file.
-        # boat_schedules has booking_number from the TIBA Tabla de Booking.
-        # Match them to auto-write shipment_items per boat.
+        # Dispatch has "CMA BGA0514776", boat_schedules has "BGA0514776".
+        def _extract_booking_code(raw: str) -> str:
+            for part in raw.strip().split():
+                if part.startswith("BGA"):
+                    return part
+            return raw.strip()
+
         booking_matches = 0
         if parse_result.orders:
-            # Build booking_number → boat_id lookup
-            booking_numbers = [o.booking_number for o in parse_result.orders if o.booking_number]
+            raw_bookings = [o.booking_number for o in parse_result.orders if o.booking_number]
+            normalized_codes = list({_extract_booking_code(b) for b in raw_bookings})
             boat_lookup: dict[str, str] = {}
-            if booking_numbers:
+            if normalized_codes:
                 boats_result = db.table("boat_schedules").select("id,booking_number").in_(
-                    "booking_number", booking_numbers
+                    "booking_number", normalized_codes
                 ).execute()
                 for boat in boats_result.data:
                     if boat.get("booking_number"):
@@ -1737,9 +1763,11 @@ async def upload_in_transit(
 
             for order in parse_result.orders:
                 matched_boat_id = None
-                if order.booking_number and order.booking_number.strip() in boat_lookup:
-                    matched_boat_id = boat_lookup[order.booking_number.strip()]
-                elif boat_id:
+                if order.booking_number:
+                    code = _extract_booking_code(order.booking_number)
+                    if code in boat_lookup:
+                        matched_boat_id = boat_lookup[code]
+                if not matched_boat_id and boat_id:
                     matched_boat_id = boat_id  # Fallback to manually provided boat_id
 
                 if matched_boat_id:
