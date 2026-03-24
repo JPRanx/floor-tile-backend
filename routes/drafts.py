@@ -90,7 +90,7 @@ async def save_draft(body: DraftSave):
         raise HTTPException(status_code=500, detail="Failed to save draft")
 
 
-@router.patch("/{draft_id}/status", response_model=DraftResponse)
+@router.patch("/{draft_id}/status")
 async def update_draft_status(draft_id: str, body: DraftStatusUpdate):
     """
     Update draft status.
