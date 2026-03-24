@@ -25,7 +25,7 @@ from models.inventory import (
     InventoryUploadResponse,
     InTransitUploadResponse,
     InTransitParseResponse,
-    CandidateBoat,
+    BookingMatch,
     InventoryPreview,
     InventoryPreviewRow,
     InventoryConfirmRequest,
@@ -1558,73 +1558,36 @@ async def parse_in_transit(
                 products, _ = product_service.get_all(page=1, page_size=1000, active_only=True)
                 parse_result = parse_dispatch_excel(content, products, [])
 
-        # Get candidate boats: future boats with optional draft info
+        # Auto-match dispatch orders to boats via booking_number
         db = get_supabase_client()
-        today = date.today().isoformat()
 
-        boats_result = (
-            db.table("boat_schedules")
-            .select("id, vessel_name, departure_date, arrival_date, carrier")
-            .gte("departure_date", today)
-            .neq("status", "arrived")
-            .order("departure_date", desc=False)
-            .limit(20)
-            .execute()
-        )
+        booking_matches = []
+        if parse_result.orders:
+            booking_numbers = [o.booking_number for o in parse_result.orders if o.booking_number]
+            boat_lookup: dict[str, dict] = {}
+            if booking_numbers:
+                boats_result = db.table("boat_schedules").select(
+                    "id, vessel_name, departure_date, booking_number"
+                ).in_("booking_number", booking_numbers).execute()
+                for boat in (boats_result.data or []):
+                    bn = boat.get("booking_number", "")
+                    if bn:
+                        boat_lookup[bn.strip()] = boat
 
-        candidate_boats = []
-        suggested_set = False
-
-        for boat in (boats_result.data or []):
-            boat_id = boat["id"]
-            # Check for drafts on this boat
-            draft_result = (
-                db.table("boat_factory_drafts")
-                .select("id, status")
-                .eq("boat_id", boat_id)
-                .execute()
-            )
-            draft = draft_result.data[0] if draft_result.data else None
-            draft_status = draft["status"] if draft else None
-            draft_id = draft["id"] if draft else None
-
-            # Count total pallets if draft exists
-            draft_pallets = None
-            if draft_id:
-                items_result = (
-                    db.table("draft_items")
-                    .select("selected_pallets")
-                    .eq("draft_id", draft_id)
-                    .execute()
-                )
-                draft_pallets = sum(
-                    (item.get("selected_pallets", 0) or 0)
-                    for item in (items_result.data or [])
-                )
-
-            # Suggest the soonest boat with a "drafting" draft
-            is_suggested = False
-            if not suggested_set and draft_status == "drafting":
-                is_suggested = True
-                suggested_set = True
-
-            candidate_boats.append(
-                CandidateBoat(
-                    boat_id=boat_id,
-                    vessel_name=boat.get("vessel_name") or "Sin nombre",
-                    departure_date=boat["departure_date"],
-                    arrival_date=boat["arrival_date"],
-                    carrier=boat.get("carrier"),
-                    draft_id=draft_id,
-                    draft_status=draft_status,
-                    draft_pallets=draft_pallets,
-                    is_suggested=is_suggested,
-                )
-            )
-
-        # If no boat with "drafting" was found, suggest the first boat
-        if not suggested_set and candidate_boats:
-            candidate_boats[0].is_suggested = True
+            for order in parse_result.orders:
+                boat = None
+                if order.booking_number:
+                    boat = boat_lookup.get(order.booking_number.strip())
+                order_m2 = sum(item.m2 for item in order.items)
+                booking_matches.append(BookingMatch(
+                    factura=order.factura,
+                    booking_number=order.booking_number,
+                    boat_id=boat["id"] if boat else None,
+                    vessel_name=boat.get("vessel_name") if boat else None,
+                    etd=order.etd,
+                    items_count=len(order.items),
+                    total_m2=round(order_m2, 2),
+                ))
 
         return InTransitParseResponse(
             products=[
@@ -1633,7 +1596,8 @@ async def parse_in_transit(
             ],
             total_m2=parse_result.total_m2,
             unmatched_skus=parse_result.unmatched_skus,
-            candidate_boats=candidate_boats,
+            candidate_boats=[],
+            booking_matches=booking_matches,
         )
 
     except ValueError as e:

@@ -237,12 +237,24 @@ class CandidateBoat(BaseSchema):
     is_suggested: bool = False
 
 
+class BookingMatch(BaseSchema):
+    """A dispatch order matched to a boat via booking number."""
+    factura: str
+    booking_number: str | None = None
+    boat_id: str | None = None
+    vessel_name: str | None = None
+    etd: date | None = None
+    items_count: int = 0
+    total_m2: float = 0
+
+
 class InTransitParseResponse(BaseSchema):
     """Preview response for in-transit dispatch file parsing."""
     products: list[InTransitProductDetail] = Field(default_factory=list)
     total_m2: float = 0
     unmatched_skus: list[str] = Field(default_factory=list)
     candidate_boats: list[CandidateBoat] = Field(default_factory=list)
+    booking_matches: list[BookingMatch] = Field(default_factory=list)
 
 
 class BulkInventoryCreate(BaseSchema):
