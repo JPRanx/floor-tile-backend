@@ -46,6 +46,7 @@ def compute_horizon(
     velocities: dict[str, Decimal],
     factory_stock: dict[str, Decimal],
     drafts: list[dict],
+    draft_headers: list[dict],
     shipment_items: list[dict],
     production_schedule: list[dict],
     today: date,
@@ -76,18 +77,24 @@ def compute_horizon(
         pid = si["product_id"]
         shipments_by_boat.setdefault(bid, {})[pid] = Decimal(str(si["shipped_m2"]))
 
-    # Index drafts by boat_id → product_id
+    # Index drafts: headers tell us WHICH boats have drafts (even empty ones),
+    # items tell us the per-product pallets.
+    # Three-tier allocation: shipment > draft > brain suggestion.
     drafts_by_boat: dict[str, dict[str, dict]] = {}
-    draft_status_by_boat: dict[str, str] = {}
-    draft_id_by_boat: dict[str, str] = {}
     for d in drafts:
         bid = d["boat_id"]
         pid = d["product_id"]
         drafts_by_boat.setdefault(bid, {})[pid] = d
-        if "status" in d:
-            draft_status_by_boat[bid] = d["status"]
-        if "draft_id" in d:
-            draft_id_by_boat[bid] = d["draft_id"]
+
+    # From headers — boat-level draft existence, status, and ID.
+    # A boat with a draft but no items = Ashley decided 0 (skip).
+    draft_status_by_boat: dict[str, str] = {
+        h["boat_id"]: h["status"] for h in draft_headers
+    }
+    draft_id_by_boat: dict[str, str] = {
+        h["boat_id"]: h["draft_id"] for h in draft_headers
+    }
+    draft_boat_ids: set[str] = set(draft_status_by_boat.keys())
 
     # Index production by product_id
     production_by_product: dict[str, list[dict]] = {}
@@ -157,7 +164,7 @@ def compute_horizon(
         status = draft_status_by_boat.get(bid, "")
         if status in ("ordered", "confirmed"):
             return "ORDERED"
-        if status in ("drafting", "action_needed"):
+        if status in ("drafting", "action_needed", "skipped"):
             return "PLANNING"
         return "FUTURE"
 
@@ -203,6 +210,7 @@ def compute_horizon(
 
     for i, boat in enumerate(simulate_boats):
         next_boat = simulate_boats[i + 1] if i + 1 < len(simulate_boats) else None
+        has_draft = boat["id"] in draft_boat_ids
 
         dep = boat["departure_date"]
         arr = boat["arrival_date"]
@@ -272,14 +280,14 @@ def compute_horizon(
                     "departure": str(dep),
                 }
 
-            # ── Cascade: determine what this boat actually carries ─────
-            boat_state = boat["_state"]
+            # ── Cascade: three-tier allocation ──────────────────────
+            # 1. Shipment exists → reality (handled by completed boats, not here)
+            # 2. Draft exists for this boat → use Ashley's pallets (0 if product absent)
+            # 3. No draft → brain suggests
             boat_drafts = drafts_by_boat.get(boat["id"], {})
 
-            if boat_state == "ORDERED" and pid in boat_drafts:
-                allocated_pallets = int(boat_drafts[pid].get("selected_pallets", 0))
-            elif boat_state == "PLANNING" and pid in boat_drafts:
-                allocated_pallets = int(boat_drafts[pid].get("selected_pallets", 0))
+            if has_draft:
+                allocated_pallets = int(boat_drafts.get(pid, {}).get("selected_pallets", 0))
             else:
                 allocated_pallets = can_ship
 
@@ -302,7 +310,7 @@ def compute_horizon(
                 "allocated_pallets": allocated_pallets,
                 "factory_available_m2": float(factory_m2),
                 "factory_max_pallets": factory_max_pallets,
-                "is_draft_committed": pid in boat_drafts,
+                "is_draft_committed": has_draft,
             })
 
             boat_debug.append({
@@ -340,7 +348,7 @@ def compute_horizon(
         # Two separate concepts:
         # 1. skip_recommended: math says this boat isn't worth shipping (advisory)
         # 2. skip (actual): only skip cascade if no draft AND math says skip
-        has_draft = boat["id"] in drafts_by_boat
+        # draft_boat_ids includes empty drafts (skipped boats) — Ashley's decision is locked.
         is_locked = boat["_state"] == "ORDERED" or has_draft
 
         # Always compute the recommendation based on math

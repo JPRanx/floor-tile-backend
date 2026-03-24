@@ -180,11 +180,18 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     ]
     freshness["production_records"] = len(production_schedule)
 
-    # 8. Drafts — active drafts (drafting + action_needed).
-    #    Old garbage drafts were neutralized (status → confirmed).
+    # 8. Drafts — ALL drafts for this factory. No status filter.
+    #    The brain decides what to do based on draft existence, not status.
+    #    Status is a UI/notification concern, not a simulation concern.
     drafts_res = db.table("boat_factory_drafts").select(
         "id, boat_id, factory_id, status"
-    ).in_("status", ["drafting", "action_needed"]).eq("factory_id", factory_id).execute()
+    ).eq("factory_id", factory_id).execute()
+
+    # Draft headers: tells the brain which boats have drafts (even empty ones)
+    draft_headers = [
+        {"boat_id": d["boat_id"], "status": d["status"], "draft_id": d["id"]}
+        for d in drafts_res.data
+    ]
 
     drafts: list[dict] = []
     draft_ids = [d["id"] for d in drafts_res.data]
@@ -193,7 +200,6 @@ def _query_inputs(factory_id: str, today: date) -> dict:
             "draft_id, product_id, selected_pallets"
         ).in_("draft_id", draft_ids).execute()
 
-        # Build flat list the brain expects: {boat_id, product_id, selected_pallets, status, draft_id}
         draft_lookup = {d["id"]: d for d in drafts_res.data}
         for item in items_res.data:
             draft = draft_lookup[item["draft_id"]]
@@ -214,6 +220,7 @@ def _query_inputs(factory_id: str, today: date) -> dict:
         "velocities": velocities,
         "factory_stock": factory_stock,
         "drafts": drafts,
+        "draft_headers": draft_headers,
         "shipment_items": shipment_items,
         "production_schedule": production_schedule,
         "_freshness": freshness,
