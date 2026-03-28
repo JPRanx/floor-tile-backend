@@ -12,3 +12,4 @@ SAFETY_STOCK_PALLETS = 3
 SAFETY_STOCK_M2 = Decimal("403.2")  # 3 × 134.4
 VELOCITY_PERIOD_DAYS = 90
 MIN_BOAT_PALLETS = 39  # 3 containers × 13 pallets
+LEAD_TIME_DAYS = 20    # Factory needs 20 days to prepare — brain won't suggest for closer boats

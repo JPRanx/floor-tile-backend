@@ -22,6 +22,7 @@ from .constants import (
     MIN_BOAT_PALLETS,
     MIN_BLS_PER_BOAT,
     PALLETS_PER_CONTAINER,
+    LEAD_TIME_DAYS,
 )
 
 
@@ -283,11 +284,15 @@ def compute_horizon(
             # ── Cascade: three-tier allocation ──────────────────────
             # 1. Shipment exists → reality (handled by completed boats, not here)
             # 2. Draft exists for this boat → use Ashley's pallets (0 if product absent)
-            # 3. No draft → brain suggests
+            # 3. No draft, departure > today + LEAD_TIME_DAYS → brain suggests
+            # 4. No draft, departure ≤ today + LEAD_TIME_DAYS → too late, 0
             boat_drafts = drafts_by_boat.get(boat["id"], {})
+            too_late = (dep - today).days <= LEAD_TIME_DAYS
 
             if has_draft:
                 allocated_pallets = int(boat_drafts.get(pid, {}).get("selected_pallets", 0))
+            elif too_late:
+                allocated_pallets = 0
             else:
                 allocated_pallets = can_ship
 
@@ -311,6 +316,7 @@ def compute_horizon(
                 "factory_available_m2": float(factory_m2),
                 "factory_max_pallets": factory_max_pallets,
                 "is_draft_committed": has_draft,
+                "is_past_lead_time": too_late and not has_draft,
             })
 
             boat_debug.append({
@@ -331,6 +337,7 @@ def compute_horizon(
                     "suggested_pallets": suggested_pallets,
                     "can_ship_pallets": can_ship,
                     "allocated_pallets": allocated_pallets,
+                    "too_late": too_late and not has_draft,
                 },
                 "cascade": {
                     "running_stock_after": float(running_stock[pid]),
@@ -400,6 +407,7 @@ def compute_horizon(
             "departure_date": str(dep),
             "arrival_date": str(arr),
             "days_until_departure": days_until_dep,
+            "past_lead_time": too_late and not has_draft,
             "carrier": boat.get("carrier", ""),
             "state": boat["_state"],
             "draft_status": draft_status_by_boat.get(boat["id"]),
