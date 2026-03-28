@@ -59,14 +59,14 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     else:
         anchor_boats_data = []
 
-    # Merge: anchor boats + upcoming boats, deduplicate
+    # Merge: anchor boats + upcoming boats, deduplicate by DB id
     seen_ids = set()
-    boats = []
+    raw_boats = []
     for b in anchor_boats_data + boats_res.data:
         if b["id"] in seen_ids:
             continue
         seen_ids.add(b["id"])
-        boats.append({
+        raw_boats.append({
             "id": b["id"],
             "name": b["vessel_name"],
             "departure_date": b["departure_date"],
@@ -74,7 +74,21 @@ def _query_inputs(factory_id: str, today: date) -> dict:
             "carrier": b.get("carrier", ""),
             "factory_id": factory_id,
         })
+
+    # Dedup same vessel on same date (e.g. AIAS with 3 BLs → one boat for the brain).
+    # Keep the first ID as canonical, build alias map for remapping downstream data.
+    boat_alias: dict[str, str] = {}  # duplicate_id → canonical_id
+    boats = []
+    _seen_vessel_date: dict[tuple, str] = {}  # (name, dep) → canonical_id
+    for b in raw_boats:
+        key = (b["name"], b["departure_date"])
+        if key in _seen_vessel_date:
+            boat_alias[b["id"]] = _seen_vessel_date[key]
+        else:
+            _seen_vessel_date[key] = b["id"]
+            boats.append(b)
     freshness["boats"] = len(boats)
+    freshness["boat_aliases"] = len(boat_alias)
 
     # 3. Warehouse snapshots (latest per product)
     # Fetch only the most recent snapshot_date, then filter to that date
@@ -156,7 +170,7 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     ).execute()
     shipment_items = [
         {
-            "boat_id": row["boat_id"],
+            "boat_id": boat_alias.get(row["boat_id"], row["boat_id"]),
             "product_id": row["product_id"],
             "shipped_m2": str(row.get("shipped_m2") or 0),
         }
@@ -188,8 +202,9 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     ).eq("factory_id", factory_id).execute()
 
     # Draft headers: tells the brain which boats have drafts (even empty ones)
+    # Remap aliased boat IDs to canonical
     draft_headers = [
-        {"boat_id": d["boat_id"], "status": d["status"], "draft_id": d["id"]}
+        {"boat_id": boat_alias.get(d["boat_id"], d["boat_id"]), "status": d["status"], "draft_id": d["id"]}
         for d in drafts_res.data
     ]
 
@@ -204,7 +219,7 @@ def _query_inputs(factory_id: str, today: date) -> dict:
         for item in items_res.data:
             draft = draft_lookup[item["draft_id"]]
             drafts.append({
-                "boat_id": draft["boat_id"],
+                "boat_id": boat_alias.get(draft["boat_id"], draft["boat_id"]),
                 "product_id": item["product_id"],
                 "selected_pallets": item["selected_pallets"],
                 "status": draft["status"],
@@ -224,6 +239,7 @@ def _query_inputs(factory_id: str, today: date) -> dict:
         "shipment_items": shipment_items,
         "production_schedule": production_schedule,
         "_freshness": freshness,
+        "_boat_alias": boat_alias,
     }
 
 
@@ -241,6 +257,7 @@ async def get_horizon(factory_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to query inputs: {e}")
 
     freshness = inputs.pop("_freshness")
+    inputs.pop("_boat_alias", None)
     result = compute_horizon(**inputs, today=today)
 
     # Merge freshness into data_as_of
@@ -287,6 +304,9 @@ async def get_horizon_detail(factory_id: str, boat_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to query inputs: {e}")
 
     freshness = inputs.pop("_freshness")
+    boat_alias = inputs.pop("_boat_alias", {})
+    # Resolve aliased boat_id → canonical so we find the right projection
+    boat_id = boat_alias.get(boat_id, boat_id)
     result = compute_horizon(**inputs, today=today)
     result["data_as_of"].update(freshness)
 
