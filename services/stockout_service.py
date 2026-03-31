@@ -65,6 +65,9 @@ class ProductStockout(BaseSchema):
     status: StockoutStatus
     status_reason: str
 
+    # Tier (ABC classification from sales velocity)
+    tier: Optional[str] = None
+
 
 class StockoutSummary(BaseSchema):
     """Summary of stockout calculations across all products."""

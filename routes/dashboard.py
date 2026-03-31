@@ -15,6 +15,7 @@ from services.stockout_service import (
     StockoutSummary,
     ProductStockout,
 )
+from routes.products import _compute_tiers
 from exceptions import AppError
 
 logger = structlog.get_logger(__name__)
@@ -61,7 +62,14 @@ async def get_stockout_status():
     """
     try:
         service = get_stockout_service()
-        return service.calculate_all()
+        result = service.calculate_all()
+
+        # Enrich with ABC tiers
+        tiers = _compute_tiers()
+        for p in result.products:
+            p.tier = tiers.get(p.product_id)
+
+        return result
 
     except Exception as e:
         return handle_error(e)
