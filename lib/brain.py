@@ -182,12 +182,10 @@ def compute_horizon(
     skip_recommendations = []
     debug_trace: list[dict] = []
     # Track unmet gaps per product for post-loop production requests.
-    # Prefer non-skipped boats as targets, fall back to skipped if all skip.
-    # Only track gaps on the first 2 viable boats — beyond that is noise.
-    _gap_viable: dict[str, dict] = {}  # pid → gap info from non-skipped boats
-    _gap_any: dict[str, dict] = {}     # pid → gap info from any boat (fallback)
+    # Gaps tracked on ALL boats (including skipped) — production needs are
+    # independent of whether any single boat is worth shipping.
+    _gap_viable: dict[str, dict] = {}  # pid → first gap seen
     _viable_boat_count = 0
-    MAX_GAP_BOATS = 2  # Only request production for gaps on the next 2 shippable boats
 
     for i, boat in enumerate(simulate_boats):
         next_boat = simulate_boats[i + 1] if i + 1 < len(simulate_boats) else None
@@ -252,15 +250,6 @@ def compute_horizon(
 
             # ── Track unmet gap (for any boat — used as fallback) ────
             # Only track on first few boats — gaps on distant boats are noise.
-            if i < MAX_GAP_BOATS and coverage_gap > 0 and factory_m2 < coverage_gap and pid not in _gap_any:
-                _gap_any[pid] = {
-                    "gap_m2": coverage_gap - factory_m2,
-                    "urgency": urgency,
-                    "boat_id": boat["id"],
-                    "boat_name": boat.get("name", ""),
-                    "departure": str(dep),
-                }
-
             # ── Cascade: allocation priority ──────────────────────────
             # 1. Shipment exists → reality (confirmed dispatch, locked)
             # 2. Draft exists for this boat → Ashley's pallets (0 if absent)
@@ -357,6 +346,21 @@ def compute_horizon(
         # Only actually skip cascade if Ashley hasn't touched it
         skip = skip_recommended and not is_locked
 
+        # ── Track production gaps (ALL boats, regardless of skip) ─────
+        # Production needs are independent of whether a boat is worth shipping.
+        for p in boat_products:
+            pid = p["product_id"]
+            gap = Decimal(str(p["coverage_gap_m2"]))
+            fac = Decimal(str(p["factory_available_m2"]))
+            if gap > 0 and fac < gap and pid not in _gap_viable:
+                _gap_viable[pid] = {
+                    "gap_m2": gap - fac,
+                    "urgency": p["urgency"],
+                    "boat_id": boat["id"],
+                    "boat_name": boat.get("name", ""),
+                    "departure": str(dep),
+                }
+
         # ── Apply cascade (only if boat is NOT skipped) ───────────────
         if not skip:
             for p in boat_products:
@@ -365,19 +369,6 @@ def compute_horizon(
                 running_stock[pid] = running_stock[pid] + alloc_m2
                 consumed = min(alloc_m2, factory_avail.get(pid, Decimal(0)))
                 factory_avail[pid] = factory_avail.get(pid, Decimal(0)) - consumed
-
-                # Track unmet gap on viable (non-skipped) boats — preferred target.
-                # Only track on first few viable boats.
-                gap = Decimal(str(p["coverage_gap_m2"]))
-                fac = Decimal(str(p["factory_available_m2"]))
-                if _viable_boat_count < MAX_GAP_BOATS and gap > 0 and fac < gap and pid not in _gap_viable:
-                    _gap_viable[pid] = {
-                        "gap_m2": gap - fac,
-                        "urgency": p["urgency"],
-                        "boat_id": boat["id"],
-                        "boat_name": boat.get("name", ""),
-                        "departure": str(dep),
-                    }
             _viable_boat_count += 1
         else:
             # Skipped: zero out allocations in the product details
@@ -431,12 +422,8 @@ def compute_horizon(
     # Prefer viable (non-skipped) boat as target; fall back to any boat.
     # Subtract already-scheduled production → what genuinely needs ordering.
 
-    worst_unmet_gap: dict[str, dict] = {}
-    for pid in set(_gap_any) | set(_gap_viable):
-        worst_unmet_gap[pid] = _gap_viable.get(pid) or _gap_any[pid]
-
     production_requests = []
-    for pid, gap_info in worst_unmet_gap.items():
+    for pid, gap_info in _gap_viable.items():
         unmet_m2 = gap_info["gap_m2"]
         already_scheduled = scheduled_production.get(pid, Decimal(0))
 
@@ -507,7 +494,7 @@ def compute_horizon(
                 earliest_date = sd
 
         total_scheduled_m2 = scheduled_production.get(pid, Decimal(0))
-        gap_info = worst_unmet_gap.get(pid)
+        gap_info = _gap_viable.get(pid)
         unmet = gap_info["gap_m2"] if gap_info else Decimal(0)
         covers_gap = total_scheduled_m2 >= unmet
         progress = float(total_completed / total_requested * 100) if total_requested > 0 else 0
