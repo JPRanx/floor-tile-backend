@@ -125,19 +125,14 @@ def compute_horizon(
                 requested = Decimal(str(entry.get("requested_m2") or 0))
                 scheduled_production[pid] = scheduled_production.get(pid, Decimal(0)) + requested
 
-    # ── STEP 2: Find anchor boat ─────────────────────────────────────────
+    # ── STEP 2: Sort and classify boats ────────────────────────────────────
+    # No anchor. Every boat gets simulated. State is for display only.
 
     boats_with_shipments = {
         b["id"] for b in boats if b["id"] in shipments_by_boat
     }
 
     sorted_boats = sorted(boats, key=lambda b: b["departure_date"])
-
-    anchor_boat_id = None
-    for b in reversed(sorted_boats):
-        if b["id"] in boats_with_shipments:
-            anchor_boat_id = b["id"]
-            break
 
     # ── STEP 3: Compute arriving_soon ─────────────────────────────────────
 
@@ -152,14 +147,10 @@ def compute_horizon(
             for pid, m2 in shipments_by_boat[b["id"]].items():
                 arriving_soon[pid] = arriving_soon.get(pid, Decimal(0)) + m2
 
-    # ── STEP 4: Classify boats ────────────────────────────────────────────
+    # ── STEP 4: Classify boats (display state only) ──────────────────────
 
     def _boat_state(b: dict) -> str:
         bid = b["id"]
-        dep = b["departure_date"]
-        if isinstance(dep, str):
-            dep = date.fromisoformat(dep)
-
         if bid in boats_with_shipments:
             return "DISPATCHED"
         status = draft_status_by_boat.get(bid, "")
@@ -169,23 +160,9 @@ def compute_horizon(
             return "PLANNING"
         return "FUTURE"
 
-    completed_boats = []
     simulate_boats = []
-
-    anchor_seen = anchor_boat_id is None  # if no anchor, simulate all
-
     for b in sorted_boats:
-        state = _boat_state(b)
-        b["_state"] = state
-
-        if not anchor_seen:
-            if b["id"] == anchor_boat_id:
-                anchor_seen = True
-            # Anchor and everything before it → completed
-            completed_boats.append(b)
-            continue
-
-        # After anchor → simulate
+        b["_state"] = _boat_state(b)
         simulate_boats.append(b)
 
     # ── STEP 5: Initialize running stock ──────────────────────────────────
@@ -281,15 +258,20 @@ def compute_horizon(
                     "departure": str(dep),
                 }
 
-            # ── Cascade: three-tier allocation ──────────────────────
-            # 1. Shipment exists → reality (handled by completed boats, not here)
-            # 2. Draft exists for this boat → use Ashley's pallets (0 if product absent)
+            # ── Cascade: allocation priority ──────────────────────────
+            # 1. Shipment exists → reality (confirmed dispatch, locked)
+            # 2. Draft exists for this boat → Ashley's pallets (0 if absent)
             # 3. No draft, departure > today + LEAD_TIME_DAYS → brain suggests
             # 4. No draft, departure ≤ today + LEAD_TIME_DAYS → too late, 0
+            boat_shipments = shipments_by_boat.get(boat["id"], {})
             boat_drafts = drafts_by_boat.get(boat["id"], {})
             too_late = (dep - today).days <= LEAD_TIME_DAYS
+            has_shipment = boat["id"] in shipments_by_boat
 
-            if has_draft:
+            if has_shipment:
+                shipped_m2 = boat_shipments.get(pid, Decimal(0))
+                allocated_pallets = int(shipped_m2 / M2_PER_PALLET)
+            elif has_draft:
                 allocated_pallets = int(boat_drafts.get(pid, {}).get("selected_pallets", 0))
             elif too_late:
                 allocated_pallets = 0
@@ -315,8 +297,9 @@ def compute_horizon(
                 "allocated_pallets": allocated_pallets,
                 "factory_available_m2": float(factory_m2),
                 "factory_max_pallets": factory_max_pallets,
+                "is_shipment_locked": has_shipment,
                 "is_draft_committed": has_draft,
-                "is_past_lead_time": too_late and not has_draft,
+                "is_past_lead_time": too_late and not has_draft and not has_shipment,
             })
 
             boat_debug.append({
@@ -440,49 +423,7 @@ def compute_horizon(
             "products": boat_debug,
         })
 
-    # ── STEP 7: Build completed boats ─────────────────────────────────────
-
-    completed = []
-    for b in completed_boats:
-        bid = b["id"]
-        dep = b["departure_date"]
-        arr = b["arrival_date"]
-        if isinstance(dep, str):
-            dep = date.fromisoformat(dep)
-        if isinstance(arr, str):
-            arr = date.fromisoformat(arr)
-
-        items = []
-        if bid in shipments_by_boat:
-            for pid, m2 in shipments_by_boat[bid].items():
-                items.append({
-                    "product_id": pid,
-                    "sku": product_map.get(pid, {}).get("sku", ""),
-                    "shipped_m2": float(m2),
-                    "shipped_pallets": int(m2 / M2_PER_PALLET),
-                })
-        elif bid in drafts_by_boat:
-            for pid, d in drafts_by_boat[bid].items():
-                items.append({
-                    "product_id": pid,
-                    "sku": product_map.get(pid, {}).get("sku", ""),
-                    "selected_pallets": int(d.get("selected_pallets", 0)),
-                })
-
-        completed.append({
-            "boat_id": bid,
-            "boat_name": b.get("name", ""),
-            "departure_date": str(dep),
-            "arrival_date": str(arr),
-            "days_until_departure": (dep - today).days,
-            "carrier": b.get("carrier", ""),
-            "state": b["_state"],
-            "draft_status": draft_status_by_boat.get(bid),
-            "draft_id": draft_id_by_boat.get(bid),
-            "items": items,
-        })
-
-    # ── STEP 8: Production requests (post-loop) ────────────────────────────
+    # ── STEP 7: Production requests (post-loop) ─────────────────────────────
     # After simulating all boats, we know every product's unmet gap.
     # Prefer viable (non-skipped) boat as target; fall back to any boat.
     # Subtract already-scheduled production → what genuinely needs ordering.
@@ -591,17 +532,14 @@ def compute_horizon(
 
     return {
         "projections": projections,
-        "completed": completed,
         "production_requests": production_requests,
         "production_pipeline": production_pipeline,
         "skip_recommendations": skip_recommendations,
         "factory_order_signal": factory_order_signal,
-        "anchor_boat_id": anchor_boat_id,
         "data_as_of": {
             "computed_at": str(today),
             "product_count": len(product_ids),
             "boat_count": len(sorted_boats),
-            "anchor_boat_id": anchor_boat_id,
         },
         "_debug": debug_trace,
     }
