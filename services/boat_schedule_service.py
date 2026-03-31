@@ -733,81 +733,86 @@ class BoatScheduleService:
         skipped_rows: list[SkippedRowInfo],
     ) -> BoatUploadResult:
         """
-        Positional wipe-and-replace: update existing boats in-place,
-        insert extras, delete surplus. Preserves IDs for FK safety.
+        Identity-based merge: match by (vessel_name, departure_date) so boat IDs
+        stay stable and drafts/shipments don't drift when TIBA shifts positions.
         """
-        # Sort new boats by departure date
         new_boats = sorted(new_records, key=lambda r: r.departure_date)
-
-        # Get all existing boats sorted by departure date
         existing_boats = self._get_all_sorted()
 
-        n_new = len(new_boats)
-        n_existing = len(existing_boats)
+        # Index existing boats by (vessel_name, departure_date) for identity matching.
+        # Multiple rows with same key = TIBA duplicates (different BLs); keep first.
+        existing_by_key: dict[tuple, dict] = {}
+        for b in existing_boats:
+            key = (b["vessel_name"], str(b["departure_date"]))
+            if key not in existing_by_key:
+                existing_by_key[key] = b
+
+        matched_existing_ids: set[str] = set()
 
         logger.info(
-            "wipe_and_replace_start",
-            new_count=n_new,
-            existing_count=n_existing,
+            "identity_merge_start",
+            new_count=len(new_boats),
+            existing_count=len(existing_boats),
             filename=filename,
         )
 
         imported = 0
         updated = 0
+        skipped = 0
         errors = []
 
-        # Phase 1: Update existing boats in-place (positional replacement)
-        for i in range(min(n_new, n_existing)):
-            try:
-                self._replace_boat(
-                    existing_boats[i]["id"], new_boats[i], filename
-                )
-                updated += 1
-            except Exception as e:
-                errors.append(
-                    f"Failed to update boat {new_boats[i].departure_date}: {str(e)}"
-                )
-                logger.error(
-                    "boat_replace_failed",
-                    boat_id=existing_boats[i]["id"],
-                    error=str(e),
-                )
+        # Phase 1: For each new record, find existing match or insert
+        for record in new_boats:
+            key = (record.vessel_name, record.departure_date.isoformat())
+            existing = existing_by_key.get(key)
 
-        # Phase 2: Insert excess new boats
-        for i in range(n_existing, n_new):
-            try:
-                self._insert_from_record(new_boats[i], filename)
-                imported += 1
-            except Exception as e:
-                errors.append(
-                    f"Failed to insert boat {new_boats[i].departure_date}: {str(e)}"
-                )
-                logger.error(
-                    "boat_insert_failed",
-                    departure=new_boats[i].departure_date,
-                    error=str(e),
-                )
+            if existing:
+                # Match found — update in place (ID preserved, drafts safe)
+                matched_existing_ids.add(existing["id"])
+                if self._needs_update(existing, record):
+                    try:
+                        self._replace_boat(existing["id"], record, filename)
+                        updated += 1
+                    except Exception as e:
+                        errors.append(f"Failed to update {record.vessel_name} {record.departure_date}: {e}")
+                        logger.error("boat_update_failed", boat_id=existing["id"], error=str(e))
+                else:
+                    skipped += 1
+            else:
+                # New boat — insert
+                try:
+                    self._insert_from_record(record, filename)
+                    imported += 1
+                except Exception as e:
+                    errors.append(f"Failed to insert {record.vessel_name} {record.departure_date}: {e}")
+                    logger.error("boat_insert_failed", vessel=record.vessel_name, error=str(e))
 
-        # Phase 3: Delete surplus existing boats
+        # Phase 2: Existing boats not in new file — orphans.
+        # Delete unless they have sticky status or drafts (Ashley's work).
         deleted = 0
-        for i in range(n_new, n_existing):
+        for b in existing_boats:
+            if b["id"] in matched_existing_ids:
+                continue
+            if b.get("status") in self.STICKY_STATUSES:
+                logger.info("boat_kept_sticky", boat_id=b["id"], vessel=b["vessel_name"], status=b["status"])
+                continue
+            # Check if boat has any drafts — don't delete Ashley's work
+            drafts = self.db.table("boat_factory_drafts").select("id").eq("boat_id", b["id"]).limit(1).execute()
+            if drafts.data:
+                logger.info("boat_kept_has_drafts", boat_id=b["id"], vessel=b["vessel_name"])
+                continue
             try:
-                self._delete_boat_cascade(existing_boats[i]["id"])
+                self._delete_boat_cascade(b["id"])
                 deleted += 1
             except Exception as e:
-                errors.append(
-                    f"Failed to delete surplus boat {existing_boats[i]['id']}: {str(e)}"
-                )
-                logger.error(
-                    "boat_delete_failed",
-                    boat_id=existing_boats[i]["id"],
-                    error=str(e),
-                )
+                errors.append(f"Failed to delete orphan {b['vessel_name']}: {e}")
+                logger.error("boat_delete_failed", boat_id=b["id"], error=str(e))
 
         logger.info(
-            "wipe_and_replace_complete",
+            "identity_merge_complete",
             imported=imported,
             updated=updated,
+            skipped=skipped,
             deleted=deleted,
             errors=len(errors),
         )
@@ -815,7 +820,7 @@ class BoatScheduleService:
         return BoatUploadResult(
             imported=imported,
             updated=updated,
-            skipped=0,
+            skipped=skipped,
             skipped_rows=skipped_rows,
             errors=errors,
         )
@@ -833,6 +838,9 @@ class BoatScheduleService:
         except Exception as e:
             logger.error("get_all_sorted_failed", error=str(e))
             return []
+
+    # Statuses set by Ashley that TIBA uploads must not overwrite.
+    STICKY_STATUSES = {"ordered", "confirmed", "ignored"}
 
     def _replace_boat(
         self,
@@ -863,8 +871,13 @@ class BoatScheduleService:
             "booking_deadline": record.booking_deadline.isoformat(),
             "source_file": source_file,
             "carrier": "TIBA",
-            "status": status,
         }
+
+        # Preserve sticky statuses (Ashley's decisions survive uploads)
+        current = self.db.table(self.table).select("status").eq("id", boat_id).execute()
+        current_status = current.data[0]["status"] if current.data else None
+        if current_status not in self.STICKY_STATUSES:
+            update_data["status"] = status
         if record.booking_number:
             update_data["booking_number"] = record.booking_number
 
