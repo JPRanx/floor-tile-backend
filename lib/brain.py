@@ -151,8 +151,11 @@ def compute_horizon(
 
     def _boat_state(b: dict) -> str:
         bid = b["id"]
+        dep = b["departure_date"]
+        if isinstance(dep, str):
+            dep = date.fromisoformat(dep)
         if bid in boats_with_shipments:
-            return "DISPATCHED"
+            return "DISPATCHED" if dep <= today else "CONFIRMED"
         status = draft_status_by_boat.get(bid, "")
         if status in ("ordered", "confirmed"):
             return "ORDERED"
