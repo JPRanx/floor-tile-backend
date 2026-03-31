@@ -801,6 +801,11 @@ class BoatScheduleService:
             if drafts.data:
                 logger.info("boat_kept_has_drafts", boat_id=b["id"], vessel=b["vessel_name"])
                 continue
+            # If boat has shipment_items, keep it — horizon dedup merges at query time
+            has_shipments = self.db.table("shipment_items").select("id").eq("boat_id", b["id"]).limit(1).execute()
+            if has_shipments.data:
+                logger.info("boat_kept_has_shipments", boat_id=b["id"], vessel=b["vessel_name"])
+                continue
             try:
                 self._delete_boat_cascade(b["id"])
                 deleted += 1
@@ -883,10 +888,20 @@ class BoatScheduleService:
 
         self.db.table(self.table).update(update_data).eq("id", boat_id).execute()
 
-    def _delete_boat_cascade(self, boat_id: str) -> None:
-        """Delete a boat and its child references."""
+    def _delete_boat_cascade(self, boat_id: str, remap_to: str | None = None) -> None:
+        """Delete a boat and its child references.
+
+        If remap_to is provided, shipment_items are moved to that boat instead of deleted.
+        """
         # Delete child records that have NOT NULL FK
         self.db.table("boat_factory_drafts").delete().eq("boat_id", boat_id).execute()
+        # Remap or delete shipment_items (NOT NULL FK)
+        if remap_to:
+            self.db.table("shipment_items").update(
+                {"boat_id": remap_to}
+            ).eq("boat_id", boat_id).execute()
+        else:
+            self.db.table("shipment_items").delete().eq("boat_id", boat_id).execute()
         # Null out nullable FK references
         self.db.table("shipments").update(
             {"boat_schedule_id": None}
