@@ -187,8 +187,8 @@ class ExportService:
 
             ws[f"A{row}"] = referencia
             ws[f"B{row}"] = formato
-            ws[f"C{row}"] = round(float(m2))
-            ws[f"C{row}"].number_format = "#,##0"
+            ws[f"C{row}"] = float(m2)
+            ws[f"C{row}"].number_format = "#,##0.00"
 
             total_m2 += m2
             total_pallets += pallets
@@ -200,9 +200,9 @@ class ExportService:
         # Total row
         ws[f"A{row}"] = "TOTAL"
         ws[f"A{row}"].font = bold_font
-        ws[f"C{row}"] = round(float(total_m2))
+        ws[f"C{row}"] = float(total_m2)
         ws[f"C{row}"].font = bold_font
-        ws[f"C{row}"].number_format = "#,##0"
+        ws[f"C{row}"].number_format = "#,##0.00"
         ws[f"A{row}"].border = thin_border
         ws[f"B{row}"].border = thin_border
         ws[f"C{row}"].border = thin_border
