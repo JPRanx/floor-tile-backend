@@ -181,6 +181,7 @@ class ProductResponse(BaseSchema, TimestampMixin):
     fob_cost_usd: Optional[Decimal] = Field(None, description="FOB cost per m² in USD")
     inactive_reason: Optional[InactiveReason] = Field(None, description="Reason for deactivation")
     inactive_date: Optional[date] = Field(None, description="Date when product was marked inactive")
+    tier: Optional[str] = Field(None, description="ABC tier based on sales velocity (A/B/C)")
 
     @field_validator("inactive_reason", mode="before")
     @classmethod

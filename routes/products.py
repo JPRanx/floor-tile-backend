@@ -8,7 +8,9 @@ See STANDARDS_ERRORS.md for error response format.
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Optional, List
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
+from collections import defaultdict
 from pydantic import BaseModel, Field
 import structlog
 
@@ -23,6 +25,7 @@ from models.product import (
     InactiveReason
 )
 from services.product_service import get_product_service
+from config import get_supabase_client
 from exceptions import (
     AppError,
     ProductNotFoundError,
@@ -81,6 +84,46 @@ def handle_error(e: Exception) -> JSONResponse:
 # ===================
 
 @router.get("", response_model=ProductListResponse)
+def _compute_tiers() -> dict[str, str]:
+    """Compute ABC tier for each product based on 90-day sales velocity."""
+    db = get_supabase_client()
+    today = date.today()
+    sales_start = (today - timedelta(days=90)).isoformat()
+
+    sales_res = db.table("sales").select(
+        "product_id, quantity_m2"
+    ).gte("week_start", sales_start).execute()
+
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    for row in sales_res.data:
+        pid = row.get("product_id")
+        if pid:
+            totals[pid] += Decimal(str(row.get("quantity_m2") or 0))
+
+    if not totals:
+        return {}
+
+    # Sort by volume descending, compute cumulative share
+    sorted_products = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    grand_total = sum(v for _, v in sorted_products)
+    if grand_total <= 0:
+        return {}
+
+    tiers: dict[str, str] = {}
+    cumulative = Decimal(0)
+    for pid, vol in sorted_products:
+        cumulative += vol
+        share = float(cumulative / grand_total)
+        if share <= 0.80:
+            tiers[pid] = "A"
+        elif share <= 0.95:
+            tiers[pid] = "B"
+        else:
+            tiers[pid] = "C"
+
+    return tiers
+
+
 async def list_products(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
@@ -90,12 +133,12 @@ async def list_products(
 ):
     """
     List all products with optional filters.
-    
-    Returns paginated list of products.
+
+    Returns paginated list of products with ABC tier from sales velocity.
     """
     try:
         service = get_product_service()
-        
+
         products, total = service.get_all(
             page=page,
             page_size=page_size,
@@ -103,9 +146,14 @@ async def list_products(
             rotation=rotation,
             active_only=not include_inactive
         )
-        
+
+        # Enrich with ABC tier
+        tiers = _compute_tiers()
+        for p in products:
+            p.tier = tiers.get(p.id)
+
         total_pages = (total + page_size - 1) // page_size
-        
+
         return ProductListResponse(
             data=products,
             total=total,
