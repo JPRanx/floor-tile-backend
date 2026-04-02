@@ -51,6 +51,7 @@ class InTransitProduct:
 class DispatchOrderItem:
     """One product line within a dispatch order."""
     product_id: str
+    raw_sku: str
     sku: str
     m2: float
 
@@ -269,7 +270,7 @@ def parse_dispatch_excel(
             booking_val = str(row[booking_col]).strip() if booking_col and pd.notna(row.get(booking_col)) else None
             orders_map[factura_val] = DispatchOrder(factura=factura_val, etd=etd_val, booking_number=booking_val)
         if factura_val:
-            orders_map[factura_val].items.append(DispatchOrderItem(product_id=pid, sku=sku, m2=cantidad))
+            orders_map[factura_val].items.append(DispatchOrderItem(product_id=pid, raw_sku=raw_sku.strip()[:60], sku=sku, m2=cantidad))
 
     # Build aggregated products
     total_m2 = 0.0

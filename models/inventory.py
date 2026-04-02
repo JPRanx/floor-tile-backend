@@ -237,6 +237,12 @@ class CandidateBoat(BaseSchema):
     is_suggested: bool = False
 
 
+class BookingMatchItem(BaseSchema):
+    """One product in a dispatch order."""
+    raw_sku: str = ""
+    sku: str
+    m2: float
+
 class BookingMatch(BaseSchema):
     """A dispatch order matched to a boat via booking number."""
     factura: str
@@ -246,6 +252,7 @@ class BookingMatch(BaseSchema):
     etd: date | None = None
     items_count: int = 0
     total_m2: float = 0
+    items: list[BookingMatchItem] = Field(default_factory=list)
 
 
 class InTransitParseResponse(BaseSchema):

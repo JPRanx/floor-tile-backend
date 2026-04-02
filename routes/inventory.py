@@ -1607,6 +1607,10 @@ async def parse_in_transit(
                     etd=order.etd,
                     items_count=len(order.items),
                     total_m2=round(order_m2, 2),
+                    items=[
+                        {"raw_sku": item.raw_sku, "sku": item.sku, "m2": round(item.m2, 2)}
+                        for item in order.items
+                    ],
                 ))
 
         return InTransitParseResponse(
