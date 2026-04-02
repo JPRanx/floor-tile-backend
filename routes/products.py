@@ -83,7 +83,6 @@ def handle_error(e: Exception) -> JSONResponse:
 # ROUTES
 # ===================
 
-@router.get("", response_model=ProductListResponse)
 def _compute_tiers() -> dict[str, str]:
     """Compute ABC tier for each product based on 90-day sales velocity."""
     db = get_supabase_client()
@@ -124,6 +123,7 @@ def _compute_tiers() -> dict[str, str]:
     return tiers
 
 
+@router.get("", response_model=ProductListResponse)
 async def list_products(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
