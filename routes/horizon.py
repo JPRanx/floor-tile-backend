@@ -341,42 +341,54 @@ async def get_horizon_detail(factory_id: str, boat_id: str):
     result = compute_horizon(**inputs, today=today)
     result["data_as_of"].update(freshness)
 
-    # Find the specific boat
+    # For dispatched/confirmed boats, find all projections with same vessel+date
+    # and merge them (multiple BLs → one detail view).
     boat_projection = None
+    target = None
     for p in result["projections"]:
         if p["boat_id"] == boat_id:
-            boat_projection = p
+            target = p
             break
 
-    # Check completed boats too
-    boat_completed = None
-    if not boat_projection:
-        for c in result["completed"]:
-            if c["boat_id"] == boat_id:
-                boat_completed = c
-                break
+    if target and target["state"] in ("DISPATCHED", "CONFIRMED"):
+        # Find siblings (same vessel+date)
+        siblings = [
+            p for p in result["projections"]
+            if p["boat_name"] == target["boat_name"]
+            and p["departure_date"] == target["departure_date"]
+            and p["state"] in ("DISPATCHED", "CONFIRMED")
+        ]
+        if len(siblings) > 1:
+            merged = _merge_dispatched_dupes(siblings)
+            boat_projection = merged[0] if merged else target
+        else:
+            boat_projection = target
+    elif target:
+        boat_projection = target
 
-    if not boat_projection and not boat_completed:
+    if not boat_projection:
         raise HTTPException(status_code=404, detail=f"Boat {boat_id} not found in horizon")
 
-    # Find next boat for context
+    # Find next boat for context (use merged projections)
+    merged_projs = _merge_dispatched_dupes(result["projections"])
     next_boat = None
-    if boat_projection:
-        projs = result["projections"]
-        for i, p in enumerate(projs):
-            if p["boat_id"] == boat_id and i + 1 < len(projs):
-                next_boat = {
-                    "boat_id": projs[i + 1]["boat_id"],
-                    "boat_name": projs[i + 1]["boat_name"],
-                    "departure_date": projs[i + 1]["departure_date"],
-                    "arrival_date": projs[i + 1]["arrival_date"],
-                }
-                break
+    for i, p in enumerate(merged_projs):
+        bid = p.get("boat_id") or (p.get("merged_boat_ids", [None])[0])
+        if bid == boat_id and i + 1 < len(merged_projs):
+            nb = merged_projs[i + 1]
+            next_boat = {
+                "boat_id": nb.get("boat_id") or nb.get("merged_boat_ids", [None])[0],
+                "boat_name": nb["boat_name"],
+                "departure_date": nb["departure_date"],
+                "arrival_date": nb["arrival_date"],
+            }
+            break
 
-    # Find debug trace for this boat
+    # Find debug trace for this boat (may span multiple boat_ids if merged)
     boat_debug = None
+    search_ids = boat_projection.get("merged_boat_ids", [boat_id])
     for d in result.get("_debug", []):
-        if d["boat_id"] == boat_id:
+        if d["boat_id"] in search_ids:
             boat_debug = d
             break
 
@@ -390,7 +402,7 @@ async def get_horizon_detail(factory_id: str, boat_id: str):
         "factory_id": factory_id,
         "factory_name": factory.get("name", ""),
         "generated_at": today.isoformat(),
-        "boat": boat_projection or boat_completed,
+        "boat": boat_projection,
         "next_boat": next_boat,
         "production_requests": result["production_requests"],
         "factory_order_signal": result["factory_order_signal"],
