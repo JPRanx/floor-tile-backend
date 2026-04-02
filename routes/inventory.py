@@ -805,14 +805,16 @@ async def preview_siesa_upload(
             for match in parse_result.matched_lots[:10]
         ]
 
-        # Build ALL rows for inline editing
+        # Build ALL rows for preview
         all_rows = [
             SIESAPreviewRow(
+                raw_description=match.lot.siesa_description or "",
                 sku=sku_lookup.get(match.product_id, "UNKNOWN"),
                 lot_code=match.lot.lot_number,
                 warehouse_name=match.lot.warehouse_name,
                 factory_available_m2=float(match.lot.quantity_m2),
                 weight_kg=float(match.lot.weight_kg) if match.lot.weight_kg else None,
+                matched_by=match.matched_by or "",
             )
             for match in parse_result.matched_lots
         ]

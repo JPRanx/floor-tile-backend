@@ -139,12 +139,14 @@ class SIESAPreviewLot(BaseSchema):
 
 
 class SIESAPreviewRow(BaseSchema):
-    """Row shown in SIESA preview for inline editing."""
+    """Row shown in SIESA preview."""
+    raw_description: str = ""
     sku: str
-    lot_code: str  # lot_number used as row key
+    lot_code: str
     warehouse_name: Optional[str] = None
     factory_available_m2: float
     weight_kg: Optional[float] = None
+    matched_by: str = ""
 
 
 class SIESAPreview(BaseSchema):
