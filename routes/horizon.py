@@ -21,6 +21,55 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/v2/horizon", tags=["horizon"])
 
 
+def _merge_dispatched_dupes(projections: list[dict]) -> list[dict]:
+    """
+    Merge dispatched/confirmed boats with the same vessel+date into one card.
+    Multiple BLs on one ship → one combined projection for the UI.
+    Future/planning boats are left as-is.
+    """
+    merged = []
+    groups: dict[tuple, list[dict]] = {}
+
+    for p in projections:
+        if p["state"] in ("DISPATCHED", "CONFIRMED"):
+            key = (p["boat_name"], p["departure_date"])
+            groups.setdefault(key, []).append(p)
+        else:
+            merged.append(p)
+
+    for key, boats in groups.items():
+        if len(boats) == 1:
+            merged.append(boats[0])
+            continue
+
+        # Merge: combine products, sum totals, collect boat_ids
+        base = dict(boats[0])
+        product_totals: dict[str, dict] = {}
+
+        for boat in boats:
+            for prod in boat["products"]:
+                pid = prod["product_id"]
+                if pid in product_totals:
+                    product_totals[pid]["allocated_pallets"] += prod["allocated_pallets"]
+                else:
+                    product_totals[pid] = dict(prod)
+
+        base["products"] = list(product_totals.values())
+        base["total_pallets"] = sum(p["allocated_pallets"] for p in product_totals.values())
+        base["total_m2"] = base["total_pallets"] * 134.4
+        base["total_containers"] = base["total_pallets"] // 13
+        base["product_count"] = len([p for p in product_totals.values() if p["allocated_pallets"] > 0])
+        base["merged_boat_ids"] = [b["boat_id"] for b in boats]
+        base["bl_count"] = len(boats)
+        base["skip_recommended"] = False
+
+        merged.append(base)
+
+    # Re-sort by departure date
+    merged.sort(key=lambda p: p["departure_date"])
+    return merged
+
+
 def _query_inputs(factory_id: str, today: date) -> dict:
     """
     Fetch the 9 inputs the brain needs. Direct table queries, no services.
@@ -245,6 +294,10 @@ async def get_horizon(factory_id: str):
 
     # Merge freshness into data_as_of
     result["data_as_of"].update(freshness)
+
+    # Merge duplicate boats (same vessel+date) for dispatched/confirmed.
+    # Multiple BLs on one ship → one card in the UI.
+    result["projections"] = _merge_dispatched_dupes(result["projections"])
 
     # Fetch factory info for the response envelope
     db = get_supabase_client()
