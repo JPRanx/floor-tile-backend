@@ -331,7 +331,7 @@ def compute_horizon(
         # 1. skip_recommended: math says this boat isn't worth shipping (advisory)
         # 2. skip (actual): only skip cascade if no draft AND math says skip
         # draft_boat_ids includes empty drafts (skipped boats) — Ashley's decision is locked.
-        is_locked = boat["_state"] == "ORDERED" or has_draft
+        is_locked = boat["_state"] in ("ORDERED", "DISPATCHED", "CONFIRMED") or has_draft or boat["id"] in boats_with_shipments
 
         # Always compute the recommendation based on math
         skip_recommended = boat_total_pallets < MIN_BOAT_PALLETS
