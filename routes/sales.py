@@ -558,11 +558,8 @@ async def preview_sac_upload(file: UploadFile = File(...)):
             for record in parse_result.sales
         ]
 
-        # Build reverse lookup: product_id -> sku (for sample rows)
-        pid_to_sku: dict[str, str] = {}
-        for record in parse_result.sales:
-            if record.product_id and record.product_id not in pid_to_sku:
-                pid_to_sku[record.product_id] = record.sku_name
+        # Build reverse lookup: product_id -> system SKU (canonical name)
+        pid_to_sku: dict[str, str] = {p.id: p.sku for p in products}
 
         # Build sample rows (all matched records — frontend scrolls)
         sample_rows = []
