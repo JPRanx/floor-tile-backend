@@ -268,8 +268,9 @@ class BulkInventoryCreate(BaseSchema):
 
 
 class InventoryPreviewRow(BaseSchema):
-    """Row shown in inventory preview (includes product_id for editing)."""
+    """Row shown in inventory preview."""
     product_id: str
+    raw_name: str = ""
     sku: str
     warehouse_qty: float
     in_transit_qty: float = 0

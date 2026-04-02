@@ -39,6 +39,7 @@ class InventoryRecord:
     warehouse_qty: float
     in_transit_qty: float
     notes: Optional[str] = None
+    raw_name: str = ""
 
 
 @dataclass
@@ -904,6 +905,7 @@ def _parse_lot_sheet(
             product_id=product_id,
             warehouse_qty=total_qty,
             in_transit_qty=0,
+            raw_name=desc,
         ))
 
     logger.info(

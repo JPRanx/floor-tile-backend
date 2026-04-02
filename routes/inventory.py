@@ -301,11 +301,13 @@ async def preview_inventory_upload(file: UploadFile = File(...)):
         product_count = len(set(s.product_id for s in snapshots_to_create))
         snapshot_date = snapshots_to_create[0].snapshot_date if snapshots_to_create else date.today()
 
-        # Build all preview rows (with product_id for inline editing)
+        # Build all preview rows
         sku_lookup = {p.id: p.sku for p in products}
+        raw_name_lookup = {r.product_id: r.raw_name for r in parse_result.inventory if r.raw_name}
         all_rows = [
             InventoryPreviewRow(
                 product_id=s.product_id,
+                raw_name=raw_name_lookup.get(s.product_id, ""),
                 sku=sku_lookup.get(s.product_id, "UNKNOWN"),
                 warehouse_qty=float(s.warehouse_qty),
                 in_transit_qty=float(s.in_transit_qty),
