@@ -213,11 +213,12 @@ class SACUploadResponse(BaseSchema):
 
 class SACPreviewRow(BaseSchema):
     """Sample row shown in SAC sales preview."""
+    raw_sku: str = ""
     sku: str
     sale_date: date
     quantity_m2: float
     customer: Optional[str] = None
-    matched_by: str = "sac_sku"  # "sac_sku" or "name"
+    matched_by: str = "sac_sku"
 
 
 class SACPreview(BaseSchema):

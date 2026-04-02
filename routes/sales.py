@@ -564,15 +564,16 @@ async def preview_sac_upload(file: UploadFile = File(...)):
             if record.product_id and record.product_id not in pid_to_sku:
                 pid_to_sku[record.product_id] = record.sku_name
 
-        # Build sample rows (first 10 matched records)
+        # Build sample rows (all matched records — frontend scrolls)
         sample_rows = []
-        for record in parse_result.sales[:10]:
+        for record in parse_result.sales:
             # Determine matched_by from parse_result
             matched_by = "name"  # default
             if record.sac_sku and record.sac_sku in known_sac_skus:
                 matched_by = "sac_sku"
 
             sample_rows.append(SACPreviewRow(
+                raw_sku=record.sku_name[:50],
                 sku=pid_to_sku.get(record.product_id, record.sku_name[:40]),
                 sale_date=record.sale_date,
                 quantity_m2=float(record.quantity_m2),
