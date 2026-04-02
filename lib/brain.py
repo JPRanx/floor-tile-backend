@@ -362,13 +362,17 @@ def compute_horizon(
                 }
 
         # ── Apply cascade (only if boat is NOT skipped) ───────────────
+        # Confirmed/dispatched shipments: SIESA snapshot already reflects the
+        # consumed stock. Only deduct factory_avail for brain suggestions.
+        has_shipment_data = boat["id"] in boats_with_shipments
         if not skip:
             for p in boat_products:
                 pid = p["product_id"]
                 alloc_m2 = Decimal(p["allocated_pallets"]) * M2_PER_PALLET
                 running_stock[pid] = running_stock[pid] + alloc_m2
-                consumed = min(alloc_m2, factory_avail.get(pid, Decimal(0)))
-                factory_avail[pid] = factory_avail.get(pid, Decimal(0)) - consumed
+                if not has_shipment_data:
+                    consumed = min(alloc_m2, factory_avail.get(pid, Decimal(0)))
+                    factory_avail[pid] = factory_avail.get(pid, Decimal(0)) - consumed
             _viable_boat_count += 1
         else:
             # Skipped: zero out allocations in the product details
