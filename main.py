@@ -232,6 +232,7 @@ from routes.committed_orders import router as committed_orders_router
 from routes.export import router as export_router
 from routes.ledger import router as ledger_router
 from routes.factory_requests import router as factory_requests_router
+from routes.users import router as users_router
 from routes.horizon import router as horizon_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
@@ -268,6 +269,7 @@ app.include_router(export_router)  # Prefix already in router
 app.include_router(ledger_router)  # Prefix already in router
 app.include_router(factory_requests_router)  # Prefix already in router
 app.include_router(horizon_router)  # Prefix already in router
+app.include_router(users_router)  # Prefix already in router
 
 
 if __name__ == "__main__":
