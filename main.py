@@ -99,6 +99,11 @@ app.add_middleware(
 )
 
 
+# Auth middleware: verifies Supabase JWT on all /api/* routes
+from lib.auth import auth_middleware
+app.middleware("http")(auth_middleware)
+
+
 # ===================
 # ROUTES
 # ===================

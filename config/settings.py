@@ -41,7 +41,11 @@ class Settings(BaseSettings):
         None,
         description="Supabase service role key (for admin operations)"
     )
-    
+    supabase_jwt_secret: Optional[str] = Field(
+        None,
+        description="Supabase JWT signing secret (used to verify user tokens)"
+    )
+
     # ===================
     # API SECURITY
     # ===================
