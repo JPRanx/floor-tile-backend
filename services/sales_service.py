@@ -331,6 +331,8 @@ class SalesService:
                     "customer_normalized": r.customer_normalized,
                     "unit_price_usd": float(r.unit_price_usd) if r.unit_price_usd else None,
                     "total_price_usd": float(r.total_price_usd) if r.total_price_usd else None,
+                    "country": getattr(r, "country", None),
+                    "department": getattr(r, "department", None),
                 }
                 for r in records
             ]

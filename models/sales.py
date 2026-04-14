@@ -22,6 +22,8 @@ class SalesRecordCreate(BaseSchema):
     customer_normalized: Optional[str] = Field(None, description="Normalized for grouping (uppercase ASCII)")
     unit_price_usd: Optional[Decimal] = Field(None, ge=0, description="Unit price per m² in USD")
     total_price_usd: Optional[Decimal] = Field(None, ge=0, description="Total sale price in USD")
+    country: Optional[str] = Field(None, description="Country from PAIS column (e.g. GUATEMALA)")
+    department: Optional[str] = Field(None, description="Department/city from DEPARTAMENTO column")
 
     @field_validator("quantity_m2", mode="before")
     @classmethod
@@ -70,6 +72,8 @@ class SalesRecordResponse(TimestampMixin, BaseSchema):
     customer_normalized: Optional[str] = None
     unit_price_usd: Optional[Decimal] = None
     total_price_usd: Optional[Decimal] = None
+    country: Optional[str] = None
+    department: Optional[str] = None
 
     @field_validator("quantity_m2", "unit_price_usd", "total_price_usd", mode="before")
     @classmethod

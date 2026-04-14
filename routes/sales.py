@@ -554,6 +554,8 @@ async def preview_sac_upload(file: UploadFile = File(...)):
                 customer_normalized=record.customer_normalized,
                 unit_price_usd=record.unit_price_usd,
                 total_price_usd=record.total_price_usd,
+                country=record.country,
+                department=record.department,
             )
             for record in parse_result.sales
         ]
@@ -777,6 +779,8 @@ async def upload_sac_sales(file: UploadFile = File(...)):
                 customer_normalized=record.customer_normalized,
                 unit_price_usd=record.unit_price_usd,
                 total_price_usd=record.total_price_usd,
+                country=record.country,
+                department=record.department,
             )
             for record in parse_result.sales
         ]

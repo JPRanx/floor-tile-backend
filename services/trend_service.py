@@ -68,6 +68,26 @@ COUNTRY_NAMES = {
     "OTHER": "Other",
 }
 
+# Raw strings from SAC file's PAIS column mapped to ISO country codes.
+# Keys are uppercased ASCII-stripped forms for robust matching.
+RAW_COUNTRY_TO_CODE = {
+    "GUATEMALA": "GT",
+    "HONDURAS": "HN",
+    "EL SALVADOR": "SV",
+    "SALVADOR": "SV",
+    "NICARAGUA": "NI",
+    "COSTA RICA": "CR",
+    "PANAMA": "PA",
+    "PANAMÁ": "PA",
+}
+
+
+def country_raw_to_code(raw: Optional[str]) -> Optional[str]:
+    """Convert a raw country string (e.g. 'EL SALVADOR') to its ISO code."""
+    if not raw:
+        return None
+    return RAW_COUNTRY_TO_CODE.get(raw.strip().upper())
+
 
 def calculate_coefficient_of_variation(values: List[Decimal]) -> Decimal:
     """
@@ -433,7 +453,7 @@ class TrendService:
 
         # Fetch sales with customer info
         sales_result = self.db.table("sales").select(
-            "customer_normalized, week_start, quantity_m2, total_price_usd"
+            "customer_normalized, week_start, quantity_m2, total_price_usd, country"
         ).gte("week_start", previous_start.isoformat()).execute()
 
         # Aggregate by country with enhanced tracking
@@ -470,7 +490,10 @@ class TrendService:
                 except (ValueError, AttributeError):
                     continue
 
-            country_code = infer_country_code(customer)
+            # Prefer real country from SAC file; fall back to name inference.
+            country_code = country_raw_to_code(sale.get("country"))
+            if not country_code:
+                country_code = infer_country_code(customer)
             if not country_code:
                 country_code = "OTHER"
 
@@ -600,7 +623,7 @@ class TrendService:
 
         # Fetch all sales
         sales_result = self.db.table("sales").select(
-            "customer_normalized, customer, product_id, week_start, quantity_m2, total_price_usd"
+            "customer_normalized, customer, product_id, week_start, quantity_m2, total_price_usd, country"
         ).execute()
 
         # Fetch products for SKU mapping (tiles only - excludes FURNITURE, SINK, SURCHARGE)
@@ -611,6 +634,7 @@ class TrendService:
         # Aggregate by customer
         customer_data: Dict[str, Dict] = defaultdict(lambda: {
             "original_name": None,
+            "country_raw": None,  # From sales.country (real data), falls back to infer_country_code
             "current_revenue": Decimal("0"),
             "current_volume": Decimal("0"),
             "previous_revenue": Decimal("0"),
@@ -653,6 +677,11 @@ class TrendService:
             data = customer_data[customer_norm]
             if customer_orig and not data["original_name"]:
                 data["original_name"] = customer_orig
+            # Capture real country from SAC file (first non-empty value wins)
+            if not data["country_raw"]:
+                raw_country = sale.get("country")
+                if raw_country:
+                    data["country_raw"] = raw_country
 
             data["total_revenue"] += revenue
             data["total_volume"] += qty
@@ -845,8 +874,11 @@ class TrendService:
             sparkline_data = [(d, data["total_revenue"] / order_count) for d in orders]
             sparkline = generate_sparkline(sparkline_data, num_buckets=12, period_days=period_days + comparison_period_days)
 
-            # Infer country
-            country_code = infer_country_code(customer_norm)
+            # Country: prefer real value from sales.country (PAIS column).
+            # Fall back to name-based inference for historical rows pre-migration.
+            country_code = country_raw_to_code(data.get("country_raw"))
+            if not country_code:
+                country_code = infer_country_code(customer_norm)
 
             trends.append(CustomerTrend(
                 customer_normalized=customer_norm,

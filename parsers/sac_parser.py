@@ -41,6 +41,8 @@ class SACSalesRecord:
     customer: Optional[str] = None
     customer_normalized: Optional[str] = None
     invoice_number: Optional[str] = None
+    country: Optional[str] = None
+    department: Optional[str] = None
 
 
 @dataclass
@@ -263,6 +265,8 @@ def parse_sac_csv(
         unit_price_col = column_mapping.get("unit_price")
         total_price_col = column_mapping.get("total_price")
         invoice_col = column_mapping.get("invoice")
+        country_col = column_mapping.get("country")
+        department_col = column_mapping.get("department")
 
         # Skip empty rows
         if pd.isna(row.get(sku_col)) and pd.isna(row.get(desc_col)):
@@ -355,6 +359,16 @@ def parse_sac_csv(
         # Invoice number
         invoice = str(row.get(invoice_col)).strip() if invoice_col and pd.notna(row.get(invoice_col)) else None
 
+        # Country + department (uppercased, trimmed)
+        def _clean_location(val) -> Optional[str]:
+            if val is None or not pd.notna(val):
+                return None
+            s = str(val).strip().upper()
+            return s if s else None
+
+        country = _clean_location(row.get(country_col)) if country_col else None
+        department = _clean_location(row.get(department_col)) if department_col else None
+
         # Create record
         result.sales.append(SACSalesRecord(
             sale_date=sale_date,
@@ -367,6 +381,8 @@ def parse_sac_csv(
             customer=customer,
             customer_normalized=customer_normalized,
             invoice_number=invoice,
+            country=country,
+            department=department,
         ))
 
         # Track statistics
