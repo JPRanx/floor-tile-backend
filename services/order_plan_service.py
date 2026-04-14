@@ -225,40 +225,59 @@ def compute_plan(
             if contrib > 0:
                 prod_ready_by_pid_and_date.setdefault(pid, []).append((est_date, contrib))
 
-    # 7. Build velocity ranking for products with SIESA stock
+    # 7. Build velocity ranking AND skipped list
+    # Ranking is for products with meaningful demand + enough SIESA to ship (>=1 pallet)
+    # Skipped covers: no-velocity items OR sub-pallet leftovers that can't ship
     ranking: list[VelocityRankingRow] = []
+    skipped: list[SkippedProduct] = []
     for pid, siesa_m2 in siesa.items():
         if siesa_m2 <= 0:
             continue
         v = velocity_wk.get(pid, Decimal(0))
+        siesa_pallets_exact = float(siesa_m2 / M2_PER_PALLET)
+
+        # No Q1 sales → skipped (velocity unknown)
+        if v <= 0:
+            skipped.append(SkippedProduct(
+                sku=pid_to_sku.get(pid, "?"),
+                siesa_pallets=round(siesa_pallets_exact, 1),
+                siesa_m2=float(siesa_m2),
+                reason_es="Sin ventas en los ultimos 90 dias",
+            ))
+            continue
+
+        # Has velocity but <1 full pallet available → skipped (can't ship partial)
+        if siesa_pallets_exact < 1.0:
+            skipped.append(SkippedProduct(
+                sku=pid_to_sku.get(pid, "?"),
+                siesa_pallets=round(siesa_pallets_exact, 1),
+                siesa_m2=float(siesa_m2),
+                reason_es="Cantidad insuficiente (menos de 1 pallet)",
+            ))
+            continue
+
         total_pipeline = (
             wh.get(pid, Decimal(0))
             + transit.get(pid, Decimal(0))
             + siesa_m2
         )
-        cov = float(total_pipeline / v) if v > 0 else 999.0
+        cov = float(total_pipeline / v)
         ranking.append(VelocityRankingRow(
             sku=pid_to_sku.get(pid, "?"),
             velocity_m2_wk=float(v),
-            siesa_pallets=round(float(siesa_m2 / M2_PER_PALLET), 1),
+            siesa_pallets=round(siesa_pallets_exact, 1),
             siesa_m2=float(siesa_m2),
             coverage_weeks=round(cov, 1),
-            is_urgent=cov < 4.0 and v > 0,
+            is_urgent=cov < 4.0,
         ))
+    # Display ranking: sorted by velocity (what "velocity ranking" means)
     ranking.sort(key=lambda r: r.velocity_m2_wk, reverse=True)
 
-    # 8. Skipped products: SIESA stock but zero 90d velocity
-    skipped: list[SkippedProduct] = []
-    for pid, siesa_m2 in siesa.items():
-        if siesa_m2 <= 0:
-            continue
-        if velocity_wk.get(pid, Decimal(0)) <= 0:
-            skipped.append(SkippedProduct(
-                sku=pid_to_sku.get(pid, "?"),
-                siesa_pallets=round(float(siesa_m2 / M2_PER_PALLET), 1),
-                siesa_m2=float(siesa_m2),
-                reason_es="Sin ventas en los ultimos 90 dias",
-            ))
+    # Allocation queue: urgent SKUs jump the queue so stockouts get first dibs,
+    # then by velocity descending within each tier.
+    allocation_queue = sorted(
+        ranking, key=lambda r: (not r.is_urgent, -r.velocity_m2_wk)
+    )
 
     # 9. Cascade allocation across boats in departure order
     available: dict[str, Decimal] = {
@@ -296,8 +315,8 @@ def compute_plan(
             max_pallets=max_pallets,
         )
 
-        # Take from ranking in order (velocity descending)
-        for row in ranking:
+        # Take from allocation queue (urgent first, then by velocity desc)
+        for row in allocation_queue:
             if remaining_pallets <= 0:
                 break
             # Find pid by sku (ranking is keyed by sku; match back)
