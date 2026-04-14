@@ -162,6 +162,47 @@ def compute_plan(
                     r["product_id"], Decimal(0)
                 ) + Decimal(str(r.get("factory_available_m2") or 0))
 
+    # 3b. Subtract committed drafts on boats NOT being planned. Those pallets
+    # are already spoken for — they'll leave SIESA when those boats sail, so
+    # they must not be available to the selected plan. Only consider boats
+    # that haven't departed yet (post-departure SIESA already reflects it).
+    today_iso = date.today().isoformat()
+    future_boats = (
+        db.table("boat_schedules")
+        .select("id")
+        .gte("departure_date", today_iso)
+        .execute()
+        .data or []
+    )
+    future_boat_ids = {b["id"] for b in future_boats}
+
+    selected_set = set(boat_ids)
+    committed_drafts = (
+        db.table("boat_factory_drafts")
+        .select("id, boat_id, status")
+        .in_("status", ["ordered", "confirmed"])
+        .execute()
+        .data or []
+    )
+    other_committed_draft_ids = [
+        d["id"] for d in committed_drafts
+        if d["boat_id"] not in selected_set and d["boat_id"] in future_boat_ids
+    ]
+    if other_committed_draft_ids:
+        committed_items = (
+            db.table("draft_items")
+            .select("draft_id, product_id, selected_pallets")
+            .in_("draft_id", other_committed_draft_ids)
+            .execute()
+            .data or []
+        )
+        for it in committed_items:
+            pid = it["product_id"]
+            pallets = Decimal(str(it.get("selected_pallets") or 0))
+            consume = pallets * M2_PER_PALLET
+            current = siesa.get(pid, Decimal(0))
+            siesa[pid] = max(Decimal(0), current - consume)
+
     # 4. 90-day velocity from sales table (same method as brain.py — new middle)
     today_d = date.today()
     sales_start = (today_d - timedelta(days=90)).isoformat()
