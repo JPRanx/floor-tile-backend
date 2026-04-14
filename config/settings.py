@@ -53,6 +53,14 @@ class Settings(BaseSettings):
         None,
         description="API key for authentication"
     )
+
+    # ===================
+    # ANTHROPIC
+    # ===================
+    anthropic_api_key: Optional[str] = Field(
+        None,
+        description="Anthropic API key for Claude (narrative generation in order plans)"
+    )
     
     # ===================
     # TELEGRAM

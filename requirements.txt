@@ -67,3 +67,6 @@ yarl==1.22.0
 
 # AI / LLM (Claude Vision for scanned PDF parsing)
 anthropic>=0.39.0
+
+# PDF generation (order plan reports)
+fpdf2>=2.7.0
