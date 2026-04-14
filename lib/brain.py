@@ -260,15 +260,20 @@ def compute_horizon(
             too_late = (dep - today).days <= LEAD_TIME_DAYS
             has_shipment = boat["id"] in shipments_by_boat
 
+            # Is this allocation a real commitment or just a brain suggestion?
+            # Only commitments (shipments / saved drafts) reserve SIESA for later boats.
+            is_committed_alloc = False
             if has_shipment:
                 shipped_m2 = boat_shipments.get(pid, Decimal(0))
                 allocated_pallets = int(shipped_m2 / M2_PER_PALLET)
+                is_committed_alloc = True
             elif has_draft:
                 allocated_pallets = int(boat_drafts.get(pid, {}).get("selected_pallets", 0))
+                is_committed_alloc = True
             elif too_late:
                 allocated_pallets = 0
             else:
-                allocated_pallets = can_ship
+                allocated_pallets = can_ship  # brain suggestion only
 
             boat_total_pallets += allocated_pallets
 
@@ -292,6 +297,7 @@ def compute_horizon(
                 "is_shipment_locked": has_shipment,
                 "is_draft_committed": has_draft,
                 "is_past_lead_time": too_late and not has_draft and not has_shipment,
+                "_is_committed_alloc": is_committed_alloc,  # internal: cascade gate
             })
 
             boat_debug.append({
@@ -362,12 +368,19 @@ def compute_horizon(
                 }
 
         # ── Apply cascade (only if boat is NOT skipped) ───────────────
-        # Confirmed/dispatched shipments: SIESA snapshot already reflects the
-        # consumed stock. Only deduct factory_avail for brain suggestions.
+        # Only COMMITTED allocations (shipments / saved drafts) reserve SIESA
+        # and add to warehouse stock for later boats. Brain suggestions are
+        # display-only — they don't take SIESA away from later boats until
+        # Ashley saves a draft.
+        #
+        # Also: confirmed/dispatched shipments already consumed SIESA in the
+        # snapshot (that's what SIESA reports), so we don't double-deduct.
         has_shipment_data = boat["id"] in boats_with_shipments
         if not skip:
             for p in boat_products:
                 pid = p["product_id"]
+                if not p.get("_is_committed_alloc"):
+                    continue  # brain suggestion — do not cascade
                 alloc_m2 = Decimal(p["allocated_pallets"]) * M2_PER_PALLET
                 running_stock[pid] = running_stock[pid] + alloc_m2
                 if not has_shipment_data:
@@ -379,6 +392,10 @@ def compute_horizon(
             boat_total_pallets = Decimal(0)
             for p in boat_products:
                 p["allocated_pallets"] = 0
+
+        # Strip internal cascade gate from the output
+        for p in boat_products:
+            p.pop("_is_committed_alloc", None)
 
         days_until_dep = (dep - today).days
 
