@@ -85,6 +85,7 @@ def compute_horizon(
     inventory: dict[str, Decimal],
     in_transit: dict[str, Decimal] | None = None,  # Reserved — not used yet
     velocities: dict[str, Decimal],
+    peak_velocities: dict[str, Decimal] | None = None,
     factory_stock: dict[str, Decimal],
     drafts: list[dict],
     draft_headers: list[dict],
@@ -111,16 +112,25 @@ def compute_horizon(
     product_map = {p["id"]: p for p in products}
     product_ids = [p["id"] for p in products if p.get("active", True)]
 
-    # Per-product tier classification + buffer (replaces flat SAFETY_STOCK_M2).
-    # A/B/C tiers based on velocity quartiles; buffer = velocity × tier_weeks
-    # bounded by floor/ceiling pallets.
-    tier_map = _classify_tiers(product_ids, velocities)
-    buffer_m2_map: dict[str, Decimal] = {
-        pid: _compute_buffer_m2(
-            pid, Decimal(str(velocities.get(pid, 0))), tier_map[pid]
-        )
-        for pid in product_ids
-    }
+    # Tier comes from products.tier (frozen at a known classification).
+    # Falls back to runtime computation if a product hasn't been classified yet.
+    frozen_tiers = {p["id"]: p.get("tier") for p in products if p.get("tier")}
+    runtime_tiers = _classify_tiers(product_ids, velocities)
+    tier_map = {pid: frozen_tiers.get(pid) or runtime_tiers[pid] for pid in product_ids}
+
+    # Buffer math:
+    #   Tier A — uses PEAK weekly velocity to absorb demand spikes.
+    #   Tier B/C — uses average daily velocity (90-day).
+    peak_velocities = peak_velocities or {}
+    buffer_m2_map: dict[str, Decimal] = {}
+    for pid in product_ids:
+        tier = tier_map[pid]
+        if tier == "A" and peak_velocities.get(pid, Decimal(0)) > 0:
+            # Use peak velocity for tier A
+            v_for_buffer = Decimal(str(peak_velocities[pid]))
+        else:
+            v_for_buffer = Decimal(str(velocities.get(pid, 0)))
+        buffer_m2_map[pid] = _compute_buffer_m2(pid, v_for_buffer, tier)
 
     # Index shipment_items by boat_id
     shipments_by_boat: dict[str, dict[str, Decimal]] = {}

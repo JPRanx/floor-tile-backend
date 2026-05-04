@@ -79,12 +79,18 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     freshness = {}
 
     # 1. Products (active tiles only — exclude furniture, sinks, surcharges)
+    # Include `tier` so brain can use frozen A/B/C classification.
     tile_categories = ["MADERAS", "MARMOLIZADOS", "EXTERIORES"]
     products_res = db.table("products").select(
-        "id, sku, category, active"
+        "id, sku, category, active, tier"
     ).eq("active", True).in_("category", tile_categories).execute()
     products = [
-        {"id": p["id"], "sku": p["sku"], "active": p.get("active", True)}
+        {
+            "id": p["id"],
+            "sku": p["sku"],
+            "active": p.get("active", True),
+            "tier": p.get("tier"),  # may be None — brain falls back to runtime classification
+        }
         for p in products_res.data
     ]
     freshness["products"] = len(products)
@@ -182,20 +188,34 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     else:
         freshness["transit_snapshot_date"] = None
 
-    # 5. Sales → velocity (90-day simple average)
+    # 5. Sales → velocity (90-day simple average) + peak velocity (for tier A buffer)
     sales_start = (today - timedelta(days=90)).isoformat()
     sales_res = db.table("sales").select(
-        "product_id, quantity_m2"
+        "product_id, quantity_m2, week_start"
     ).gte("week_start", sales_start).execute()
     sales_totals: dict[str, Decimal] = defaultdict(Decimal)
+    # Per-week aggregates for peak detection
+    sales_by_week: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
     for row in sales_res.data:
         pid = row.get("product_id")
-        if pid:
-            sales_totals[pid] += Decimal(str(row.get("quantity_m2") or 0))
+        if not pid:
+            continue
+        qty = Decimal(str(row.get("quantity_m2") or 0))
+        sales_totals[pid] += qty
+        wk = str(row.get("week_start") or "")
+        sales_by_week[pid][wk] += qty
     velocities: dict[str, Decimal] = {
         pid: (total / 90).quantize(Decimal("0.01"))
         for pid, total in sales_totals.items()
     }
+    # Peak velocity (m²/day equivalent of the highest-volume week in the 90d window).
+    # Used for tier A buffer to absorb demand spikes — average velocity isn't enough
+    # when a single big customer can buy 10x in one week.
+    peak_velocities: dict[str, Decimal] = {}
+    for pid, weeks in sales_by_week.items():
+        if weeks:
+            peak_week_m2 = max(weeks.values())
+            peak_velocities[pid] = (peak_week_m2 / 7).quantize(Decimal("0.01"))
     freshness["sales_records"] = len(sales_res.data)
     freshness["sales_window_start"] = sales_start
 
@@ -267,6 +287,7 @@ def _query_inputs(factory_id: str, today: date) -> dict:
         "inventory": inventory,
         "in_transit": in_transit,
         "velocities": velocities,
+        "peak_velocities": peak_velocities,
         "factory_stock": factory_stock,
         "drafts": drafts,
         "draft_headers": draft_headers,

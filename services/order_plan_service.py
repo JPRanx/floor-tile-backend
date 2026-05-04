@@ -172,15 +172,16 @@ def compute_plan(
     ).in_("id", boat_ids).order("departure_date").execute()
     boats_data = boats_res.data or []
 
-    # 2. Fetch active tile products
+    # 2. Fetch active tile products (with frozen tier from DB)
     tile_categories = ["MADERAS", "MARMOLIZADOS", "EXTERIORES"]
-    prods_q = db.table("products").select("id, sku, factory_id").eq(
+    prods_q = db.table("products").select("id, sku, factory_id, tier").eq(
         "active", True
     ).in_("category", tile_categories)
     if factory_id:
         prods_q = prods_q.eq("factory_id", factory_id)
     products = prods_q.execute().data or []
     pid_to_sku: dict[str, str] = {p["id"]: p["sku"] for p in products}
+    pid_to_tier: dict[str, str] = {p["id"]: p.get("tier") for p in products if p.get("tier")}
     active_product_ids = set(pid_to_sku.keys())
 
     # 3. Latest SIESA (factory) inventory
@@ -364,7 +365,8 @@ def compute_plan(
     available: dict[str, Decimal] = {
         pid: Decimal(str(m2)) for pid, m2 in siesa.items()
     }
-    # Pre-compute tier + buffer per product (same logic as brain.py)
+    # Pre-compute tier + buffer per product. Tier comes from DB (frozen) with
+    # runtime fallback when products.tier hasn't been set.
     sku_to_pid = {sku: pid for pid, sku in pid_to_sku.items()}
     all_weekly_vels = [Decimal(str(r.velocity_m2_wk)) for r in ranking]
     product_tier: dict[str, str] = {}
@@ -374,7 +376,7 @@ def compute_plan(
         if not pid:
             continue
         v = Decimal(str(r.velocity_m2_wk))
-        tier = _classify_tier(v, all_weekly_vels)
+        tier = pid_to_tier.get(pid) or _classify_tier(v, all_weekly_vels)
         product_tier[pid] = tier
         product_buffer_m2[pid] = _buffer_m2_for(v, tier)
 
