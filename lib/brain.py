@@ -327,18 +327,21 @@ def compute_horizon(
 
             # Is this allocation a real commitment or just a brain suggestion?
             # Only commitments (shipments / saved drafts) reserve SIESA for later boats.
+            # Drafts can carry fractional pallets (e.g., 0.5) — Ashley orders half
+            # pallets from SIESA when the factory has fractional remainders.
             is_committed_alloc = False
             if has_shipment:
                 shipped_m2 = boat_shipments.get(pid, Decimal(0))
-                allocated_pallets = int(shipped_m2 / M2_PER_PALLET)
+                allocated_pallets = (shipped_m2 / M2_PER_PALLET).quantize(Decimal("0.01"))
                 is_committed_alloc = True
             elif has_draft:
-                allocated_pallets = int(boat_drafts.get(pid, {}).get("selected_pallets", 0))
+                raw = boat_drafts.get(pid, {}).get("selected_pallets", 0) or 0
+                allocated_pallets = Decimal(str(raw))
                 is_committed_alloc = True
             elif too_late:
-                allocated_pallets = 0
+                allocated_pallets = Decimal(0)
             else:
-                allocated_pallets = can_ship  # brain suggestion only
+                allocated_pallets = Decimal(can_ship)  # brain suggestion only
 
             boat_total_pallets += allocated_pallets
 
@@ -356,7 +359,7 @@ def compute_horizon(
                 "coverage_gap_m2": float(coverage_gap),
                 "suggested_pallets": suggested_pallets,
                 "can_ship_pallets": can_ship,
-                "allocated_pallets": allocated_pallets,
+                "allocated_pallets": float(allocated_pallets),
                 "factory_available_m2": float(factory_m2),
                 "factory_max_pallets": factory_max_pallets,
                 "buffer_m2": float(buffer_m2),
@@ -385,7 +388,7 @@ def compute_horizon(
                     "coverage_gap_m2": float(coverage_gap),
                     "suggested_pallets": suggested_pallets,
                     "can_ship_pallets": can_ship,
-                    "allocated_pallets": allocated_pallets,
+                    "allocated_pallets": float(allocated_pallets),
                     "too_late": too_late and not has_draft,
                 },
                 "cascade": {
@@ -449,7 +452,7 @@ def compute_horizon(
                 pid = p["product_id"]
                 if not p.get("_is_committed_alloc"):
                     continue  # brain suggestion — do not cascade
-                alloc_m2 = Decimal(p["allocated_pallets"]) * M2_PER_PALLET
+                alloc_m2 = Decimal(str(p["allocated_pallets"])) * M2_PER_PALLET
                 running_stock[pid] = running_stock[pid] + alloc_m2
                 if not has_shipment_data:
                     consumed = min(alloc_m2, factory_avail.get(pid, Decimal(0)))
