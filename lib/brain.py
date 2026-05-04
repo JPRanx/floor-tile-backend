@@ -23,7 +23,47 @@ from .constants import (
     MIN_BLS_PER_BOAT,
     PALLETS_PER_CONTAINER,
     LEAD_TIME_DAYS,
+    TIER_BUFFER_CONFIG,
 )
+
+
+def _classify_tiers(
+    product_ids: list[str], velocities: dict[str, Decimal]
+) -> dict[str, str]:
+    """Tier products by 90-day velocity.
+    Top 25% = A, mid 50% = B, bottom 25% (or zero-velocity) = C.
+    """
+    tier_map: dict[str, str] = {pid: "C" for pid in product_ids}
+    pairs = [
+        (pid, Decimal(str(velocities.get(pid, 0))))
+        for pid in product_ids
+    ]
+    with_vel = [(pid, v) for pid, v in pairs if v > 0]
+    with_vel.sort(key=lambda x: x[1], reverse=True)
+    n = len(with_vel)
+    if n == 0:
+        return tier_map
+    a_cut = max(1, int(n * 0.25))
+    c_start = max(a_cut, int(n * 0.75))
+    for i, (pid, _) in enumerate(with_vel):
+        if i < a_cut:
+            tier_map[pid] = "A"
+        elif i < c_start:
+            tier_map[pid] = "B"
+        # else stays "C"
+    return tier_map
+
+
+def _compute_buffer_m2(
+    pid: str, daily_velocity: Decimal, tier: str
+) -> Decimal:
+    """Per-product safety buffer in m², bounded by tier floor/ceiling."""
+    cfg = TIER_BUFFER_CONFIG[tier]
+    weekly_velocity = daily_velocity * Decimal(7)
+    raw = weekly_velocity * Decimal(cfg["weeks"])
+    floor_m2 = Decimal(cfg["floor_pallets"]) * M2_PER_PALLET
+    ceil_m2 = Decimal(cfg["ceiling_pallets"]) * M2_PER_PALLET
+    return max(floor_m2, min(raw, ceil_m2))
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +110,17 @@ def compute_horizon(
 
     product_map = {p["id"]: p for p in products}
     product_ids = [p["id"] for p in products if p.get("active", True)]
+
+    # Per-product tier classification + buffer (replaces flat SAFETY_STOCK_M2).
+    # A/B/C tiers based on velocity quartiles; buffer = velocity × tier_weeks
+    # bounded by floor/ceiling pallets.
+    tier_map = _classify_tiers(product_ids, velocities)
+    buffer_m2_map: dict[str, Decimal] = {
+        pid: _compute_buffer_m2(
+            pid, Decimal(str(velocities.get(pid, 0))), tier_map[pid]
+        )
+        for pid in product_ids
+    }
 
     # Index shipment_items by boat_id
     shipments_by_boat: dict[str, dict[str, Decimal]] = {}
@@ -220,6 +271,10 @@ def compute_horizon(
             # No velocity = no consumption = no gap. Show product but don't restock.
             factory_max_pallets = int(factory_m2 / M2_PER_PALLET)
 
+            # Per-product buffer replaces flat SAFETY_STOCK_M2 (tier-aware).
+            buffer_m2 = buffer_m2_map.get(pid, SAFETY_STOCK_M2)
+            tier = tier_map.get(pid, "C")
+
             if velocity <= 0:
                 stock_at_next_resupply = stock
                 coverage_gap = Decimal(0)
@@ -227,7 +282,7 @@ def compute_horizon(
                 can_ship = 0
             else:
                 stock_at_next_resupply = stock - (velocity * days_to_next_resupply)
-                coverage_gap = max(Decimal(0), SAFETY_STOCK_M2 - stock_at_next_resupply)
+                coverage_gap = max(Decimal(0), buffer_m2 - stock_at_next_resupply)
                 suggested_pallets = int(
                     (coverage_gap / M2_PER_PALLET).to_integral_value(rounding=ROUND_UP)
                 ) if coverage_gap > 0 else 0
@@ -294,6 +349,9 @@ def compute_horizon(
                 "allocated_pallets": allocated_pallets,
                 "factory_available_m2": float(factory_m2),
                 "factory_max_pallets": factory_max_pallets,
+                "buffer_m2": float(buffer_m2),
+                "buffer_pallets": int(buffer_m2 / M2_PER_PALLET),
+                "tier": tier,
                 "is_shipment_locked": has_shipment,
                 "is_draft_committed": has_draft,
                 "is_past_lead_time": too_late and not has_draft and not has_shipment,

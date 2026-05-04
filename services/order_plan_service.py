@@ -24,6 +24,43 @@ M2_PER_PALLET = Decimal("134.4")
 PALLETS_PER_CONTAINER = Decimal("13")
 WAREHOUSE_MAX_PALLETS = Decimal("672")  # Guatemala warehouse capacity
 
+# Buffer config — same as backend/lib/constants.py TIER_BUFFER_CONFIG.
+# Mirrored here to keep this service standalone.
+_TIER_CONFIG = {
+    "A": {"weeks": 4, "floor_pallets": 5, "ceiling_pallets": 999},
+    "B": {"weeks": 3, "floor_pallets": 3, "ceiling_pallets": 15},
+    "C": {"weeks": 2, "floor_pallets": 1, "ceiling_pallets": 8},
+}
+
+
+def _classify_tier(velocity_wk: Decimal, all_velocities_wk: list[Decimal]) -> str:
+    """Classify a product by velocity quartile.
+    Top 25% = A, mid 50% = B, bottom 25% (or zero velocity) = C.
+    """
+    if velocity_wk <= 0:
+        return "C"
+    sorted_vels = sorted([v for v in all_velocities_wk if v > 0], reverse=True)
+    n = len(sorted_vels)
+    if n == 0:
+        return "C"
+    a_cut_idx = max(1, int(n * 0.25)) - 1
+    c_cut_idx = max(a_cut_idx + 1, int(n * 0.75)) - 1
+    a_threshold = sorted_vels[min(a_cut_idx, n - 1)]
+    c_threshold = sorted_vels[min(c_cut_idx, n - 1)]
+    if velocity_wk >= a_threshold:
+        return "A"
+    if velocity_wk >= c_threshold:
+        return "B"
+    return "C"
+
+
+def _buffer_m2_for(velocity_wk: Decimal, tier: str) -> Decimal:
+    cfg = _TIER_CONFIG[tier]
+    raw = velocity_wk * Decimal(cfg["weeks"])
+    floor_m2 = Decimal(cfg["floor_pallets"]) * M2_PER_PALLET
+    ceil_m2 = Decimal(cfg["ceiling_pallets"]) * M2_PER_PALLET
+    return max(floor_m2, min(raw, ceil_m2))
+
 
 @dataclass
 class PlanProductLine:
@@ -320,18 +357,54 @@ def compute_plan(
         ranking, key=lambda r: (not r.is_urgent, -r.velocity_m2_wk)
     )
 
-    # 9. Cascade allocation across boats in departure order
+    # 9. Cascade allocation across boats in departure order — BUFFER-ANCHORED.
+    # Per (boat, product), take only enough to keep stock above buffer through
+    # the next boat's arrival. This naturally distributes products across boats
+    # instead of greedy-filling the first boat.
     available: dict[str, Decimal] = {
         pid: Decimal(str(m2)) for pid, m2 in siesa.items()
     }
+    # Pre-compute tier + buffer per product (same logic as brain.py)
+    sku_to_pid = {sku: pid for pid, sku in pid_to_sku.items()}
+    all_weekly_vels = [Decimal(str(r.velocity_m2_wk)) for r in ranking]
+    product_tier: dict[str, str] = {}
+    product_buffer_m2: dict[str, Decimal] = {}
+    for r in ranking:
+        pid = sku_to_pid.get(r.sku)
+        if not pid:
+            continue
+        v = Decimal(str(r.velocity_m2_wk))
+        tier = _classify_tier(v, all_weekly_vels)
+        product_tier[pid] = tier
+        product_buffer_m2[pid] = _buffer_m2_for(v, tier)
+
+    # Track running warehouse projection per product across boat arrivals so
+    # we don't double-allocate (each boat's take adds to the next-arrival pool).
+    warehouse_projection: dict[str, Decimal] = {
+        pid: Decimal(str(m2)) for pid, m2 in (
+            list(map(lambda x: (x[0], x[1]), [(pid, 0) for pid in pid_to_sku.keys()]))
+        )
+    }
+    # Note: we don't have warehouse data here; simplification — boat take is
+    # capped by buffer + sales-between-boats, that's the constraint that matters.
+
     plan_boats: list[PlanBoat] = []
     today = date.today()
 
-    for boat in boats_data:
+    for i, boat in enumerate(boats_data):
         dep = date.fromisoformat(boat["departure_date"]) \
             if isinstance(boat["departure_date"], str) else boat["departure_date"]
         arr = date.fromisoformat(boat["arrival_date"]) \
             if isinstance(boat["arrival_date"], str) else boat["arrival_date"]
+
+        # Compute "weeks until next boat" — how long this boat's stock must last.
+        if i + 1 < len(boats_data):
+            nxt = boats_data[i + 1]
+            next_arr = date.fromisoformat(nxt["arrival_date"]) \
+                if isinstance(nxt["arrival_date"], str) else nxt["arrival_date"]
+            weeks_to_next = max(Decimal("1"), Decimal(str((next_arr - arr).days)) / Decimal("7"))
+        else:
+            weeks_to_next = Decimal("6")  # default coverage horizon for last boat
 
         # Add production that will be ready before this boat's departure
         if include_production:
@@ -360,15 +433,22 @@ def compute_plan(
         for row in allocation_queue:
             if remaining_pallets <= 0:
                 break
-            # Find pid by sku (ranking is keyed by sku; match back)
-            pid = next((p for p, s in pid_to_sku.items() if s == row.sku), None)
+            pid = sku_to_pid.get(row.sku)
             if pid is None:
                 continue
             avail_m2 = available.get(pid, Decimal(0))
             if avail_m2 <= 0:
                 continue
+
+            # Buffer-anchored take: enough to cover sales until next boat + buffer
+            # for THIS product. Caps at SIESA available and remaining boat capacity.
+            buffer_m2 = product_buffer_m2.get(pid, Decimal("403.2"))  # legacy fallback
+            weekly_vel = Decimal(str(row.velocity_m2_wk))
+            target_m2 = buffer_m2 + (weekly_vel * weeks_to_next)
+            target_pallets = (target_m2 / M2_PER_PALLET).to_integral_value(rounding="ROUND_UP")
+
             avail_pallets = avail_m2 / M2_PER_PALLET
-            take = min(avail_pallets, remaining_pallets)
+            take = min(target_pallets, avail_pallets, remaining_pallets)
             take_pallets = int(take)  # round down to whole pallets
             if take_pallets <= 0:
                 continue
