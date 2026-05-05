@@ -8,7 +8,9 @@ Key columns:
 - Item: SIESA item code (matches products.siesa_item)
 - Desc. item: Product description (fallback matching via normalize_product_name)
 - Lote: Lot number
-- Cant. disponible: Available quantity in m²
+- Existencia: Raw physical inventory in m²
+- Cant. comprometida: Quantity committed to orders (factory's view) in m²
+- Cant. disponible: Available quantity in m² (= Existencia − Cant. comprometida)
 - Peso en KG: Weight in kg
 - Bodega: Warehouse code
 - Desc. bodega: Warehouse name
@@ -28,8 +30,17 @@ from utils.text_utils import normalize_product_name
 
 logger = structlog.get_logger(__name__)
 
-# Required columns in SIESA export
-REQUIRED_COLUMNS = ["Item", "Lote", "Cant. disponible"]
+# Required columns in SIESA export.
+# Cant. disponible is the headline number (= Existencia − Cant. comprometida)
+# and the one we cascade against. The other two are required so we can
+# reconcile our drafts against factory's view of commits.
+REQUIRED_COLUMNS = [
+    "Item",
+    "Lote",
+    "Existencia",
+    "Cant. comprometida",
+    "Cant. disponible",
+]
 
 # Optional columns with fallbacks
 OPTIONAL_COLUMNS = {
@@ -47,7 +58,9 @@ class SIESALotRow:
     siesa_item: int
     siesa_description: Optional[str]
     lot_number: str
-    quantity_m2: Decimal
+    quantity_m2: Decimal              # = Cant. disponible (headline / cascade source)
+    quantity_existencia_m2: Decimal   # raw factory inventory for this lot
+    quantity_committed_m2: Decimal    # factory's committed amount for this lot
     weight_kg: Optional[Decimal]
     warehouse_code: Optional[str]
     warehouse_name: Optional[str]
@@ -240,6 +253,35 @@ def parse_siesa_file(
             result.skipped_errors += 1
             continue
 
+        existencia_m2 = _safe_decimal(row.get("Existencia"))
+        if existencia_m2 is None or existencia_m2 < 0:
+            result.errors.append(SIESARowError(
+                row=row_num,
+                field="Existencia",
+                error="Missing or invalid Existencia",
+                value=str(row.get("Existencia", "")),
+            ))
+            result.skipped_errors += 1
+            continue
+
+        committed_m2 = _safe_decimal(row.get("Cant. comprometida"))
+        if committed_m2 is None or committed_m2 < 0:
+            committed_m2 = Decimal("0")
+
+        # Sanity check: existencia − comprometida should equal disponible
+        # (within small rounding tolerance). If not, the file is malformed
+        # or columns were swapped — log a warning but keep the row.
+        expected_disp = existencia_m2 - committed_m2
+        if abs(expected_disp - quantity_m2) > Decimal("0.5"):
+            logger.warning(
+                "siesa_row_quantity_mismatch",
+                row=row_num,
+                existencia=str(existencia_m2),
+                comprometida=str(committed_m2),
+                disponible=str(quantity_m2),
+                expected_disponible=str(expected_disp),
+            )
+
         # Parse optional fields
         siesa_description = _safe_str(row.get("Desc. item"))
         weight_kg = _safe_decimal(row.get("Peso en KG"))
@@ -253,6 +295,8 @@ def parse_siesa_file(
             siesa_description=siesa_description,
             lot_number=lot_number,
             quantity_m2=quantity_m2,
+            quantity_existencia_m2=existencia_m2,
+            quantity_committed_m2=committed_m2,
             weight_kg=weight_kg,
             warehouse_code=warehouse_code,
             warehouse_name=warehouse_name,

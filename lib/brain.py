@@ -12,7 +12,7 @@ Production is unified into the cascade:
 - Production requests only target non-skipped boats
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_UP
 from typing import Any
 
@@ -92,6 +92,7 @@ def compute_horizon(
     shipment_items: list[dict],
     production_schedule: list[dict],
     today: date,
+    snapshot_created_at: datetime | None = None,
 ) -> dict[str, Any]:
     """
     The one brain. Pure function.
@@ -155,6 +156,13 @@ def compute_horizon(
     }
     draft_id_by_boat: dict[str, str] = {
         h["boat_id"]: h["draft_id"] for h in draft_headers
+    }
+    # When the draft was committed (status flipped to ordered).
+    # Used to gate the factory cascade: drafts committed BEFORE the SIESA
+    # snapshot are already accounted for in factory's Cant. disponible —
+    # cascading them again would double-count.
+    draft_ordered_at_by_boat: dict[str, datetime | None] = {
+        h["boat_id"]: h.get("ordered_at") for h in draft_headers
     }
     draft_boat_ids: set[str] = set(draft_status_by_boat.keys())
 
@@ -439,14 +447,26 @@ def compute_horizon(
                 }
 
         # ── Apply cascade (only if boat is NOT skipped) ───────────────
-        # Only COMMITTED allocations (shipments / saved drafts) reserve SIESA
-        # and add to warehouse stock for later boats. Brain suggestions are
-        # display-only — they don't take SIESA away from later boats until
-        # Ashley saves a draft.
-        #
-        # Also: confirmed/dispatched shipments already consumed SIESA in the
-        # snapshot (that's what SIESA reports), so we don't double-deduct.
+        # Two effects, gated independently:
+        #   1. running_stock += alloc_m2 — ALWAYS for committed allocs.
+        #      Pallets physically arrive at our warehouse whenever the boat
+        #      lands, regardless of when the draft was committed.
+        #   2. factory_avail -= alloc_m2 — only when the factory snapshot
+        #      doesn't already account for this allocation:
+        #        a. Shipments are already gone from the snapshot → never deduct.
+        #        b. Drafts ordered BEFORE the snapshot are already in factory's
+        #           Cant. comprometida (and therefore excluded from Disponible).
+        #           Deducting them would double-count.
+        #        c. Drafts ordered AFTER the snapshot are unknown to the
+        #           factory's last export → must be deducted to keep later
+        #           boats honest until the next SIESA upload.
         has_shipment_data = boat["id"] in boats_with_shipments
+        boat_draft_ordered_at = draft_ordered_at_by_boat.get(boat["id"])
+        draft_is_post_snapshot = (
+            boat_draft_ordered_at is not None
+            and snapshot_created_at is not None
+            and boat_draft_ordered_at > snapshot_created_at
+        )
         if not skip:
             for p in boat_products:
                 pid = p["product_id"]
@@ -454,7 +474,7 @@ def compute_horizon(
                     continue  # brain suggestion — do not cascade
                 alloc_m2 = Decimal(str(p["allocated_pallets"])) * M2_PER_PALLET
                 running_stock[pid] = running_stock[pid] + alloc_m2
-                if not has_shipment_data:
+                if not has_shipment_data and draft_is_post_snapshot:
                     consumed = min(alloc_m2, factory_avail.get(pid, Decimal(0)))
                     factory_avail[pid] = factory_avail.get(pid, Decimal(0)) - consumed
             _viable_boat_count += 1

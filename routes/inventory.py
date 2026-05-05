@@ -752,7 +752,9 @@ async def preview_siesa_upload(
             lots_to_insert.append({
                 "product_id": match.product_id,
                 "lot_number": lot.lot_number,
-                "quantity_m2": float(lot.quantity_m2),
+                "quantity_m2": float(lot.quantity_m2),  # = Cant. disponible
+                "quantity_existencia_m2": float(lot.quantity_existencia_m2),
+                "quantity_committed_m2": float(lot.quantity_committed_m2),
                 "weight_kg": float(lot.weight_kg) if lot.weight_kg else None,
                 "quality": lot.quality,
                 "warehouse_code": lot.warehouse_code,
@@ -1002,12 +1004,16 @@ async def confirm_siesa_upload(
             product_stats: dict[str, dict] = {}
             for lot in lots_to_insert:
                 pid = lot["product_id"]
-                qty = lot["quantity_m2"]
+                qty = lot["quantity_m2"]                          # disponible
+                exist = lot.get("quantity_existencia_m2", 0) or 0  # raw
+                comm = lot.get("quantity_committed_m2", 0) or 0    # comprometida
                 lot_num = lot.get("lot_number", "")
 
                 if pid not in product_stats:
                     product_stats[pid] = {
                         "total_m2": 0.0,
+                        "total_existencia_m2": 0.0,
+                        "total_committed_m2": 0.0,
                         "lot_count": 0,
                         "largest_lot_m2": 0.0,
                         "largest_lot_code": "",
@@ -1015,6 +1021,8 @@ async def confirm_siesa_upload(
 
                 stats = product_stats[pid]
                 stats["total_m2"] += qty
+                stats["total_existencia_m2"] += exist
+                stats["total_committed_m2"] += comm
                 stats["lot_count"] += 1
 
                 if qty > stats["largest_lot_m2"]:
@@ -1027,6 +1035,8 @@ async def confirm_siesa_upload(
                     "product_id": pid,
                     "snapshot_date": actual_date.isoformat(),
                     "factory_available_m2": stats["total_m2"],
+                    "factory_existencia_m2": stats["total_existencia_m2"],
+                    "factory_committed_m2": stats["total_committed_m2"],
                     "factory_lot_count": stats["lot_count"],
                     "factory_largest_lot_m2": stats["largest_lot_m2"],
                     "factory_largest_lot_code": stats["largest_lot_code"],
@@ -1218,7 +1228,9 @@ async def upload_siesa_inventory(
             lots_to_insert.append({
                 "product_id": match.product_id,
                 "lot_number": lot.lot_number,
-                "quantity_m2": float(lot.quantity_m2),
+                "quantity_m2": float(lot.quantity_m2),  # = Cant. disponible
+                "quantity_existencia_m2": float(lot.quantity_existencia_m2),
+                "quantity_committed_m2": float(lot.quantity_committed_m2),
                 "weight_kg": float(lot.weight_kg) if lot.weight_kg else None,
                 "quality": lot.quality,
                 "warehouse_code": lot.warehouse_code,
@@ -1240,19 +1252,24 @@ async def upload_siesa_inventory(
         # ===================
         # SYNC TO FACTORY_SNAPSHOTS
         # ===================
-        # Aggregate lots by product_id and upsert to factory_snapshots
-        # SIESA data is FACTORY finished goods — independent table, no carry-forward needed
+        # Aggregate lots by product_id and upsert to factory_snapshots.
+        # SIESA data is FACTORY finished goods — independent table, no carry-forward needed.
+        # We aggregate three numbers per product so reconciliation can compare
+        # our committed drafts against factory's view of commits.
         if lots_created > 0:
-            # Aggregate quantities and find largest lot per product
             product_stats: dict[str, dict] = {}
             for lot in lots_to_insert:
                 pid = lot["product_id"]
-                qty = lot["quantity_m2"]
+                qty = lot["quantity_m2"]                          # disponible
+                exist = lot.get("quantity_existencia_m2", 0) or 0  # raw
+                comm = lot.get("quantity_committed_m2", 0) or 0    # comprometida
                 lot_num = lot.get("lot_number", "")
 
                 if pid not in product_stats:
                     product_stats[pid] = {
                         "total_m2": 0.0,
+                        "total_existencia_m2": 0.0,
+                        "total_committed_m2": 0.0,
                         "lot_count": 0,
                         "largest_lot_m2": 0.0,
                         "largest_lot_code": "",
@@ -1260,6 +1277,8 @@ async def upload_siesa_inventory(
 
                 stats = product_stats[pid]
                 stats["total_m2"] += qty
+                stats["total_existencia_m2"] += exist
+                stats["total_committed_m2"] += comm
                 stats["lot_count"] += 1
 
                 if qty > stats["largest_lot_m2"]:
@@ -1272,6 +1291,8 @@ async def upload_siesa_inventory(
                     "product_id": pid,
                     "snapshot_date": actual_date.isoformat(),
                     "factory_available_m2": stats["total_m2"],
+                    "factory_existencia_m2": stats["total_existencia_m2"],
+                    "factory_committed_m2": stats["total_committed_m2"],
                     "factory_lot_count": stats["lot_count"],
                     "factory_largest_lot_m2": stats["largest_lot_m2"],
                     "factory_largest_lot_code": stats["largest_lot_code"],

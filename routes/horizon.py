@@ -7,9 +7,20 @@ GET /api/v2/horizon/{factory_id}/{boat_id} → full detail for one boat (OB)
 Route → DB queries → brain → respond. No services.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from collections import defaultdict
+
+
+def _parse_ts(value):
+    """Parse a Supabase ISO timestamp string into a timezone-aware datetime.
+    Returns None for None/empty. Datetimes pass through unchanged."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    # Supabase returns timestamps like "2026-05-04T12:30:41.89762+00:00"
+    return datetime.fromisoformat(str(value))
 
 from fastapi import APIRouter, HTTPException
 import structlog
@@ -151,13 +162,18 @@ def _query_inputs(factory_id: str, today: date) -> dict:
         freshness["warehouse_snapshot_date"] = None
 
     # 4. Factory snapshots (latest per product)
+    # Pull created_at as well: the brain needs to know WHEN the snapshot was
+    # uploaded, so it can decide which drafts the factory already accounted for
+    # (pre-snapshot) vs which ones it doesn't know about yet (post-snapshot).
     latest_fs = db.table("factory_snapshots").select(
-        "snapshot_date"
+        "snapshot_date, created_at"
     ).order("snapshot_date", desc=True).limit(1).execute()
 
     factory_stock: dict[str, Decimal] = {}
+    snapshot_created_at = None
     if latest_fs.data:
         fs_date = latest_fs.data[0]["snapshot_date"]
+        snapshot_created_at = _parse_ts(latest_fs.data[0].get("created_at"))
         factory_res = db.table("factory_snapshots").select(
             "product_id, factory_available_m2"
         ).eq("snapshot_date", fs_date).execute()
@@ -165,8 +181,10 @@ def _query_inputs(factory_id: str, today: date) -> dict:
             pid = row["product_id"]
             factory_stock[pid] = Decimal(str(row.get("factory_available_m2") or 0))
         freshness["factory_snapshot_date"] = fs_date
+        freshness["factory_snapshot_uploaded_at"] = snapshot_created_at
     else:
         freshness["factory_snapshot_date"] = None
+        freshness["factory_snapshot_uploaded_at"] = None
 
     # 4b. Transit snapshots (latest per product — stock on the way)
     latest_tr = db.table("transit_snapshots").select(
@@ -253,12 +271,19 @@ def _query_inputs(factory_id: str, today: date) -> dict:
     #    The brain decides what to do based on draft existence, not status.
     #    Status is a UI/notification concern, not a simulation concern.
     drafts_res = db.table("boat_factory_drafts").select(
-        "id, boat_id, factory_id, status"
+        "id, boat_id, factory_id, status, ordered_at"
     ).eq("factory_id", factory_id).execute()
 
-    # Draft headers: tells the brain which boats have drafts (even empty ones)
+    # Draft headers: tells the brain which boats have drafts (even empty ones).
+    # ordered_at lets the brain decide whether the snapshot already accounted
+    # for this draft's commitments.
     draft_headers = [
-        {"boat_id": d["boat_id"], "status": d["status"], "draft_id": d["id"]}
+        {
+            "boat_id": d["boat_id"],
+            "status": d["status"],
+            "draft_id": d["id"],
+            "ordered_at": _parse_ts(d.get("ordered_at")),
+        }
         for d in drafts_res.data
     ]
 
@@ -293,6 +318,7 @@ def _query_inputs(factory_id: str, today: date) -> dict:
         "draft_headers": draft_headers,
         "shipment_items": shipment_items,
         "production_schedule": production_schedule,
+        "snapshot_created_at": snapshot_created_at,
         "_freshness": freshness,
     }
 

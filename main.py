@@ -235,6 +235,7 @@ from routes.factory_requests import router as factory_requests_router
 from routes.users import router as users_router
 from routes.order_plan import router as order_plan_router
 from routes.horizon import router as horizon_router
+from routes.reconciliation import router as reconciliation_router
 
 app.include_router(products_router, prefix="/api/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"])
@@ -272,6 +273,7 @@ app.include_router(factory_requests_router)  # Prefix already in router
 app.include_router(horizon_router)  # Prefix already in router
 app.include_router(users_router)  # Prefix already in router
 app.include_router(order_plan_router)  # Prefix already in router
+app.include_router(reconciliation_router)  # Prefix already in router
 
 
 if __name__ == "__main__":

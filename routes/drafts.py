@@ -4,13 +4,27 @@ Draft API routes.
 CRUD endpoints for order drafts (per boat + factory).
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 import structlog
 
+from config import get_supabase_client
 from exceptions import DatabaseError
 from models.draft import DraftResponse, DraftSave, DraftStatusUpdate
 from services.draft_service import get_draft_service
+
+
+class DraftItemAuditUpdate(BaseModel):
+    """Post-order audit fields. Brain ignores these — pure observation."""
+    actual_loaded_pallets: Optional[float] = Field(
+        None, ge=0, description="Pallets actually loaded by carrier"
+    )
+    cut_reason: Optional[str] = Field(
+        None, description="weight | lot_mix | deferred | other"
+    )
 
 logger = structlog.get_logger(__name__)
 
@@ -117,6 +131,34 @@ async def update_draft_status(draft_id: str, body: DraftStatusUpdate):
     except Exception as e:
         logger.error("update_draft_status_failed", draft_id=draft_id, error=str(e))
         raise HTTPException(status_code=500, detail="Failed to update draft status")
+
+
+@router.patch("/items/{draft_item_id}/audit")
+async def update_draft_item_audit(draft_item_id: str, body: DraftItemAuditUpdate):
+    """
+    Update post-order audit fields on a draft item: actual loaded pallets and
+    the reason any cut was made (typically: weight, lot mix, deferred). Brain
+    ignores these — they exist so we can observe how often Ashley's actual
+    orders diverge from suggestions and why.
+    """
+    db = get_supabase_client()
+    update: dict = {}
+    if body.actual_loaded_pallets is not None:
+        update["actual_loaded_pallets"] = body.actual_loaded_pallets
+    if body.cut_reason is not None:
+        update["cut_reason"] = body.cut_reason
+    if not update:
+        raise HTTPException(status_code=400, detail="No audit fields provided")
+    try:
+        result = db.table("draft_items").update(update).eq("id", draft_item_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Draft item not found")
+        return result.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("draft_item_audit_update_failed", draft_item_id=draft_item_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to update audit fields")
 
 
 @router.delete("/{draft_id}", status_code=204, response_class=Response)

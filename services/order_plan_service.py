@@ -184,13 +184,18 @@ def compute_plan(
     pid_to_tier: dict[str, str] = {p["id"]: p.get("tier") for p in products if p.get("tier")}
     active_product_ids = set(pid_to_sku.keys())
 
-    # 3. Latest SIESA (factory) inventory
+    # 3. Latest SIESA (factory) inventory.
+    # We also need created_at — the brain's snapshot-aware cascade rule
+    # applies here too: the snapshot's Cant. disponible already excludes
+    # drafts the factory knew about at upload time.
     latest_fs = db.table("factory_snapshots").select(
-        "snapshot_date"
+        "snapshot_date, created_at"
     ).order("snapshot_date", desc=True).limit(1).execute()
     siesa: dict[str, Decimal] = {}
+    snapshot_created_at_str: str | None = None
     if latest_fs.data:
         fs_date = latest_fs.data[0]["snapshot_date"]
+        snapshot_created_at_str = latest_fs.data[0].get("created_at")
         rows = db.table("factory_snapshots").select(
             "product_id, factory_available_m2"
         ).eq("snapshot_date", fs_date).execute().data or []
@@ -200,10 +205,10 @@ def compute_plan(
                     r["product_id"], Decimal(0)
                 ) + Decimal(str(r.get("factory_available_m2") or 0))
 
-    # 3b. Subtract committed drafts on boats NOT being planned. Those pallets
-    # are already spoken for — they'll leave SIESA when those boats sail, so
-    # they must not be available to the selected plan. Only consider boats
-    # that haven't departed yet (post-departure SIESA already reflects it).
+    # 3b. Subtract committed drafts on boats NOT being planned — but ONLY
+    # drafts ordered AFTER the snapshot was uploaded. Pre-snapshot commitments
+    # are already netted out of factory's Cant. disponible; deducting them
+    # again would double-count (the bug we just fixed in the brain).
     today_iso = date.today().isoformat()
     future_boats = (
         db.table("boat_schedules")
@@ -217,14 +222,18 @@ def compute_plan(
     selected_set = set(boat_ids)
     committed_drafts = (
         db.table("boat_factory_drafts")
-        .select("id, boat_id, status")
+        .select("id, boat_id, status, ordered_at")
         .in_("status", ["ordered", "confirmed"])
         .execute()
         .data or []
     )
     other_committed_draft_ids = [
         d["id"] for d in committed_drafts
-        if d["boat_id"] not in selected_set and d["boat_id"] in future_boat_ids
+        if d["boat_id"] not in selected_set
+        and d["boat_id"] in future_boat_ids
+        and snapshot_created_at_str is not None
+        and d.get("ordered_at") is not None
+        and d["ordered_at"] > snapshot_created_at_str  # ISO 8601 strings sort lexicographically
     ]
     if other_committed_draft_ids:
         committed_items = (

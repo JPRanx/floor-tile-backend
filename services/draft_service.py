@@ -412,6 +412,11 @@ class DraftService:
                     }
                     if item.get("snapshot_data") is not None:
                         item_data["snapshot_data"] = item["snapshot_data"]
+                    # Audit trail: capture brain's suggestion at save time so we can
+                    # observe how often Ashley overrides and on which products.
+                    # Brain ignores this — it's pure observation.
+                    if item.get("suggested_pallets") is not None:
+                        item_data["suggested_pallets"] = item["suggested_pallets"]
                     rows.append(item_data)
                 try:
                     self.db.table(self.items_table).insert(rows).execute()

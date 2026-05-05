@@ -32,10 +32,10 @@ class DraftItemCreate(BaseSchema):
         min_length=1,
         description="Product UUID"
     )
-    selected_pallets: int = Field(
+    selected_pallets: float = Field(
         ...,
         ge=0,
-        description="Number of pallets selected for this product"
+        description="Number of pallets selected for this product (allows half-pallets, e.g. 0.5)"
     )
     bl_number: Optional[int] = Field(
         None,
@@ -50,6 +50,11 @@ class DraftItemCreate(BaseSchema):
         None,
         description="Snapshot of OB state at save time for change detection"
     )
+    suggested_pallets: Optional[float] = Field(
+        None,
+        ge=0,
+        description="What the brain suggested at save time. Observation-only — brain ignores this; it's stored to support post-order audit (suggested vs. actually loaded)."
+    )
 
 
 class DraftItemResponse(BaseSchema, TimestampMixin):
@@ -62,12 +67,24 @@ class DraftItemResponse(BaseSchema, TimestampMixin):
     id: str = Field(..., description="Draft item UUID")
     draft_id: str = Field(..., description="Parent draft UUID")
     product_id: str = Field(..., description="Product UUID")
-    selected_pallets: int = Field(..., description="Number of pallets selected")
+    selected_pallets: float = Field(..., description="Number of pallets selected (allows half-pallets)")
     bl_number: Optional[int] = Field(None, description="BL number assignment")
     notes: Optional[str] = Field(None, description="Optional notes for this line item")
     snapshot_data: Optional[dict] = Field(
         None,
         description="Snapshot of OB state at save time for change detection"
+    )
+    suggested_pallets: Optional[float] = Field(
+        None,
+        description="Brain's suggestion at save time (audit trail)."
+    )
+    actual_loaded_pallets: Optional[float] = Field(
+        None,
+        description="Actual pallets loaded by the carrier — filled in post-order if it differed from selected_pallets."
+    )
+    cut_reason: Optional[str] = Field(
+        None,
+        description="Reason for divergence between selected and actually loaded (e.g. weight, lot_mix, deferred)."
     )
 
 
