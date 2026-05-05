@@ -45,15 +45,6 @@ from models.settings import (
     SettingResponse,
     SettingListResponse,
 )
-from models.recommendation import (
-    RecommendationPriority,
-    WarningType,
-    ProductAllocation,
-    ProductRecommendation,
-    RecommendationWarning,
-    WarehouseStatus,
-    OrderRecommendations,
-)
 from models.port import (
     PortCreate,
     PortResponse,
@@ -121,15 +112,6 @@ __all__ = [
     "SettingUpdate",
     "SettingResponse",
     "SettingListResponse",
-
-    # Recommendations
-    "RecommendationPriority",
-    "WarningType",
-    "ProductAllocation",
-    "ProductRecommendation",
-    "RecommendationWarning",
-    "WarehouseStatus",
-    "OrderRecommendations",
 
     # Ports
     "PortCreate",

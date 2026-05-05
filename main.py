@@ -204,9 +204,7 @@ from routes.inventory import router as inventory_router
 from routes.sales import router as sales_router
 from routes.dashboard import router as dashboard_router
 from routes.settings import router as settings_router
-from routes.recommendations import router as recommendations_router
 from routes.boats import router as boats_router
-from routes.order_builder import router as order_builder_router
 from routes.factory_orders import router as factory_orders_router
 from routes.shipments import router as shipments_router
 from routes.shipment_events import router as shipment_events_router
@@ -218,7 +216,6 @@ from routes.ports import router as ports_router
 from routes.pending_documents import router as pending_documents_router
 from routes.analytics import router as analytics_router
 from routes.production_schedule import router as production_schedule_router
-from routes.pipeline import router as pipeline_router
 from routes.data_freshness import router as data_freshness_router
 from routes.intelligence import router as intelligence_router
 from routes.diagnostics import router as diagnostics_router
@@ -226,12 +223,9 @@ from routes.warehouse_orders import router as warehouse_orders_router
 from routes.config import router as config_router
 from routes.factories import router as factories_router
 from routes.drafts import router as drafts_router
-from routes.forward_simulation import router as planning_router
 from routes.unfulfilled_demand import router as unfulfilled_demand_router
 from routes.committed_orders import router as committed_orders_router
-from routes.export import router as export_router
 from routes.ledger import router as ledger_router
-from routes.factory_requests import router as factory_requests_router
 from routes.users import router as users_router
 from routes.order_plan import router as order_plan_router
 from routes.horizon import router as horizon_router
@@ -242,9 +236,7 @@ app.include_router(inventory_router, prefix="/api/inventory", tags=["Inventory"]
 app.include_router(sales_router, prefix="/api/sales", tags=["Sales"])
 app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(settings_router, prefix="/api/settings", tags=["Settings"])
-app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
 app.include_router(boats_router, prefix="/api/boats", tags=["Boats"])
-app.include_router(order_builder_router)  # Prefix already in router
 app.include_router(factory_orders_router)  # Prefix already in router
 app.include_router(shipments_router)  # Prefix already in router
 app.include_router(shipment_events_router)  # Prefix already in router
@@ -256,7 +248,6 @@ app.include_router(ports_router)  # Prefix already in router
 app.include_router(pending_documents_router)  # Prefix already in router
 app.include_router(analytics_router, prefix="/api/analytics", tags=["Analytics"])
 app.include_router(production_schedule_router, prefix="/api/production-schedule", tags=["Production Schedule"])
-app.include_router(pipeline_router)  # Prefix already in router
 app.include_router(data_freshness_router)  # Prefix already in router
 app.include_router(intelligence_router)  # Prefix already in router
 app.include_router(diagnostics_router, prefix="/api/diagnostics", tags=["Diagnostics"])
@@ -264,12 +255,9 @@ app.include_router(warehouse_orders_router)  # Prefix already in router
 app.include_router(config_router, prefix="/api/config", tags=["Config"])
 app.include_router(factories_router, prefix="/api/factories", tags=["Factories"])
 app.include_router(drafts_router, prefix="/api/drafts", tags=["Drafts"])
-app.include_router(planning_router, prefix="/api/planning", tags=["Planning"])
 app.include_router(unfulfilled_demand_router, prefix="/api/inventory/unfulfilled-demand", tags=["Unfulfilled Demand"])
 app.include_router(committed_orders_router, prefix="/api/committed-orders", tags=["Committed Orders"])
-app.include_router(export_router)  # Prefix already in router
 app.include_router(ledger_router)  # Prefix already in router
-app.include_router(factory_requests_router)  # Prefix already in router
 app.include_router(horizon_router)  # Prefix already in router
 app.include_router(users_router)  # Prefix already in router
 app.include_router(order_plan_router)  # Prefix already in router

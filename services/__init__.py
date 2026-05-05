@@ -15,7 +15,6 @@ from services.stockout_service import (
     StockoutSummary,
 )
 from services.settings_service import SettingsService, get_settings_service
-from services.recommendation_service import RecommendationService, get_recommendation_service
 from services.port_service import PortService, get_port_service
 from services.document_parser_service import DocumentParserService, get_parser_service
 
@@ -33,8 +32,6 @@ __all__ = [
     "StockoutSummary",
     "SettingsService",
     "get_settings_service",
-    "RecommendationService",
-    "get_recommendation_service",
     "PortService",
     "get_port_service",
     "DocumentParserService",
