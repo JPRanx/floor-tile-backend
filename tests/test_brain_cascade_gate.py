@@ -127,8 +127,8 @@ def test_post_snapshot_draft_cascades_factory():
 
 
 def test_running_stock_cascades_regardless_of_snapshot_timing():
-    """running_stock += alloc_m2 always — pallets land in our warehouse
-    whether the draft was committed before or after the snapshot."""
+    """running_stock += alloc_m2 for FUTURE boats regardless of when the
+    draft was committed. Physical arrival doesn't depend on snapshot timing."""
     pre_snapshot = datetime(2026, 4, 24, 15, 1, tzinfo=timezone.utc)
     post_snapshot = datetime(2026, 5, 5, 9, 0, tzinfo=timezone.utc)
 
@@ -138,4 +138,54 @@ def test_running_stock_cascades_regardless_of_snapshot_timing():
     assert _galaxi_running_stock(pre_result) == _galaxi_running_stock(post_result), (
         "running_stock must include the allocated pallets regardless of when "
         "the draft was committed — physical arrival doesn't depend on snapshot timing."
+    )
+
+
+def test_past_arrived_shipment_does_not_inflate_running_stock():
+    """Past dispatched boats already landed; their pallets are reflected
+    (or absent, if sold) in the current warehouse snapshot. Cascading them
+    again would project ghost inventory onto future boats."""
+    PAST_BOAT = {
+        "id": "b_past",
+        "name": "AIAS",
+        "departure_date": date(2026, 4, 23),
+        "arrival_date": date(2026, 5, 2),  # before TODAY = 2026-05-04
+        "factory_id": "f1",
+        "carrier": "TIBA",
+    }
+    FUTURE_BOAT = {
+        "id": "b_future",
+        "name": "PIONEER",
+        "departure_date": date(2026, 5, 9),
+        "arrival_date": date(2026, 5, 14),
+        "factory_id": "f1",
+        "carrier": "TIBA",
+    }
+    PRODUCT = {"id": "p_manaure", "sku": "MANAURE GRIS BTE", "active": True, "tier": "B"}
+
+    result = compute_horizon(
+        products=[PRODUCT],
+        boats=[PAST_BOAT, FUTURE_BOAT],
+        inventory={"p_manaure": Decimal("0")},  # warehouse is empty NOW (sold)
+        velocities={"p_manaure": Decimal("37")},
+        peak_velocities={"p_manaure": Decimal("40")},
+        factory_stock={"p_manaure": Decimal("2688")},
+        drafts=[],
+        draft_headers=[],
+        # Past boat shipped 1,344 m² which already arrived and sold
+        shipment_items=[
+            {"boat_id": "b_past", "product_id": "p_manaure", "shipped_m2": Decimal("1344")},
+        ],
+        production_schedule=[],
+        today=TODAY,
+        snapshot_created_at=SNAPSHOT_UPLOADED,
+    )
+
+    future = next(b for b in result["projections"] if b["boat_id"] == "b_future")
+    p = next(p for p in future["products"] if p["product_id"] == "p_manaure")
+
+    assert p["running_stock_m2"] == 0.0, (
+        f"Past-arrived shipment must not inflate future-boat running_stock. "
+        f"Warehouse is 0 (already sold), so PIONEER's running_stock should be 0, "
+        f"got {p['running_stock_m2']}. The brain was projecting ghost inventory."
     )

@@ -467,13 +467,19 @@ def compute_horizon(
             and snapshot_created_at is not None
             and boat_draft_ordered_at > snapshot_created_at
         )
+        # running_stock should only grow from boats whose pallets haven't
+        # arrived yet. Past boats already landed and their goods are
+        # reflected (or absent, if sold) in the current warehouse snapshot.
+        # Adding them again would project ghost inventory forward.
+        boat_arrives_in_future = arr >= today
         if not skip:
             for p in boat_products:
                 pid = p["product_id"]
                 if not p.get("_is_committed_alloc"):
                     continue  # brain suggestion — do not cascade
                 alloc_m2 = Decimal(str(p["allocated_pallets"])) * M2_PER_PALLET
-                running_stock[pid] = running_stock[pid] + alloc_m2
+                if boat_arrives_in_future:
+                    running_stock[pid] = running_stock[pid] + alloc_m2
                 if not has_shipment_data and draft_is_post_snapshot:
                     consumed = min(alloc_m2, factory_avail.get(pid, Decimal(0)))
                     factory_avail[pid] = factory_avail.get(pid, Decimal(0)) - consumed
