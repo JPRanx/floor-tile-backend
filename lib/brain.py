@@ -25,6 +25,7 @@ from .constants import (
     LEAD_TIME_DAYS,
     TIER_BUFFER_CONFIG,
 )
+from .coverage import days_of_stock as _days_of_stock
 
 
 def _classify_tiers(
@@ -307,10 +308,10 @@ def compute_horizon(
                 can_ship = min(suggested_pallets, factory_max_pallets)
 
             # ── Urgency (days of stock from today) ────────────────────
-            if velocity > 0:
-                days_of_stock = float(warehouse_m2 / velocity)
-            else:
-                days_of_stock = 999.0
+            # Single source of truth: lib/coverage.py — also used by
+            # metrics_service so Dashboard and Horizon never disagree.
+            dos = _days_of_stock(warehouse_m2, velocity)
+            days_of_stock = float(dos) if dos is not None else 999.0
 
             if days_of_stock < 7:
                 urgency = "critical"

@@ -26,6 +26,7 @@ from collections import defaultdict
 import structlog
 
 from config import get_supabase_client
+from lib.coverage import days_of_stock as _days_of_stock
 from models.metrics import StockCoverage, ProductMetrics, CategoryMetrics, CategoryInsight
 from models.product import TILE_CATEGORIES
 
@@ -161,10 +162,16 @@ class MetricsService:
             with_transit_days: Optional[Decimal] = None
             stockout_date: Optional[date] = None
 
-            if velocity > 0:
-                warehouse_days = round_decimal(warehouse_m2 / velocity, 2)
-                with_transit_days = round_decimal((warehouse_m2 + in_transit_m2) / velocity, 2)
+            # Single source of truth for the warehouse coverage formula:
+            # lib/coverage.py — also used by brain.py so Dashboard and Horizon
+            # never disagree on "days until stockout."
+            wh_dos = _days_of_stock(warehouse_m2, velocity)
+            with_transit_dos = _days_of_stock(warehouse_m2 + in_transit_m2, velocity)
+            if wh_dos is not None:
+                warehouse_days = round_decimal(wh_dos, 2)
                 stockout_date = today + timedelta(days=int(warehouse_days))
+            if with_transit_dos is not None:
+                with_transit_days = round_decimal(with_transit_dos, 2)
 
             # Gap analysis (2 decimal precision)
             has_gap = False
