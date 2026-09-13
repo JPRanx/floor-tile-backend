@@ -22,8 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose port
+# The platform supplies PORT. Runtime configuration and secrets are injected
+# by the host; none are baked into this image.
 EXPOSE 8000
-
-# Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "exec uvicorn clean_v1.sailing_api:app --host 0.0.0.0 --port $PORT --no-proxy-headers"]

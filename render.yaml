@@ -4,12 +4,22 @@ services:
     env: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    healthCheckPath: /ready
+    autoDeploy: true
     envVars:
-      - key: SUPABASE_URL
+      - key: FLOOR_TILE_RUNTIME
+        value: hosted
+      - key: DATABASE_URL
         sync: false
-      - key: SUPABASE_KEY
-        sync: false
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
+      - key: SUPABASE_PROJECT_REF
+        value: sqxmnhiiesfhidsgyuiw
+      - key: SUPABASE_JWT_AUDIENCE
+        value: authenticated
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://floor-tile-frontend.vercel.app
+      - key: TRUSTED_PROXY_IPS
+        value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1/32
+      - key: FLOOR_TILE_SEED_MODE
+        value: production
+      - key: FLOOR_TILE_SEED_VERSION
+        value: "1"
