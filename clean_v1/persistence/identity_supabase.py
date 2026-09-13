@@ -182,7 +182,7 @@ class SupabaseIdentityResolver:
         audience: str,
         jwks: Mapping[str, object] | Callable[[], Mapping[str, object]],
         bindings: BindingRepository,
-        allowed_algorithms: Sequence[str] = ("RS256",),
+        allowed_algorithms: Sequence[str] = ("RS256", "ES256"),
         clock_skew_seconds: int = 30,
     ) -> None:
         if not _PROJECT_REF.fullmatch(project_ref):
@@ -243,7 +243,7 @@ class SupabaseIdentityResolver:
                 audience=self.audience,
                 issuer=self.issuer,
                 leeway=self._leeway,
-                options={"require": ["iss", "aud", "sub", "exp", "nbf"]},
+                options={"require": ["iss", "aud", "sub", "exp"]},
             )
             subject = claims["sub"]
             if not isinstance(subject, str) or not subject.strip():
