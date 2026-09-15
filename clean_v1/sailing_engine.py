@@ -27,6 +27,7 @@ from . import sailing_domain as sd
 from . import sailing_math as sm
 from . import sailing_normalize as sn
 from .domain import DomainError, thaw, _ser
+from .production_catalog import product_from_inventory_reference
 from .sailing_commands import (
     SailingCommandBus, InMemoryIdentityProvider, CommandError,
 )
@@ -57,6 +58,9 @@ class SailingEngine:
         self.config = config
         self._today = today
         self.products = {p["product_id"]: dict(p) for p in products}
+        # Only the durable PostgreSQL unit of work may enable this capability.
+        # The pure engine can replay resolutions but cannot create catalog rows.
+        self._durable_catalog_staging = False
         self.identity = InMemoryIdentityProvider(sessions or DEFAULT_SESSIONS)
         self.bus = SailingCommandBus(state=sd.SState.empty(),
                                      identity=self.identity, engine=self)
@@ -75,9 +79,7 @@ class SailingEngine:
         self._today = d
 
     def catalog(self, s=None) -> dict:
-        """Configured catalog plus products created through replayable
-        product-match resolution events."""
-        s = s or self.state
+        """Return only the configured or durably hydrated product catalog."""
         return dict(self.products)
 
     def execute(self, command: str, params: dict, *, token: Optional[str]):
@@ -126,10 +128,20 @@ class SailingEngine:
                      "sales", "committed_orders", "production_planning"):
             for row in self._rows(s, feed):
                 if not row.get("confident_match"):
+                    material_values = (
+                        row.get("m2"), row.get("available_m2"),
+                        row.get("committed_m2"), row.get("daily_velocity"),
+                        row.get("peak_weekly_m2"),
+                    )
                     held.append({"feed": feed,
                                  "raw_ref": str(row.get("product_ref")),
                                  "m2": row.get("m2") or row.get("available_m2")
-                                 or ZERO})
+                                 or ZERO,
+                                 "material": any(
+                                     D(str(value)) != ZERO
+                                     for value in material_values
+                                     if value is not None),
+                                 })
         return held
 
     def held_total(self, s=None) -> Decimal:
@@ -193,6 +205,11 @@ class SailingEngine:
     def sailing_timing(self, sid, s=None) -> sm.SailingTiming:
         s = s or self.state
         sl = s.sailings[sid]
+        if sl.planning_basis == "bl_vgm_close":
+            return sm.derive_roster_timing(
+                bl_vgm_close=sl.bl_vgm_close,
+                loading_terminal_eta=sl.loading_terminal_eta,
+                voyage_days=self._voyage(sl), today=self._today)
         return sm.derive_timing(departure=sl.departure,
                                 voyage_days=self._voyage(sl),
                                 today=self._today)
@@ -696,11 +713,23 @@ class SailingEngine:
     def _cmd_RecordSailing(self, s, p, *, actor, on):
         row = sn.normalize_sailing_row(
             {"carrier": p["carrier"], "name": p["name"],
-             "departure": p["departure"],
-             "voyage_days": p.get("voyage_days")}, entered_via="direct")
+             "departure": p.get("departure"),
+             "voyage_days": p.get("voyage_days"), "voyage": p.get("voyage"),
+             "loading_terminal_eta": p.get("loading_terminal_eta"),
+             "bl_vgm_close": p.get("bl_vgm_close"),
+             "saes_reception": p.get("saes_reception"),
+             "terminal": p.get("terminal"),
+             "planning_basis": p.get("planning_basis", "departure")},
+            entered_via="direct")
         sid = sd.record_sailing(s, carrier=row["carrier"], name=row["name"],
                                 departure=row["departure"],
                                 voyage_days=row["voyage_days"],
+                                voyage=row["voyage"],
+                                loading_terminal_eta=row["loading_terminal_eta"],
+                                bl_vgm_close=row["bl_vgm_close"],
+                                saes_reception=row["saes_reception"],
+                                terminal=row["terminal"],
+                                planning_basis=row["planning_basis"],
                                 entered_via="direct", actor=actor, on=on,
                                 as_of=p.get("as_of"),
                                 raw_source_ref=p.get("raw_source_ref"))
@@ -1452,6 +1481,22 @@ class SailingEngine:
         action = p["action"]
         params = p.get("params") or {}
         plan_id = (imp.scope or {}).get("plan_id")
+        created_product = None
+        if action == "create":
+            if "product_id" in params:
+                raise DomainError("non-map actions forbid product_id")
+            unknown = set(params) - {"note"}
+            if unknown:
+                raise DomainError(f"unknown nested field(s): {sorted(unknown)}")
+            if (imp.scope or {}).get("feed") not in {
+                    "warehouse", "siesa_availability"}:
+                raise DomainError("create is only legal for an unknown inventory reference")
+            if not self._durable_catalog_staging:
+                raise DomainError("create requires durable catalog staging")
+            created_product = product_from_inventory_reference(
+                str(imp.scope["raw_ref"]))
+            if self.products.get(created_product["product_id"]) != created_product:
+                raise DomainError("the exact server-derived product must be staged before create")
         # [FC3] the engine is the authoritative effect path: it records the
         # resolution through the internal primitive and performs the named
         # effect below in the SAME transaction (a failing effect rolls the
@@ -1482,6 +1527,10 @@ class SailingEngine:
                     s, plan_ref=q["plan_id"], product_id=q["product_id"],
                     m2=D(str(q["m2"])), resolution_ref=iid,
                     order_ref=order_ref, actor=actor, on=on)
+        elif action == "create":
+            sd.record_mapping(
+                s, raw_ref=str(imp.scope["raw_ref"]),
+                product_id=created_product["product_id"], actor=actor, on=on)
         elif action == "map":
             # [FC1 review B1 → FCB1] the collision law now lives at the
             # domain RECORDING boundary (`sailing_domain.record_mapping`):
@@ -2301,9 +2350,7 @@ class SailingEngine:
             subject = f"cutoff:{plan.plan_id}"
             sid = plan.sailing_id
             crossing = (plan.lifecycle == "draft" and sid in s.sailings
-                        and sm.timing_state(
-                            departure=s.sailings[sid].departure,
-                            today=self._today) == "exceptional"
+                        and self.sailing_timing(sid, s).timing_state == "exceptional"
                         and sid not in s.pursuits)
             if not crossing:
                 self._supersede_if_open(
@@ -2479,8 +2526,11 @@ class SailingEngine:
         arrivals = [self.sailing_timing(sid, s).warehouse_arrival
                     for sid in s.sailings
                     if s.sailing_decisions.get(sid) != "skip"
-                    and sm.timing_state(departure=s.sailings[sid].departure,
-                                        today=on) != "departed"]
+                    and sm.schedule_timing_state(
+                        departure=s.sailings[sid].departure,
+                        bl_vgm_close=s.sailings[sid].bl_vgm_close,
+                        loading_terminal_eta=s.sailings[sid].loading_terminal_eta,
+                        today=on) not in ("departed", "arrived")]
         earliest = min(arrivals) if arrivals else on + timedelta(
             days=sm.ORDERING_CYCLE_DAYS)
         open_plans = [p for p in s.plans.values() if p.lifecycle == "draft"]
@@ -2565,24 +2615,64 @@ class SailingEngine:
 
     # 8 — product identity (§10.6.1) + impossible references
     def _reconcile_product_match(self, s, actor, on):
-        for h in self._held_rows(s):
-            if h["raw_ref"] in s.mappings:
+        held_by_raw = {}
+        for held in self._held_rows(s):
+            if (held["raw_ref"] in s.mappings or not held["material"]):
                 continue
+            held_by_raw.setdefault(held["raw_ref"], []).append(held)
+
+        feed_order = {"siesa_availability": 0, "warehouse": 1}
+        for raw_ref in sorted(held_by_raw):
+            held_rows = sorted(
+                held_by_raw[raw_ref],
+                key=lambda item: (feed_order.get(item["feed"], 9), item["feed"]))
+            feeds = []
+            evidence = []
+            for held in held_rows:
+                if held["feed"] not in feeds:
+                    feeds.append(held["feed"])
+                item = {"raw_reference": raw_ref, "feed": held["feed"],
+                        "m2": str(held["m2"])}
+                if item not in evidence:
+                    evidence.append(item)
+            warehouse_authority = "warehouse" in feeds
+            inventory_creation_authority = warehouse_authority or (
+                "siesa_availability" in feeds)
+            primary_feed = "warehouse" if warehouse_authority else feeds[0]
+            actions = (["create", "map", "discard"] if inventory_creation_authority
+                       else ["map", "discard"])
+            scope = {"raw_ref": raw_ref, "feed": primary_feed,
+                     "feeds": feeds, "owner": "ashley"}
+            subject_key = f"match:{raw_ref}"
+
+            for implication in list(s.implications.values()):
+                if (implication.state == "open"
+                        and implication.family == "product_match"
+                        and implication.subject_key == subject_key
+                        and (thaw(implication.scope) != scope
+                             or thaw(implication.evidence) != evidence
+                             or list(implication.typed_actions) != actions)):
+                    sd.supersede_implication(
+                        s, implication_id=implication.implication_id,
+                        reason="product-match evidence or authority changed",
+                        actor=actor, on=on)
+
+            total_m2 = sum((held["m2"] for held in held_rows), Decimal("0.00"))
             self._open(
                 s, actor, on, family="product_match",
-                severity="consequential",
-                subject_key=f"match:{h['raw_ref']}",
-                scope={"raw_ref": h["raw_ref"], "feed": h["feed"],
-                       "owner": "ashley"},
-                evidence=[{"raw_reference": h["raw_ref"],
-                           "feed": h["feed"], "m2": str(h["m2"])}],
+                severity="consequential", subject_key=subject_key,
+                scope=scope, evidence=evidence,
                 consequence=(
-                    f"La referencia {h['raw_ref']!r} de la fuente {h['feed']} "
-                    f"no tiene una coincidencia de producto confiable; sus "
-                    f"{h['m2']} m² quedan fuera del abastecimiento hasta resolverla."),
-                recommendation="Asígnala al producto correcto o descarta la fila.",
-                shipment_effect={"held_m2": str(h["m2"])},
-                typed_actions=["map", "discard"])
+                    f"La referencia {raw_ref!r} aparece en {', '.join(feeds)} sin "
+                    f"una coincidencia de producto confiable; sus {total_m2} m² "
+                    "quedan fuera del abastecimiento hasta resolverla."),
+                recommendation=(
+                    "Créala desde la referencia de inventario, asígnala al producto "
+                    "correcto o descarta la fila."
+                    if inventory_creation_authority else
+                    "Asígnala al producto correcto o descarta la fila."),
+                shipment_effect={"held_m2": str(total_m2)},
+                typed_actions=actions)
         # resolved refs: supersede stale cases
         for imp in list(s.implications.values()):
             if imp.state == "open" and imp.family == "product_match" \

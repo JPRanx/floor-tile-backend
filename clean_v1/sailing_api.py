@@ -9,9 +9,11 @@ from __future__ import annotations
 import os
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import re
+import secrets
 from datetime import date
 from decimal import Decimal
 from threading import RLock
@@ -38,11 +40,14 @@ from .persistence.identity_supabase import (
 from .persistence.postgres_adapter import IdempotencyConflict, PostgresAdapter
 from .security import SecurityMiddleware
 from .settings_v1 import SettingsV1, load_settings
+from .assistant_chat import configured_assistant, grounded_context, validate_chat_body
 from .c19_inputs import (InputPreviewService, PreviewDenied,
                          compose_source_hub)
 from .ashley_file_adapters import (parse_production_schedule_pdf,
                                    parse_sales_xlsx, parse_scheduled_dispatch_xlsx,
-                                   parse_siesa_xlsx, parse_warehouse_xlsx)
+                                   parse_siesa_xls, parse_siesa_xlsx,
+                                   parse_warehouse_xlsx)
+from .production_catalog import production_catalog
 
 _MAX_PREVIEW_REQUEST_BYTES = 15 * 1024 * 1024
 
@@ -52,7 +57,9 @@ class _PreviewRequestBodyLimit:
         self.application = application
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or scope.get("path") != "/api/input/preview":
+        if (scope.get("type") != "http"
+                or scope.get("path") not in {
+                    "/api/input/preview", "/api/catalog/bootstrap/preview"}):
             await self.application(scope, receive, send)
             return
         headers = dict(scope.get("headers", []))
@@ -148,10 +155,12 @@ app = FastAPI(title="Floor Tile Reconciled V1 — historical local review")
 app.state.store = None
 app.state.principal_resolver = None
 app.state.runtime_settings = load_settings()
+app.state.assistant_provider = None
 app.state.readiness_check = lambda: True
 _HOSTED_AUTH_PATHS = frozenset({
     "/api/workspace", "/api/sources", "/api/input/preview",
-    "/api/input/apply", "/api/command",
+    "/api/input/apply", "/api/command", "/api/assistant/chat",
+    "/api/catalog/bootstrap/preview", "/api/catalog/bootstrap/apply",
 })
 
 
@@ -178,6 +187,88 @@ app.add_middleware(_HostedAuthBoundary)
 
 _ENGINE = None
 _INPUT_PREVIEWS = InputPreviewService()
+
+
+class CatalogBootstrapPreviewService:
+    """Tenant-bound, two-source capability for an explicit initial catalog."""
+
+    def __init__(self):
+        self._candidates = {}
+
+    @staticmethod
+    def _source(body, name, extension):
+        source = body.get(name)
+        if not isinstance(source, dict):
+            raise PreviewDenied(f"{name} source is required")
+        file_name = str(source.get("file_name") or "")
+        if not file_name.lower().endswith(extension):
+            raise PreviewDenied(f"{name} source must be {extension}")
+        encoded = source.get("file_content_b64")
+        claimed = source.get("sha256")
+        if not isinstance(encoded, str) or len(encoded) > _MAX_UPLOAD_B64_CHARS:
+            raise PreviewDenied(f"{name} source is invalid")
+        if not isinstance(claimed, str) or not re.fullmatch(r"[0-9a-f]{64}", claimed):
+            raise PreviewDenied(f"{name} sha256 is invalid")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except binascii.Error as exc:
+            raise PreviewDenied(f"{name} source must be valid base64") from exc
+        if not payload or len(payload) > _MAX_UPLOAD_BYTES:
+            raise PreviewDenied(f"{name} source is invalid")
+        actual = hashlib.sha256(payload).hexdigest()
+        if actual != claimed:
+            raise PreviewDenied(f"{name} sha256 mismatch")
+        return payload, actual
+
+    def preview(self, principal, engine, body):
+        if principal.role != "administrator":
+            raise PreviewDenied("catalog bootstrap requires administrator role")
+        if engine.catalog(engine.state):
+            raise PreviewDenied("catalog bootstrap requires an empty company catalog")
+        warehouse, warehouse_sha = self._source(body, "warehouse", ".xlsx")
+        siesa, siesa_sha = self._source(body, "siesa", ".xls")
+        products = production_catalog(warehouse, siesa)
+        source_digest = _parameter_sha256({
+            "authority": "two-inventory-initial-catalog-v1",
+            "warehouse_sha256": warehouse_sha,
+            "siesa_sha256": siesa_sha,
+        })
+        token = secrets.token_urlsafe(32)
+        self._candidates[token] = {
+            "company_id": principal.company_id,
+            "warehouse_sha256": warehouse_sha,
+            "siesa_sha256": siesa_sha,
+            "source_digest": source_digest,
+            "products": products,
+        }
+        return {
+            "can_apply": True, "apply_token": token,
+            "product_count": len(products),
+            "warehouse_sha256": warehouse_sha,
+            "siesa_sha256": siesa_sha,
+            "source_digest": source_digest,
+        }
+
+    def apply(self, principal, store, body):
+        token = body.get("apply_token")
+        candidate = self._candidates.get(token)
+        if candidate is None:
+            raise PreviewDenied("unknown or already-used bootstrap token")
+        if candidate["company_id"] != principal.company_id:
+            raise PreviewDenied("bootstrap token tenant mismatch")
+        for field in ("warehouse_sha256", "siesa_sha256"):
+            if body.get(field) != candidate[field]:
+                raise PreviewDenied("bootstrap source hash mismatch")
+        result = store.bootstrap_catalog(
+            principal, products=copy.deepcopy(candidate["products"]),
+            warehouse_sha256=candidate["warehouse_sha256"],
+            siesa_sha256=candidate["siesa_sha256"],
+            source_digest=candidate["source_digest"])
+        self._candidates.pop(token, None)
+        return result
+
+
+_CATALOG_BOOTSTRAPS = CatalogBootstrapPreviewService()
 _COMMAND_LOCK = RLock()
 _COMMAND_RECEIPTS = {}
 _COMMAND_RECEIPT_LIMIT = 2048
@@ -191,7 +282,7 @@ _NATIVE_XLSX_PARSERS = {
 _UPLOAD_EXTENSIONS = {
     "warehouse": {".xlsx", ".csv", ".txt"},
     "sales": {".xlsx", ".csv", ".txt"},
-    "siesa_availability": {".xlsx", ".csv", ".txt"},
+    "siesa_availability": {".xls", ".xlsx", ".csv", ".txt"},
     "in_transit": {".xlsx", ".csv", ".txt"},
     "production_planning": {".pdf", ".csv", ".txt"},
     "sailing_calendar": {".csv", ".txt"},
@@ -261,10 +352,20 @@ def build_engine_for_mode(mode: str | None = None):
     if selected == "historical":
         return build_historical_review_engine()
     if selected == "production":
-        return SailingEngine(
+        production = SailingEngine(
             config=PlanningConfig(default_voyage_days=15),
             today=date.today(), products=[], sessions={},
         )
+        production.review_provenance = {
+            "mode": "production_company",
+            "source": "durable_company_state",
+            "current_truth": True,
+            "as_of": production.today.isoformat(),
+        }
+        production.review_banner = (
+            "Entorno de producción de la compañía — verifica las fechas y la "
+            "completitud de las fuentes antes de decidir.")
+        return production
     if selected == "synthetic_release":
         return base_engine(today=date(2026, 9, 1))
     raise ValueError(f"unknown FLOOR_TILE_LOCAL_MODE: {selected}")
@@ -451,6 +552,57 @@ def workspace(plan_id: Optional[str] = None,
     return JSONResponse(composed)
 
 
+@app.post("/api/assistant/chat")
+async def assistant_chat(request: Request,
+                         authorization: Optional[str] = Header(default=None)):
+    principal, request_engine = _request_context(authorization)
+    if principal.actor != "ashley":
+        raise _operator_error(
+            403, "assistant_access_forbidden",
+            "Este asistente está disponible únicamente para Ashley.")
+    try:
+        body = validate_chat_body(await request.json())
+        factory_order_date = body.get("factory_order_date")
+        if factory_order_date is not None:
+            factory_order_date = date.fromisoformat(factory_order_date)
+        composed = compose_workspace(
+            request_engine,
+            plan_id=body.get("plan_id"),
+            focus_sailing_id=body.get("focus_sailing_id"),
+            production_anchor_sailing_id=body.get("production_anchor_sailing_id"),
+            factory_order_date=factory_order_date,
+            principal=principal,
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise _operator_error(
+            400, "assistant_invalid_request",
+            "Revisa la pregunta y el contexto de planeación.") from exc
+
+    provider = getattr(app.state, "assistant_provider", None) or configured_assistant()
+    if provider is None:
+        raise _operator_error(
+            503, "assistant_unavailable",
+            "El asistente no está disponible en este momento.")
+    head_before = len(request_engine.state.events)
+    context = grounded_context(composed)
+    try:
+        answer = await provider.answer(
+            question=body["question"], history=body["history"],
+            context=context)
+    except Exception as exc:
+        raise _operator_error(
+            503, "assistant_unavailable",
+            "El asistente no está disponible en este momento.") from exc
+    if len(request_engine.state.events) != head_before:
+        raise RuntimeError("read-only assistant changed domain state")
+    return JSONResponse({
+        "answer": answer,
+        "grounded_head_seq": head_before,
+        "grounding_as_of": (context.get("grounding", {}).get("review_provenance") or {}).get("as_of"),
+        "mutated": False,
+    })
+
+
 def _request_actor(authorization):
     principal, request_engine = _request_context(authorization)
     return principal.effective_actor, principal, request_engine
@@ -460,6 +612,37 @@ def _request_actor(authorization):
 def sources(authorization: Optional[str] = Header(default=None)):
     _, principal, request_engine = _request_actor(authorization)
     return JSONResponse(compose_source_hub(request_engine, principal))
+
+
+@app.post("/api/catalog/bootstrap/preview")
+def catalog_bootstrap_preview(body: dict,
+                              authorization: Optional[str] = Header(default=None)):
+    _, principal, request_engine = _request_actor(authorization)
+    try:
+        preview = _CATALOG_BOOTSTRAPS.preview(principal, request_engine, body)
+    except (PreviewDenied, ValueError) as exc:
+        raise _operator_error(
+            400, "catalog_bootstrap_invalid",
+            "No pudimos preparar el catálogo inicial. Revisa ambos inventarios.") from exc
+    return JSONResponse(preview)
+
+
+@app.post("/api/catalog/bootstrap/apply")
+def catalog_bootstrap_apply(body: dict,
+                            authorization: Optional[str] = Header(default=None)):
+    _, principal, _ = _request_actor(authorization)
+    store = getattr(app.state, "store", None)
+    if store is None:
+        raise _operator_error(
+            400, "catalog_bootstrap_unavailable",
+            "El catálogo inicial sólo puede persistirse en el entorno alojado.")
+    try:
+        result = _CATALOG_BOOTSTRAPS.apply(principal, store, body)
+    except (PreviewDenied, ValueError) as exc:
+        raise _operator_error(
+            400, "catalog_bootstrap_invalid",
+            "No pudimos aplicar el catálogo inicial. Vuelve a previsualizarlo.") from exc
+    return JSONResponse(result)
 
 
 @app.post("/api/input/preview")
@@ -496,6 +679,16 @@ def input_preview(body: dict, authorization: Optional[str] = Header(default=None
                     preview = _INPUT_PREVIEWS.preview(
                         request_engine, actor=actor, feed=feed, input_mode="upload",
                         as_of=adapter_as_of,
+                        rows=_rows_with_adapter_errors(feed, parsed),
+                        raw_source_ref=raw_source_ref, _server_parsed=True)
+                    preview["adapter_diagnostics"] = parsed.get("diagnostics", [])
+                    return JSONResponse(jsonable_encoder(preview))
+                if feed == "siesa_availability" and extension == ".xls":
+                    parsed = parse_siesa_xls(
+                        uploaded, catalog=list(request_engine.catalog(request_engine.state).values()))
+                    preview = _INPUT_PREVIEWS.preview(
+                        request_engine, actor=actor, feed=feed, input_mode="upload",
+                        as_of=body.get("as_of"),
                         rows=_rows_with_adapter_errors(feed, parsed),
                         raw_source_ref=raw_source_ref, _server_parsed=True)
                     preview["adapter_diagnostics"] = parsed.get("diagnostics", [])

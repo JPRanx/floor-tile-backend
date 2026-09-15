@@ -30,6 +30,8 @@ _MAX_WORKSHEET_CELLS = 2_000_000
 _MAX_PDF_PAGES = 100
 _MAX_PDF_TEXT_BYTES = 2 * 1024 * 1024
 _MAX_PDF_SECONDS = 15
+_MAX_XLS_BYTES = 10 * 1024 * 1024
+_MAX_XLS_SHEETS = 16
 
 
 def _q2(value) -> Decimal:
@@ -121,44 +123,61 @@ def _identity(raw, mapping: dict[str, str]) -> str | None:
 
 
 def parse_warehouse_xlsx(file_bytes: bytes, *, catalog: Sequence[dict]) -> dict:
-    """Normalize the detailed Tarragona ceramic closing inventory."""
+    """Normalize either accepted Tarragona closing-inventory layout."""
     workbook = _open_xlsx(file_bytes)
     try:
         sheet = workbook["Inventario"] if "Inventario" in workbook.sheetnames else workbook.active
         header_one = list(next(_bounded_rows(sheet, min_row=1, max_row=1, values_only=True)))
         header_two = list(next(_bounded_rows(sheet, min_row=2, max_row=2, values_only=True)))
+        compact = (
+            len(header_two) >= 5
+            and [str(value or "").strip().upper() for value in header_two[:5]]
+            == ["MARCA", "CATEGORÍA", "REFERENCIA", "FORMATO", "M²"]
+        )
         grouped_headers = {
             0: "PRODUCTO", 4: "INVENTARIO INICIAL", 7: "INGRESOS",
             10: "SALIDAS", 13: "SALDO FINAL",
         }
         quantity_headers = (5, 8, 11, 14)
-        if (len(header_one) <= 13 or len(header_two) <= 14
-                or any(str(header_one[index] or "").strip().upper() != expected
-                       for index, expected in grouped_headers.items())
-                or str(header_two[2]).strip() != "Referencia"
-                or any(str(header_two[index] or "").strip().upper() not in {"M²", "M2"}
-                       for index in quantity_headers)):
+        detailed = not (
+            len(header_one) <= 13 or len(header_two) <= 14
+            or any(str(header_one[index] or "").strip().upper() != expected
+                   for index, expected in grouped_headers.items())
+            or str(header_two[2]).strip() != "Referencia"
+            or any(str(header_two[index] or "").strip().upper() not in {"M²", "M2"}
+                   for index in quantity_headers)
+        )
+        if not compact and not detailed:
             raise ValueError("warehouse workbook is missing the detailed inventory headers")
         mapping = _catalog_map(catalog)
-        totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0.00"))
+        totals: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0.00"))
+        display_refs: dict[tuple[str, str], str] = {}
+        source_refs: set[tuple[str, str]] = set()
         diagnostics = []
+        source_rows = 0
         for row_number, source in enumerate(
                 _bounded_rows(sheet, min_row=3, values_only=True), start=3):
             values = list(source)
-            if len(values) < 15:
-                values.extend([None] * (15 - len(values)))
-            if (str(values[0] or "").strip().upper() != "TARRAGONA"
-                    or str(values[1] or "").strip().upper() != "CERAMICO"):
+            if len(values) < (5 if compact else 15):
+                values.extend([None] * ((5 if compact else 15) - len(values)))
+            brand = str(values[0] or "").strip().upper()
+            category = str(values[1] or "").strip().upper()
+            if not brand.startswith("TARRAGONA") or "CERAMICO" not in category:
                 continue
-            identity = _identity(values[2], mapping)
-            if identity is None:
+            source_rows += 1
+            raw_ref = str(values[2] or "").strip()
+            normalized_ref = _norm(raw_ref)
+            canonical = mapping.get(normalized_ref)
+            if not normalized_ref:
                 diagnostics.append({"source_row_ref": f"row-{row_number}",
                                     "severity": "error", "message": "missing warehouse reference"})
                 continue
+            identity = ("catalog", canonical) if canonical else ("source", normalized_ref)
+            display_refs.setdefault(identity, canonical or raw_ref)
             try:
-                final = _decimal(values[14], "final M2")
-                operands = values[5], values[8], values[11]
-                if all(value not in (None, "") for value in operands):
+                final = _decimal(values[4] if compact else values[14], "final M2")
+                operands = () if compact else (values[5], values[8], values[11])
+                if operands and all(value not in (None, "") for value in operands):
                     initial, incoming, outgoing = (
                         _decimal(values[5], "initial M2"),
                         _decimal(values[8], "incoming M2"),
@@ -175,9 +194,20 @@ def parse_warehouse_xlsx(file_bytes: bytes, *, catalog: Sequence[dict]) -> dict:
                                     "severity": "error", "message": str(exc)})
                 continue
             totals[identity] += final
-        rows = [{"product_ref": key, "m2": _q2(value)}
+            source_refs.add((normalized_ref, raw_ref))
+        rows = [{"product_ref": display_refs[key], "m2": _q2(value)}
                 for key, value in sorted(totals.items())]
-        return {"rows": rows, "diagnostics": diagnostics}
+        return {
+            "rows": rows,
+            "source_refs": [
+                {"source_family": "warehouse",
+                 "normalized_identity": normalized,
+                 "raw_ref": raw}
+                for normalized, raw in sorted(source_refs)
+            ],
+            "diagnostics": diagnostics,
+            "source_rows": source_rows,
+        }
     finally:
         workbook.close()
 
@@ -281,70 +311,116 @@ def parse_siesa_xlsx(file_bytes: bytes, *, catalog: Sequence[dict]) -> dict:
     workbook = _open_xlsx(file_bytes)
     try:
         sheet = workbook.active
-        raw_headers = next(_bounded_rows(sheet, min_row=1, max_row=1, values_only=True))
-        headers = [str(value or "").strip() for value in raw_headers]
-        required = ["Item", "Lote", "Existencia", "Cant. comprometida", "Cant. disponible"]
-        missing = [name for name in required if name not in headers]
-        if missing:
-            raise ValueError("SIESA workbook is missing required headers: " + ", ".join(missing))
-        indexes = {name: headers.index(name) for name in required}
-        description_index = headers.index("Desc. item") if "Desc. item" in headers else None
-
-        item_map: dict[int, str] = {}
-        item_collisions: set[int] = set()
-        name_map = _catalog_map(catalog)
-        for product in catalog:
-            item = _siesa_item(product.get("siesa_item"))
-            if item is None:
-                continue
-            canonical = str(product["sku"])
-            prior = item_map.get(item)
-            if prior is not None and prior != canonical:
-                item_collisions.add(item)
-            else:
-                item_map[item] = canonical
-        for item in item_collisions:
-            item_map.pop(item, None)
-
-        totals: dict[str, dict[str, Decimal]] = defaultdict(
-            lambda: {"available": Decimal("0.00"), "committed": Decimal("0.00")})
-        diagnostics = []
-        for row_number, source in enumerate(_bounded_rows(sheet, min_row=2, values_only=True), start=2):
-            values = list(source)
-            if not any(value not in (None, "") for value in values):
-                continue
-            try:
-                existence = _decimal(values[indexes["Existencia"]], "Existencia")
-                committed = _decimal(values[indexes["Cant. comprometida"]], "Cant. comprometida")
-                available = _decimal(values[indexes["Cant. disponible"]], "Cant. disponible")
-            except (IndexError, ValueError) as exc:
-                diagnostics.append({"source_row_ref": f"row-{row_number}",
-                                    "severity": "error", "message": str(exc)})
-                continue
-            if min(existence, committed, available) < 0:
-                diagnostics.append({"source_row_ref": f"row-{row_number}",
-                                    "severity": "error",
-                                    "message": "negative required SIESA quantity"})
-                continue
-            item = _siesa_item(values[indexes["Item"]])
-            description = (values[description_index] if description_index is not None
-                           and description_index < len(values) else None)
-            identity = item_map.get(item) if item is not None else None
-            identity = identity or _identity(description, name_map)
-            if identity is None:
-                identity = str(values[indexes["Item"]] or "").strip() or "unidentified SIESA item"
-            if abs(existence - committed - available) > Q2:
-                diagnostics.append({
-                    "source_row_ref": f"row-{row_number}", "severity": "warning",
-                    "message": "Existencia - Cant. comprometida differs from Cant. disponible"})
-            totals[identity]["available"] += available
-            totals[identity]["committed"] += committed
-        rows = [{"product_ref": key, "available_m2": _q2(value["available"]),
-                 "committed_m2": _q2(value["committed"])}
-                for key, value in sorted(totals.items())]
-        return {"rows": rows, "diagnostics": diagnostics}
+        return _parse_siesa_values(_bounded_rows(sheet, values_only=True), catalog=catalog)
     finally:
         workbook.close()
+
+
+def parse_siesa_xls(file_bytes: bytes, *, catalog: Sequence[dict]) -> dict:
+    """Read the bounded legacy OLE/BIFF8 export used only by SIESA."""
+    if (not file_bytes or len(file_bytes) > _MAX_XLS_BYTES
+            or not file_bytes.startswith(b"\xd0\xcf\x11\xe0")):
+        raise ValueError("invalid SIESA XLS workbook")
+    try:
+        import xlrd
+        workbook = xlrd.open_workbook(file_contents=file_bytes, on_demand=True)
+        if len(workbook.sheet_names()) != 1 or len(workbook.sheet_names()) > _MAX_XLS_SHEETS:
+            raise ValueError
+        sheet = workbook.sheet_by_index(0)
+        if (sheet.nrows > _MAX_WORKSHEET_ROWS or sheet.ncols > _MAX_WORKSHEET_COLUMNS
+                or sheet.nrows * sheet.ncols > _MAX_WORKSHEET_CELLS):
+            raise ValueError
+        return _parse_siesa_values(
+            (sheet.row_values(index) for index in range(sheet.nrows)), catalog=catalog)
+    except (xlrd.XLRDError, OSError, ValueError, IndexError) as exc:
+        raise ValueError("invalid SIESA XLS workbook") from exc
+    finally:
+        if "workbook" in locals():
+            workbook.release_resources()
+
+
+def _parse_siesa_values(source_rows, *, catalog: Sequence[dict]) -> dict:
+    iterator = iter(source_rows)
+    try:
+        headers = [str(value or "").strip() for value in next(iterator)]
+    except StopIteration as exc:
+        raise ValueError("SIESA workbook is missing required headers") from exc
+    required = ["Item", "Existencia", "Cant. comprometida", "Cant. disponible"]
+    missing = [name for name in required if name not in headers]
+    if missing:
+        raise ValueError("SIESA workbook is missing required headers: " + ", ".join(missing))
+    indexes = {name: headers.index(name) for name in required}
+    description_index = headers.index("Desc. item") if "Desc. item" in headers else None
+    item_map: dict[int, str] = {}
+    item_collisions: set[int] = set()
+    name_map = _catalog_map(catalog)
+    for product in catalog:
+        item = _siesa_item(product.get("siesa_item"))
+        if item is None:
+            continue
+        canonical = str(product["sku"])
+        prior = item_map.get(item)
+        if prior is not None and prior != canonical:
+            item_collisions.add(item)
+        else:
+            item_map[item] = canonical
+    for item in item_collisions:
+        item_map.pop(item, None)
+    totals: dict[str, dict[str, Decimal]] = defaultdict(
+        lambda: {"available": Decimal("0.00"), "committed": Decimal("0.00")})
+    source_refs: set[tuple[str, str]] = set()
+    diagnostics = []
+    for row_number, source in enumerate(iterator, start=2):
+        values = list(source)
+        if not any(value not in (None, "") for value in values):
+            continue
+        raw_item = values[indexes["Item"]] if indexes["Item"] < len(values) else None
+        description = (values[description_index] if description_index is not None
+                       and description_index < len(values) else None)
+        quantity_values = [values[indexes[name]] if indexes[name] < len(values) else None
+                           for name in required[1:]]
+        if (str(description or "").strip().upper() == "TOTAL"
+                or (not str(description or "").strip()
+                    and all(value in (None, "") for value in quantity_values))):
+            continue
+        try:
+            existence = _decimal(values[indexes["Existencia"]], "Existencia")
+            committed = _decimal(values[indexes["Cant. comprometida"]], "Cant. comprometida")
+            available = _decimal(values[indexes["Cant. disponible"]], "Cant. disponible")
+        except (IndexError, ValueError) as exc:
+            diagnostics.append({"source_row_ref": f"row-{row_number}",
+                                "severity": "error", "message": str(exc)})
+            continue
+        if min(existence, committed, available) < 0:
+            diagnostics.append({"source_row_ref": f"row-{row_number}", "severity": "error",
+                                "message": "negative required SIESA quantity"})
+            continue
+        item = _siesa_item(raw_item)
+        identity = item_map.get(item) if item is not None else None
+        identity = identity or _identity(description, name_map)
+        if identity is None:
+            identity = str(raw_item or "").strip() or "unidentified SIESA item"
+        if abs(existence - committed - available) > Q2:
+            diagnostics.append({"source_row_ref": f"row-{row_number}", "severity": "warning",
+                                "message": "Existencia - Cant. comprometida differs from Cant. disponible"})
+        totals[identity]["available"] += available
+        totals[identity]["committed"] += committed
+        raw_ref = str(description or raw_item or "").strip()
+        if raw_ref:
+            source_refs.add((_norm(identity), raw_ref))
+    rows = [{"product_ref": key, "available_m2": _q2(value["available"]),
+             "committed_m2": _q2(value["committed"])}
+            for key, value in sorted(totals.items())]
+    return {
+        "rows": rows,
+        "source_refs": [
+            {"source_family": "siesa_availability",
+             "normalized_identity": normalized,
+             "raw_ref": raw}
+            for normalized, raw in sorted(source_refs)
+        ],
+        "diagnostics": diagnostics,
+    }
 
 
 def _month_date(value: str) -> date:
@@ -425,6 +501,7 @@ def parse_production_schedule_pdf(pdf_bytes: bytes, *, catalog: Sequence[dict],
                 raise ValueError
             started = _monotonic()
             parts = []
+            tables = []
             text_bytes = 0
             for page in document.pages:
                 if _monotonic() - started > _MAX_PDF_SECONDS:
@@ -436,13 +513,90 @@ def parse_production_schedule_pdf(pdf_bytes: bytes, *, catalog: Sequence[dict],
                 if text_bytes > _MAX_PDF_TEXT_BYTES:
                     raise ValueError
                 parts.append(part)
+                extract_tables = getattr(page, "extract_tables", None)
+                if callable(extract_tables):
+                    tables.extend(extract_tables() or [])
             text = "\n".join(parts)
             if not text.strip():
                 raise ValueError
     except (PdfminerException, PDFException, OSError, ValueError) as exc:
         raise ValueError("invalid production PDF") from exc
-    return parse_production_schedule_text(
-        text, catalog=catalog, evidence_as_of=evidence_as_of)
+    structured = _parse_production_schedule_tables(
+        tables, catalog=catalog, evidence_as_of=evidence_as_of)
+    if structured is not None:
+        return structured
+    return parse_production_schedule_text(text, catalog=catalog, evidence_as_of=evidence_as_of)
+
+
+_SPANISH_MONTHS = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4,
+                   "mayo": 5, "junio": 6, "julio": 7, "agosto": 8,
+                   "septiembre": 9, "octubre": 10, "noviembre": 11,
+                   "diciembre": 12}
+
+
+def _spanish_date(value) -> date | None:
+    match = re.search(r"(\d{1,2}) de ([a-záéíóú]+) de (\d{4})",
+                      str(value or "").lower())
+    if not match:
+        return None
+    day, month, year = match.groups()
+    normalized_month = unicodedata.normalize("NFKD", month).encode("ascii", "ignore").decode()
+    month_number = _SPANISH_MONTHS.get(normalized_month)
+    return date(int(year), month_number, int(day)) if month_number else None
+
+
+def _report_m2(value) -> Decimal:
+    text = str(value or "").strip()
+    if not text:
+        return Decimal("0.00")
+    return _q2(text.replace(".", "").replace(",", "."))
+
+
+def _parse_production_schedule_tables(tables, *, catalog: Sequence[dict], evidence_as_of: date):
+    mapping = _catalog_map(catalog)
+    candidates = []
+    for table in tables:
+        for source in table:
+            values = list(source)
+            if (len(values) < 18 or str(values[2] or "").strip() != "52X52"
+                    or re.fullmatch(r"P[12]-\d{5}", str(values[6] or "").strip()) is None):
+                continue
+            candidates.append(values)
+    if not candidates:
+        return None
+    rows = []
+    unmatched = []
+    unmatched_emitted = set()
+    for values in candidates:
+        programmed = _report_m2(values[15])
+        real = _report_m2(values[17])
+        amount = real if real > 0 else programmed
+        if amount <= 0:
+            continue
+        normalized = _norm(values[9])
+        canonical = mapping.get(normalized)
+        if canonical is None:
+            if not normalized or normalized in unmatched_emitted:
+                continue
+            unmatched_emitted.add(normalized)
+            unmatched.append(normalized)
+        ready = _spanish_date(values[0])
+        rows.append({
+            "product_ref": canonical or normalized,
+            "m2": format(amount, "f"),
+            "scheduled_start": None,
+            "status": "in_progress" if ready and ready <= evidence_as_of else "scheduled",
+            "production_ref": str(values[6]).strip(),
+            "estimated_ready_date": ready,
+            "actual_ready_date": None,
+            "completion_confirmed": False,
+            "can_add_more": False,
+            "evidence_as_of": evidence_as_of,
+        })
+    return {"rows": rows, "unmatched_products": unmatched,
+            "authority": "production_context_not_siesa_availability",
+            "source_rows_inspected": len(candidates),
+            "omitted_rows": len(candidates) - len(rows)}
 
 
 def _excel_date(value) -> date | None:
@@ -486,6 +640,7 @@ def _parse_dispatch_workbooks(workbook, formula_workbook, *, catalog: Sequence[d
     current: dict = {}
     orders: dict[str, dict] = {}
     unmatched: list[str] = []
+    source_lines = 0
     sources = _bounded_rows(sheet, values_only=True)
     formula_sources = _bounded_rows(formula_sheet, values_only=False)
     for row_number, (values, formula_values) in enumerate(
@@ -495,18 +650,21 @@ def _parse_dispatch_workbooks(workbook, formula_workbook, *, catalog: Sequence[d
         values = list(values)
         while len(values) < 9:
             values.append(None)
+        raw_product = values[7]
+        amount = values[8]
+        if not raw_product or str(raw_product).strip().upper() == "TOTAL":
+            continue
         formula_m2 = formula_values[8] if len(formula_values) > 8 else None
         if formula_m2 is not None and formula_m2.data_type == "f":
             raise ValueError("invalid dispatch workbook")
+        if amount in (None, ""):
+            continue
+        source_lines += 1
         for index, field in ((0, "purchase_order"), (1, "pedido"),
                              (2, "containers"), (3, "etd"),
                              (4, "eta"), (5, "booking")):
             if values[index] not in (None, ""):
                 current[field] = values[index]
-        raw_product = values[7]
-        amount = values[8]
-        if not raw_product or str(raw_product).strip().upper() == "TOTAL" or amount in (None, ""):
-            continue
         m2 = _decimal(amount, "dispatch M2")
         if m2 <= 0:
             continue
@@ -540,4 +698,4 @@ def _parse_dispatch_workbooks(workbook, formula_workbook, *, catalog: Sequence[d
             "product_ref": canonical, "m2": _q2(m2),
             "raw_product": str(raw_product).strip()})
     return {"authority": "scheduled_tentative", "orders": list(orders.values()),
-            "unmatched_products": unmatched}
+            "unmatched_products": unmatched, "source_lines": source_lines}

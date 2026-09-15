@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from .config import PlanningConfig
@@ -15,6 +15,7 @@ from .sailing_engine import SailingEngine
 
 IMPLEMENTATION = Path(__file__).resolve().parents[2]
 PROOF = IMPLEMENTATION / "proof" / "ashley-files-readonly-preview-2026-08-23"
+BOAT_PROOF = IMPLEMENTATION / "proof" / "browser-native-file-intake-2026-09-11" / "evidence"
 CAPTURE = IMPLEMENTATION / "proof" / "dual-order-preflight-2026-08-16" / "historical-table-snapshot.json"
 AS_OF = date(2026, 8, 23)
 
@@ -24,7 +25,8 @@ EXPECTED_SOURCE_DIGESTS = {
     "sales_velocity_90d_through_2026-08-19.txt": "05b2bde9e3b6781f34993217affe55cbcfefe19ec926521c3c7f5431195bcd3e",
     "siesa_availability_2026-08-21.txt": "c6716626e0015c4defa6ba88c2baf83f2a2e6e3a6d7f1cf1103a26ddd8c9a5bb",
     "real-production-dispatch-adapter-report.json": "ddc6d7cd7f45c0bdae1a0974064c036d5dd244b7ff4839707fce64024a24a5a7",
-    "future-boats-whatsapp-2026-08-18.json": "a37225ff546c845f8279645f940207359e3ceb8f142eda12b963b52e7161f3a8",
+    "BOAT_ROSTER_2026-09-14.md": "df01e22d503fd84f83d90841c835940fade940c6bbefc49e3f4d575fd3541568",
+    "current-boat-roster-2026-09-14.json": "48b93defdf321812fc9953086a501b74b7ff57c88ad95ca89c6de2f7eea575ee",
 }
 
 
@@ -39,6 +41,14 @@ def read_verified_source(path: Path, expected_sha256: str) -> bytes:
 
 def _proof_source(filename: str) -> bytes:
     return read_verified_source(PROOF / filename, EXPECTED_SOURCE_DIGESTS[filename])
+
+
+def _boat_source() -> bytes:
+    filename = "current-boat-roster-2026-09-14.json"
+    read_verified_source(
+        BOAT_PROOF / "BOAT_ROSTER_2026-09-14.md",
+        EXPECTED_SOURCE_DIGESTS["BOAT_ROSTER_2026-09-14.md"])
+    return read_verified_source(BOAT_PROOF / filename, EXPECTED_SOURCE_DIGESTS[filename])
 
 
 def _products() -> list[dict]:
@@ -97,24 +107,27 @@ def build_ashley_current_review_engine() -> SailingEngine:
         "as_of": AS_OF, "rows": adapter_report["production"]["rows"],
         "raw_source_ref": "ashley:production-2026-08-23"})
 
-    boats = json.loads(_proof_source("future-boats-whatsapp-2026-08-18.json"))
-    pioneer_id = None
+    boats = json.loads(_boat_source())
+    focus_id = None
     for boat in boats["sailings"]:
-        name = f"{boat['vessel']} V.{boat['voyage']}"
         sailing_id = engine.ashley("RecordSailing", {
-            "carrier": boat["carrier"], "name": name,
-            "departure": date.fromisoformat(boat["departure"]),
+            "carrier": boat["carrier"], "name": boat["vessel"],
+            "voyage": boat["voyage"],
+            "loading_terminal_eta": date.fromisoformat(boat["loading_terminal_eta"]),
+            "bl_vgm_close": datetime.fromisoformat(boat["bl_vgm_close"]),
+            "saes_reception": datetime.fromisoformat(boat["saes_reception"]),
+            "terminal": boats["terminal"], "planning_basis": "bl_vgm_close",
             "voyage_days": 9, "as_of": date(2026, 8, 18),
-            "raw_source_ref": "whatsapp-boats-2026-08-18"})["sailing_id"]
+            "raw_source_ref": "boat-roster-2026-09-14"})["sailing_id"]
         engine.ashley("SetSailingDecision", {
             "sailing_id": sailing_id, "decision": "watch"})
-        if boat["vessel"] == "SEABOARD PIONEER" and boat["voyage"] == "195":
-            pioneer_id = sailing_id
-    if pioneer_id is None:
-        raise ValueError("Pioneer V.195 is absent from the accepted boat calendar")
+        if boat["vessel"] == "SEABOARD PRIDE" and boat["voyage"] == "194":
+            focus_id = sailing_id
+    if focus_id is None:
+        raise ValueError("Pride V.194 is absent from the accepted boat calendar")
     engine.ashley("SetSailingDecision", {
-        "sailing_id": pioneer_id, "decision": "use"})
-    engine.ashley("OpenShipmentPlan", {"sailing_id": pioneer_id})
+        "sailing_id": focus_id, "decision": "use"})
+    engine.ashley("OpenShipmentPlan", {"sailing_id": focus_id})
 
     scheduled = []
     for order in adapter_report["dispatch"]["rows"]:
@@ -122,11 +135,11 @@ def build_ashley_current_review_engine() -> SailingEngine:
     engine.scheduled_dispatch_context = scheduled
     engine.review_provenance = {
         "mode": "ashley_current_local_rehearsal",
-        "as_of": AS_OF.isoformat(), "current_truth": True,
-        "source": "ashley_files_plus_whatsapp_boats",
+        "as_of": AS_OF.isoformat(), "current_truth": False,
+        "source": "ashley_files_plus_verified_boat_roster",
         "source_digests": dict(EXPECTED_SOURCE_DIGESTS)}
     engine.review_banner = (
-        "Rehearsal local con archivos de Ashley al 23-ago-2026 — "
+        "Rehearsal local con fuentes de fechas mixtas — "
         "sin escritura en SIESA, sin Supabase y sin despliegue")
     engine.historical_factory_orders = []
     return engine

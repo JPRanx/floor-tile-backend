@@ -23,3 +23,7 @@ services:
         value: production
       - key: FLOOR_TILE_SEED_VERSION
         value: "1"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FLOOR_TILE_ASSISTANT_MODEL
+        sync: false

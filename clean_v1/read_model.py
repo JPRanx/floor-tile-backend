@@ -137,6 +137,7 @@ FEED_ES = {"warehouse": "bodega", "sales": "ventas", "in_transit": "tránsito",
 
 # Typed-resolution labels (closed lists — §10.5; never an outcome-entry verb)
 _ACTION_LABEL = {
+    "create": "Crear producto desde esta referencia",
     "map": "Asignar a un producto existente",
 
     "discard": "Descartar la referencia",

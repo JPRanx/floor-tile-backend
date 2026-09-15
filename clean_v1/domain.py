@@ -20,7 +20,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field, asdict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -318,6 +318,8 @@ class State:
 def _ser(v):
     if isinstance(v, Decimal):
         return f"dec:{v}"
+    if isinstance(v, datetime):
+        return f"datetime:{v.isoformat()}"
     if isinstance(v, date):
         return f"date:{v.isoformat()}"
     if isinstance(v, (bytes, bytearray, memoryview)):
@@ -337,6 +339,8 @@ def _de(v):
     so appliers never hold references into the frozen event record (FV2)."""
     if isinstance(v, str) and v.startswith("dec:"):
         return D(v[4:])
+    if isinstance(v, str) and v.startswith("datetime:"):
+        return datetime.fromisoformat(v[9:])
     if isinstance(v, str) and v.startswith("date:"):
         return date.fromisoformat(v[5:])
     if isinstance(v, str) and v.startswith("bytes:"):
