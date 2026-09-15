@@ -40,16 +40,21 @@ CONTAINERS_PER_BL_DEFAULT = 3       # [D4] default, never an invariant
 
 @dataclass(frozen=True)
 class SailingTiming:
-    departure: date
+    departure: Optional[date]
+    planning_anchor: date
+    planning_basis: str
     order_by: date
-    hard_cutoff: date
-    booking_date: date
+    hard_cutoff: Optional[date]
+    booking_date: Optional[date]
     production_readiness: date
+    loading_terminal_eta: Optional[date]
     eta: date
     warehouse_arrival: date
-    timing_state: str               # normal | late | exceptional | departed
+    arrival_basis: str
+    assumed_voyage_days: Optional[int]
+    timing_state: str               # legacy: normal|late|exceptional|departed; roster: normal|closed|arrived
     days_to_order_by: int
-    days_to_departure: int
+    days_to_departure: Optional[int]
 
 
 def timing_state(*, departure: date, today: date) -> str:
@@ -74,20 +79,70 @@ def timing_state(*, departure: date, today: date) -> str:
     return "normal"
 
 
+def schedule_timing_state(*, departure: Optional[date], bl_vgm_close=None,
+                          loading_terminal_eta: Optional[date] = None,
+                          today: date) -> str:
+    if departure is not None:
+        return timing_state(departure=departure, today=today)
+    if bl_vgm_close is None or loading_terminal_eta is None:
+        raise ValueError("sailing schedule has neither departure nor complete B/L-VGM basis")
+    anchor = bl_vgm_close.date() if hasattr(bl_vgm_close, "date") else bl_vgm_close
+    return ("arrived" if today >= loading_terminal_eta
+            else "closed" if today > anchor else "normal")
+
+
 def derive_timing(*, departure: date, voyage_days: int, today: date) -> SailingTiming:
     order_by = departure - timedelta(days=ORDER_DEADLINE_DAYS)
     eta = departure + timedelta(days=voyage_days)
     return SailingTiming(
         departure=departure,
+        planning_anchor=departure,
+        planning_basis="departure",
         order_by=order_by,
         hard_cutoff=departure - timedelta(days=HARD_DEADLINE_DAYS),
         booking_date=departure - timedelta(days=BOOKING_BUFFER_DAYS),
         production_readiness=order_by - timedelta(days=PRODUCTION_READINESS_BUFFER_DAYS),
+        loading_terminal_eta=None,
         eta=eta,
         warehouse_arrival=eta + timedelta(days=WAREHOUSE_BUFFER_DAYS),
+        arrival_basis="departure_plus_voyage_days",
+        assumed_voyage_days=voyage_days,
         timing_state=timing_state(departure=departure, today=today),
         days_to_order_by=(order_by - today).days,
         days_to_departure=(departure - today).days,
+    )
+
+
+def derive_roster_timing(*, bl_vgm_close, loading_terminal_eta: date,
+                         voyage_days: int, today: date) -> SailingTiming:
+    """Timing for an explicit carrier roster that contains no departure.
+
+    B/L-VGM closure is the operator-selected order/planning anchor. The source
+    ETA is arrival at the loading terminal. Destination and warehouse arrival
+    are explicitly estimated from configured voyage duration; no departure is
+    copied or invented.
+    """
+    anchor = bl_vgm_close.date() if hasattr(bl_vgm_close, "date") else bl_vgm_close
+    destination_eta = loading_terminal_eta + timedelta(days=voyage_days)
+    state = schedule_timing_state(
+        departure=None, bl_vgm_close=bl_vgm_close,
+        loading_terminal_eta=loading_terminal_eta, today=today)
+    return SailingTiming(
+        departure=None,
+        planning_anchor=anchor,
+        planning_basis="bl_vgm_close",
+        order_by=anchor,
+        hard_cutoff=None,
+        booking_date=None,
+        production_readiness=anchor - timedelta(days=PRODUCTION_READINESS_BUFFER_DAYS),
+        loading_terminal_eta=loading_terminal_eta,
+        eta=destination_eta,
+        warehouse_arrival=destination_eta + timedelta(days=WAREHOUSE_BUFFER_DAYS),
+        arrival_basis="loading_terminal_eta_plus_assumed_voyage_days",
+        assumed_voyage_days=voyage_days,
+        timing_state=state,
+        days_to_order_by=(anchor - today).days,
+        days_to_departure=None,
     )
 
 

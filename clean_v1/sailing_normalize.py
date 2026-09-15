@@ -95,11 +95,28 @@ def parse_sailing_calendar_text(text: str) -> tuple[list[dict], list[str]]:
 
 
 def normalize_sailing_row(row: dict, *, entered_via: str) -> dict:
+    planning_basis = row.get("planning_basis", "departure")
+    if planning_basis not in ("departure", "bl_vgm_close"):
+        raise ValueError("planning_basis must be departure or bl_vgm_close")
+    departure = row.get("departure")
+    if planning_basis == "departure" and departure is None:
+        raise ValueError("departure is required for legacy departure planning")
+    roster_fields = (row.get("voyage"), row.get("loading_terminal_eta"),
+                     row.get("bl_vgm_close"), row.get("saes_reception"))
+    if planning_basis == "bl_vgm_close" and any(v is None for v in roster_fields):
+        raise ValueError("voyage, ETA, B/L-VGM close, and SAES reception are required")
     return {
         "carrier": str(row["carrier"]).strip(),
         "name": str(row["name"]).strip(),
-        "departure": row["departure"],
+        "departure": departure,
         "voyage_days": row.get("voyage_days"),
+        "voyage": str(row["voyage"]).strip() if row.get("voyage") is not None else None,
+        "loading_terminal_eta": row.get("loading_terminal_eta"),
+        "bl_vgm_close": row.get("bl_vgm_close"),
+        "saes_reception": row.get("saes_reception"),
+        "terminal": (str(row["terminal"]).strip()
+                     if row.get("terminal") is not None else None),
+        "planning_basis": planning_basis,
         "entered_via": entered_via,
     }
 

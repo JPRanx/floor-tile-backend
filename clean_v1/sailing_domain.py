@@ -11,7 +11,7 @@ recorded, so every recorded stream folds to a legal state by induction.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -38,9 +38,15 @@ class Sailing:
     sailing_id: str
     carrier: str
     name: str
-    departure: date
+    departure: Optional[date]
     voyage_days: Optional[int]
     entered_via: str
+    voyage: Optional[str] = None
+    loading_terminal_eta: Optional[date] = None
+    bl_vgm_close: Optional[datetime] = None
+    saes_reception: Optional[datetime] = None
+    terminal: Optional[str] = None
+    planning_basis: str = "departure"
 
 
 @dataclass
@@ -361,8 +367,13 @@ def advancement_denial(s: "SState", sailing_id: str, on: date):
     sl = s.sailings.get(sailing_id)
     if sl is None:
         return f"unknown sailing {sailing_id}"
-    state = sm.timing_state(departure=sl.departure, today=on)
-    if state == "departed":
+    state = sm.schedule_timing_state(
+        departure=sl.departure, bl_vgm_close=sl.bl_vgm_close,
+        loading_terminal_eta=sl.loading_terminal_eta, today=on)
+    if state in ("departed", "closed", "arrived"):
+        if state != "departed":
+            return ("the B/L-VGM planning cutoff has closed — this roster "
+                    "entry cannot open, advance, or finalize a plan")
         return ("the sailing has departed — a plan cannot open, advance, "
                 "or finalize anymore [D3/RC4]")
     if state == "exceptional":
@@ -434,22 +445,37 @@ def record_mapping(s: SState, *, raw_ref: str, product_id: Optional[str],
 
 # ── sailings ───────────────────────────────────────────────────────────────
 
-def _find_sailing(s: SState, carrier: str, departure: date) -> Optional[str]:
+def _find_sailing(s: SState, carrier: str, departure: Optional[date], *,
+                  name: str, voyage: Optional[str],
+                  bl_vgm_close: Optional[datetime]) -> Optional[str]:
     for sid, sl in s.sailings.items():
-        if sl.carrier == carrier and sl.departure == departure:
+        if (sl.carrier == carrier and sl.departure == departure
+                and (departure is not None
+                     or (sl.name == name and sl.voyage == voyage
+                         and sl.bl_vgm_close == bl_vgm_close))):
             return sid
     return None
 
 
-def record_sailing(s: SState, *, carrier: str, name: str, departure: date,
+def record_sailing(s: SState, *, carrier: str, name: str,
+                   departure: Optional[date],
                    voyage_days: Optional[int], entered_via: str,
                    actor: str, on: date, as_of: Optional[date] = None,
-                   raw_source_ref: Optional[str] = None) -> str:
-    existing = _find_sailing(s, carrier, departure)
+                   raw_source_ref: Optional[str] = None,
+                   voyage: Optional[str] = None, loading_terminal_eta: Optional[date] = None,
+                   bl_vgm_close: Optional[datetime] = None,
+                   saes_reception: Optional[datetime] = None,
+                   terminal: Optional[str] = None,
+                   planning_basis: str = "departure") -> str:
+    existing = _find_sailing(s, carrier, departure, name=name, voyage=voyage,
+                             bl_vgm_close=bl_vgm_close)
     sid = existing or s.new_id("SAIL")
     _emit(s, "sailing_recorded", actor, on, {
         "sailing_id": sid, "carrier": carrier, "name": name,
         "departure": departure, "voyage_days": voyage_days,
+        "voyage": voyage, "loading_terminal_eta": loading_terminal_eta, "bl_vgm_close": bl_vgm_close,
+        "saes_reception": saes_reception, "terminal": terminal,
+        "planning_basis": planning_basis,
         "entered_via": entered_via, "as_of": as_of or on,
         "raw_source_ref": raw_source_ref})
     return sid
@@ -461,10 +487,12 @@ def record_sailing_decision(s: SState, *, sailing_id: str, decision: str,
         raise DomainError(f"unknown sailing {sailing_id}")
     if decision not in ("use", "watch", "skip"):
         raise DomainError(f"invalid sailing decision {decision!r}")
-    state = sm.timing_state(departure=s.sailings[sailing_id].departure,
-                            today=on)
-    if decision == "use" and state == "departed":
-        raise DomainError("sailing already departed")
+    sl = s.sailings[sailing_id]
+    state = sm.schedule_timing_state(
+        departure=sl.departure, bl_vgm_close=sl.bl_vgm_close,
+        loading_terminal_eta=sl.loading_terminal_eta, today=on)
+    if decision == "use" and state in ("departed", "closed", "arrived"):
+        raise DomainError("sailing planning window is already closed")
     if decision == "use" and state == "exceptional" \
             and sailing_id not in s.pursuits:
         raise DomainError(
@@ -489,7 +517,9 @@ def record_exceptional_pursuit(s: SState, *, sailing_id: str, actor: str,
     if sailing_id not in s.sailings:
         raise DomainError(f"unknown sailing {sailing_id}")
     sl = s.sailings[sailing_id]
-    state = sm.timing_state(departure=sl.departure, today=on)
+    state = sm.schedule_timing_state(
+        departure=sl.departure, bl_vgm_close=sl.bl_vgm_close,
+        loading_terminal_eta=sl.loading_terminal_eta, today=on)
     if state != "exceptional":
         raise DomainError(
             f"exceptional pursuit applies only inside the 10-day window "
@@ -1279,7 +1309,10 @@ def _apply_sailing_recorded(s, p):
     s.sailings[p["sailing_id"]] = Sailing(
         sailing_id=p["sailing_id"], carrier=p["carrier"], name=p["name"],
         departure=p["departure"], voyage_days=p["voyage_days"],
-        entered_via=p["entered_via"])
+        entered_via=p["entered_via"], voyage=p.get("voyage"), loading_terminal_eta=p.get("loading_terminal_eta"),
+        bl_vgm_close=p.get("bl_vgm_close"),
+        saes_reception=p.get("saes_reception"), terminal=p.get("terminal"),
+        planning_basis=p.get("planning_basis", "departure"))
     if incoming_as_of is not None:
         s.sailing_as_of[p["sailing_id"]] = incoming_as_of
     s.bump_counter_to(p["sailing_id"])

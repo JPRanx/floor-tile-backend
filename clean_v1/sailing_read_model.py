@@ -102,23 +102,36 @@ def _factory_planning_context(eng, s, *, focus_sailing_id: str | None,
                   else date.fromisoformat(str(factory_order_date)))
     focus = s.sailings[focus_sailing_id]
     anchor = s.sailings[production_anchor_sailing_id]
-    if anchor.departure <= focus.departure:
-        raise ValueError("production anchor sailing must depart after the focus sailing")
+    focus_timing = eng.sailing_timing(focus_sailing_id, s)
     anchor_timing = eng.sailing_timing(production_anchor_sailing_id, s)
+    if anchor_timing.planning_anchor <= focus_timing.planning_anchor:
+        raise ValueError("production anchor sailing must follow the focus sailing")
     if (anchor_timing.timing_state in ("departed", "exceptional")
             and production_anchor_sailing_id not in s.pursuits):
         raise ValueError("production anchor sailing is not viable")
     boundary_candidates = []
     for sailing_id, sailing in s.sailings.items():
         timing = eng.sailing_timing(sailing_id, s)
-        if sailing.departure <= anchor.departure:
+        if timing.planning_anchor <= anchor_timing.planning_anchor:
+            continue
+        if s.sailing_decisions.get(sailing_id) == "skip":
             continue
         if timing.timing_state in ("departed", "exceptional") and sailing_id not in s.pursuits:
             continue
-        boundary_candidates.append((sailing.departure, sailing_id, timing))
-    if not boundary_candidates:
-        raise ValueError("no viable sailing exists after the production anchor")
-    _, boundary_id, boundary_timing = min(boundary_candidates)
+        boundary_candidates.append((timing.planning_anchor, sailing_id, timing))
+    if boundary_candidates:
+        _, boundary_id, boundary_timing = min(boundary_candidates)
+        coverage_through = boundary_timing.warehouse_arrival
+        boundary_basis = "next_viable_sailing"
+        fallback_flagged = False
+    else:
+        boundary_id = None
+        coverage_through = (
+            anchor_timing.warehouse_arrival
+            + timedelta(days=sm.ORDERING_CYCLE_DAYS)
+        )
+        boundary_basis = "no_next_sailing_30_day_fallback"
+        fallback_flagged = True
     order_state = ("past_due" if order_date < eng.today else
                    "late_for_anchor" if order_date > anchor_timing.production_readiness
                    else "on_time")
@@ -126,10 +139,14 @@ def _factory_planning_context(eng, s, *, focus_sailing_id: str | None,
         "focus_sailing_id": focus_sailing_id,
         "production_anchor_sailing_id": production_anchor_sailing_id,
         "coverage_boundary_sailing_id": boundary_id,
+        "coverage_boundary_basis": boundary_basis,
+        "fallback_flagged": fallback_flagged,
         "factory_order_date": order_date,
+        "anchor_planning_basis": anchor_timing.planning_basis,
+        "anchor_planning_cutoff": anchor.bl_vgm_close,
         "anchor_production_readiness": anchor_timing.production_readiness,
-        "coverage_through": boundary_timing.warehouse_arrival,
-        "horizon_days": max(0, (boundary_timing.warehouse_arrival - eng.today).days),
+        "coverage_through": coverage_through,
+        "horizon_days": max(0, (coverage_through - eng.today).days),
         "order_timing_state": order_state,
     }
 
@@ -597,11 +614,22 @@ def compose_workspace(eng, plan_id: Optional[str] = None, principal=None,
 
     rail = []
     for sid, sl in sorted(s.sailings.items(),
-                          key=lambda kv: kv[1].departure):
+                          key=lambda kv: eng.sailing_timing(kv[0], s).planning_anchor):
         t = eng.sailing_timing(sid, s)
-        rail.append({
+        rail_row = {
             "sailing_id": sid, "carrier": sl.carrier, "name": sl.name,
             "departure": _s(sl.departure),
+            "loading_terminal_eta": _s(sl.loading_terminal_eta),
+            "eta": _s(sl.loading_terminal_eta),
+            "estimated_destination_arrival": _s(t.eta),
+            "estimated_warehouse_arrival": _s(t.warehouse_arrival),
+            "arrival_basis": t.arrival_basis,
+            "assumed_voyage_days": t.assumed_voyage_days,
+            "bl_vgm_close": _s(sl.bl_vgm_close),
+            "saes_reception": _s(sl.saes_reception),
+            "terminal": sl.terminal,
+            "planning_basis": t.planning_basis,
+            "planning_anchor": _s(t.planning_anchor),
             "timing_state": t.timing_state,
             "decision": s.sailing_decisions.get(sid, "watch"),
             "pursued": sid in s.pursuits,
@@ -610,7 +638,10 @@ def compose_workspace(eng, plan_id: Optional[str] = None, principal=None,
                              and p.lifecycle != "closed"), None),
             "excluded_from_normal": t.timing_state in ("exceptional",
                                                        "departed"),
-        })
+        }
+        if sl.voyage is not None:
+            rail_row["voyage"] = sl.voyage
+        rail.append(rail_row)
 
     focus = None
     if focus_sid is not None:
@@ -631,6 +662,8 @@ def compose_workspace(eng, plan_id: Optional[str] = None, principal=None,
                 "days_to_departure": t.days_to_departure,
             },
         }
+        if sl.voyage is not None:
+            focus["voyage"] = sl.voyage
 
     attention: list = []
     status, reason = ("ready", None)

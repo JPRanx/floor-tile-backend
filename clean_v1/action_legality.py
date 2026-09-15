@@ -68,7 +68,12 @@ def _entry(engine, principal, command: str, params: dict,
         decision_schema["enum"] = legal
         if not legal:
             return None
-    if not probe_action(engine, principal, action):
+    durable_catalog_create = (
+        command == "ResolveImplication"
+        and params.get("action") == "create"
+        and getattr(engine, "_durable_catalog_staging", False)
+    )
+    if not durable_catalog_create and not probe_action(engine, principal, action):
         return None
     return action
 
@@ -110,6 +115,9 @@ def compose_legal_actions(engine, principal, plan_id=None,
         if actor != required_actor:
             continue
         for typed_action in imp.typed_actions:
+            if (typed_action == "create"
+                    and not getattr(engine, "_durable_catalog_staging", False)):
+                continue
             if owner == "ashley" and typed_action == "accept_risk":
                 add(f"attention:{iid}", "AcceptImplicationRisk",
                     {"implication_id": iid}, "Aceptar riesgo")
@@ -121,6 +129,7 @@ def compose_legal_actions(engine, principal, plan_id=None,
                     "cancel_pursuit": "Cancelar excepción",
                     "chase_booking": "Gestionar reserva confirmada",
                     "confirm_reopen": "Confirmar reapertura",
+                    "create": "Crear producto desde esta referencia",
                     "discard": "Descartar fila",
                     "exclude_pending": "Excluir lo ya asignado",
                     "keep": "Mantener",

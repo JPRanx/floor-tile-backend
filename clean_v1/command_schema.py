@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Any, Callable
@@ -254,7 +254,23 @@ def _ids(fields):
 def _record_sailing(p, _):
     p["carrier"] = _text(p["carrier"], "carrier")
     p["name"] = _text(p["name"], "name")
-    p["departure"] = _date(p["departure"], "departure")
+    basis = p.get("planning_basis", "departure")
+    if basis not in ("departure", "bl_vgm_close"):
+        raise ValueError("invalid planning_basis")
+    p["planning_basis"] = basis
+    if p.get("departure") is not None:
+        p["departure"] = _date(p["departure"], "departure")
+    for field in ("loading_terminal_eta",):
+        if p.get(field) is not None:
+            p[field] = _date(p[field], field)
+    for field in ("bl_vgm_close", "saes_reception"):
+        if isinstance(p.get(field), str):
+            p[field] = datetime.fromisoformat(p[field])
+    if basis == "departure" and p.get("departure") is None:
+        raise ValueError("departure is required")
+    if basis == "bl_vgm_close" and any(p.get(field) is None for field in (
+            "voyage", "loading_terminal_eta", "bl_vgm_close", "saes_reception")):
+        raise ValueError("roster sailing requires voyage, ETA and closures")
     if "voyage_days" in p and (not isinstance(p["voyage_days"], int)
                                 or isinstance(p["voyage_days"], bool)
                                 or not 0 < p["voyage_days"] <= 365):
@@ -387,8 +403,6 @@ def _resolve(p, catalog):
     nested = p.get("params", {})
     if not isinstance(nested, dict):
         raise ValueError("params must be a nested object")
-    if p["action"] == "create":
-        raise ValueError("create is not a supported V1 product-match action")
     unknown = set(nested) - {"product_id", "note"}
     if unknown:
         raise ValueError(f"unknown nested field(s): {sorted(unknown)}")
@@ -481,7 +495,7 @@ def _correction(action, id_field):
 
 S = CommandSchema
 COMMAND_SCHEMAS = {
-    "RecordSailing": S(frozenset({"carrier", "name", "departure", "voyage_days", "as_of", "raw_source_ref"}), frozenset({"carrier", "name", "departure"}), _record_sailing),
+    "RecordSailing": S(frozenset({"carrier", "name", "departure", "voyage_days", "voyage", "loading_terminal_eta", "bl_vgm_close", "saes_reception", "terminal", "planning_basis", "as_of", "raw_source_ref"}), frozenset({"carrier", "name"}), _record_sailing),
     "ImportSailingCalendarText": S(frozenset({"text", "as_of", "raw_source_ref"}), frozenset({"text"}), lambda p, _: {**p, "text": _text(p["text"], "text", empty=True), **({"as_of": _date(p["as_of"], "as_of")} if "as_of" in p else {}), **({"raw_source_ref": _text(p["raw_source_ref"], "raw_source_ref")} if p.get("raw_source_ref") is not None else {})}),
     "SetSailingDecision": S(frozenset({"sailing_id", "decision"}), frozenset({"sailing_id", "decision"}), _decision, ("decision",)),
     "PursueExceptionalSailing": S(frozenset({"sailing_id"}), frozenset({"sailing_id"}), _ids(("sailing_id",))),

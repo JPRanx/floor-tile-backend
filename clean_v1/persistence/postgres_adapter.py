@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 from ..domain import Event, _ser, freeze, thaw
 from .. import sailing_domain as sd
+from ..production_catalog import product_from_inventory_reference
 from .ports import RequestPrincipal
 from .projections import rebuild_projection_tables
 
@@ -123,6 +124,8 @@ class PostgresUnitOfWork:
         self._committed = False
         self._command = None
         self._result = None
+        self._staged_catalog_products = {}
+        self._staged_catalog_mappings = {}
         try:
             self.cursor.execute(
                 "SELECT set_config('floor_tile.auth_user_id', %s, true)",
@@ -137,7 +140,9 @@ class PostgresUnitOfWork:
             adapter._assert_seed(self.cursor, self.principal.company_id)
             events = adapter._load_events(self.cursor, self.principal.company_id)
             self._base_head = len(events)
-            self._working_engine = adapter._engine_from_events(events)
+            products = adapter._load_catalog(self.cursor, self.principal.company_id)
+            self._working_engine = adapter._engine_from_events(events, products=products)
+            self._working_engine._durable_catalog_staging = True
         except Exception:
             self.connection.rollback()
             self.connection.close()
@@ -156,10 +161,95 @@ class PostgresUnitOfWork:
             raise RuntimeError("unit of work is terminal")
         if self._command is not None:
             raise RuntimeError("Postgres unit of work accepts one business command")
+        staged_product_id = None
+        if (command == "ResolveImplication" and params.get("action") == "create"):
+            implication = self._working_engine.state.implications.get(
+                params.get("implication_id"))
+            if (implication is None or implication.state != "open"
+                    or implication.family != "product_match"
+                    or (implication.scope or {}).get("feed") not in {
+                        "warehouse", "siesa_availability"}
+                    or "create" not in implication.typed_actions):
+                raise ValueError("create requires an open inventory product_match case")
+            product = product_from_inventory_reference(
+                str(implication.scope["raw_ref"]))
+            product_id = product["product_id"]
+            existing = self._working_engine.products.get(product_id)
+            if existing is not None and existing != product:
+                raise ValueError("derived product identity collides with catalog payload")
+            if existing is None:
+                self._working_engine.products[product_id] = copy.deepcopy(product)
+                self._staged_catalog_products[product_id] = copy.deepcopy(product)
+                staged_product_id = product_id
         token = self._working_engine.identity.token_for(self.principal.effective_actor)
-        result = self._working_engine.execute(command, params, token=token)
+        try:
+            result = self._working_engine.execute(command, params, token=token)
+            if staged_product_id is not None:
+                self._staged_catalog_mappings[str(implication.scope["raw_ref"])] = {
+                    "source_family": str(implication.scope["feed"]),
+                    "product_id": staged_product_id,
+                }
+        except Exception:
+            if staged_product_id is not None:
+                self._working_engine.products.pop(staged_product_id, None)
+                self._staged_catalog_products.pop(staged_product_id, None)
+                self._staged_catalog_mappings.pop(
+                    str(implication.scope["raw_ref"]), None)
+            raise
         self._command, self._result = command, result
         return result
+
+    def _persist_staged_catalog_products(self, head_after):
+        if not self._staged_catalog_products:
+            return
+        self.cursor.execute(
+            "SELECT user_id FROM floor_tile.app_users "
+            "WHERE auth_user_id=%s AND company_id=%s AND active",
+            (self.principal.auth_user_id, self.principal.company_id))
+        row = self.cursor.fetchone()
+        loaded_by = ((row.get("user_id") if isinstance(row, dict) else row[0])
+                     if row else None)
+        for product_id, product in sorted(self._staged_catalog_products.items()):
+            source_digest = canonical_parameter_sha256({
+                "authority": "inventory-reference-create-v1",
+                "company_id": self.principal.company_id,
+                "product": product,
+            })
+            load_id = uuid.uuid5(
+                _SEED_NAMESPACE,
+                f"{self.principal.company_id}:{source_digest}:catalog-create")
+            self.cursor.execute(
+                "INSERT INTO floor_tile.catalog_loads "
+                "(company_id,catalog_load_id,source_digest,loaded_by) "
+                "VALUES (%s,%s,%s,%s)",
+                (self.principal.company_id, load_id, source_digest, loaded_by))
+            self.cursor.execute(
+                "INSERT INTO floor_tile.catalog_product_versions "
+                "(company_id,catalog_load_id,product_id,version,sku,product_payload) "
+                "VALUES (%s,%s,%s,1,%s,%s)",
+                (self.principal.company_id, load_id, product_id,
+                 product.get("sku", product_id), _jsonb(product)))
+            self.cursor.execute(
+                "INSERT INTO floor_tile.current_product_catalog "
+                "(company_id,product_id,version,active,rebuilt_through_seq) "
+                "VALUES (%s,%s,1,%s,%s)",
+                (self.principal.company_id, product_id, True, head_after))
+        for raw_ref, mapping in sorted(self._staged_catalog_mappings.items()):
+            mapping_id = uuid.uuid5(
+                _SEED_NAMESPACE,
+                f"{self.principal.company_id}:{mapping['source_family']}:"
+                f"{raw_ref}:{mapping['product_id']}:mapping")
+            effective_from = datetime.combine(
+                self._working_engine.today, time.min, tzinfo=timezone.utc)
+            self.cursor.execute(
+                "INSERT INTO floor_tile.mapping_records "
+                "(company_id,mapping_id,source_family,source_product_ref,"
+                "product_id,mapping_status,effective_from,collision_witness) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.principal.company_id, mapping_id,
+                 mapping["source_family"], raw_ref, mapping["product_id"],
+                 "mapped", effective_from,
+                 _jsonb({"authority": "product-match-create-v1"})))
 
     def commit(self, *, command_id=None, idempotency_key=None,
                parameter_hash=None, status=200, body=None) -> DurableReceipt:
@@ -179,6 +269,7 @@ class PostgresUnitOfWork:
             self.adapter._insert_receipt(
                 self.cursor, self.principal, command_id, idempotency_key, receipt)
             self.adapter._inject("after_receipt")
+            self._persist_staged_catalog_products(head_after)
             self.adapter._append_events(
                 self.cursor, self.principal.company_id, command_id,
                 self._working_engine.state.events[self._base_head:])
@@ -368,10 +459,120 @@ class PostgresAdapter:
         cursor.execute(sql, tuple(args))
         return [decode_event_row(row) for row in cursor.fetchall()]
 
-    def _engine_from_events(self, events):
+    def _load_catalog(self, cursor, company_id):
+        cursor.execute(
+            "SELECT c.product_id,v.product_payload "
+            "FROM floor_tile.current_product_catalog c "
+            "JOIN floor_tile.catalog_product_versions v "
+            "ON c.company_id=v.company_id AND c.product_id=v.product_id "
+            "AND c.version=v.version "
+            "WHERE c.company_id=%s ORDER BY c.product_id",
+            (company_id,))
+        products = []
+        for row in cursor.fetchall():
+            product_id, payload = ((row.get("product_id"), row.get("product_payload"))
+                                   if isinstance(row, dict) else (row[0], row[1]))
+            product = copy.deepcopy(payload)
+            if not isinstance(product, dict):
+                raise ValueError("catalog product payload must be an object")
+            product["product_id"] = str(product_id)
+            products.append(product)
+        return sorted(products, key=lambda product: product["product_id"])
+
+    def _engine_from_events(self, events, *, products=None):
         engine = copy.deepcopy(self.engine_factory())
+        if products is not None:
+            engine.products = {
+                product["product_id"]: copy.deepcopy(product)
+                for product in sorted(products, key=lambda item: item["product_id"])
+            }
         engine.bus.state = sd.fold(events)
         return engine
+
+    def bootstrap_catalog(self, principal: RequestPrincipal, *, products,
+                          warehouse_sha256: str, siesa_sha256: str,
+                          source_digest: str):
+        """Atomically install one explicit two-inventory initial catalog."""
+        expected = sorted((copy.deepcopy(product) for product in products),
+                          key=lambda product: product["product_id"])
+        ids = [str(product["product_id"]) for product in expected]
+        if not expected or len(ids) != len(set(ids)):
+            raise ValueError("bootstrap catalog must contain unique products")
+        for value in (warehouse_sha256, siesa_sha256, source_digest):
+            if (not isinstance(value, str) or len(value) != 64
+                    or any(character not in "0123456789abcdef" for character in value)):
+                raise ValueError("bootstrap source digests must be lowercase sha256")
+
+        connection = self._connect()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT set_config('floor_tile.auth_user_id', %s, true)",
+                (principal.auth_user_id,))
+            cursor.execute(
+                "SELECT set_config('floor_tile.company_id', %s, true)",
+                (principal.company_id,))
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                           (principal.company_id,))
+            principal = self._authoritative_principal(cursor, principal)
+            if principal.role != "administrator":
+                raise PermissionError("catalog bootstrap requires administrator role")
+            self._assert_seed(cursor, principal.company_id)
+
+            current = self._load_catalog(cursor, principal.company_id)
+            if current:
+                cursor.execute(
+                    "SELECT 1 FROM floor_tile.catalog_loads "
+                    "WHERE company_id=%s AND source_digest=%s",
+                    (principal.company_id, source_digest))
+                same_load = cursor.fetchone() is not None
+                if (same_load and canonical_parameter_sha256(current)
+                        == canonical_parameter_sha256(expected)):
+                    connection.commit()
+                    return {"applied": True, "replayed": True,
+                            "product_count": len(expected),
+                            "source_digest": source_digest}
+                raise ValueError("company catalog is already initialized")
+
+            cursor.execute(
+                "SELECT user_id FROM floor_tile.app_users "
+                "WHERE auth_user_id=%s AND company_id=%s AND active",
+                (principal.auth_user_id, principal.company_id))
+            row = cursor.fetchone()
+            loaded_by = ((row.get("user_id") if isinstance(row, dict) else row[0])
+                         if row else None)
+            load_id = uuid.uuid5(
+                _SEED_NAMESPACE,
+                f"{principal.company_id}:{source_digest}:two-inventory-bootstrap")
+            cursor.execute(
+                "INSERT INTO floor_tile.catalog_loads "
+                "(company_id,catalog_load_id,source_digest,loaded_by) "
+                "VALUES (%s,%s,%s,%s)",
+                (principal.company_id, load_id, source_digest, loaded_by))
+            head = len(self._load_events(cursor, principal.company_id))
+            for product in expected:
+                product_id = str(product["product_id"])
+                cursor.execute(
+                    "INSERT INTO floor_tile.catalog_product_versions "
+                    "(company_id,catalog_load_id,product_id,version,sku,product_payload) "
+                    "VALUES (%s,%s,%s,1,%s,%s)",
+                    (principal.company_id, load_id, product_id,
+                     product.get("sku", product_id), _jsonb(product)))
+                cursor.execute(
+                    "INSERT INTO floor_tile.current_product_catalog "
+                    "(company_id,product_id,version,active,rebuilt_through_seq) "
+                    "VALUES (%s,%s,1,%s,%s)",
+                    (principal.company_id, product_id, True, head))
+            self._inject("after_catalog_bootstrap")
+            connection.commit()
+            return {"applied": True, "replayed": False,
+                    "product_count": len(expected),
+                    "source_digest": source_digest}
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def load_engine(self, principal: RequestPrincipal, *, through=None):
         connection = self._connect()
@@ -384,7 +585,11 @@ class PostgresAdapter:
                 "SELECT set_config('floor_tile.company_id', %s, true)",
                 (principal.company_id,))
             self._assert_seed(cursor, principal.company_id)
-            return self._engine_from_events(self._load_events(cursor, principal.company_id, through))
+            events = self._load_events(cursor, principal.company_id, through)
+            products = self._load_catalog(cursor, principal.company_id)
+            engine = self._engine_from_events(events, products=products)
+            engine._durable_catalog_staging = True
+            return engine
         finally:
             connection.rollback()
             connection.close()
